@@ -49,3 +49,5 @@ lib/firebase_options.dart
 
 # LOCAL CONFIG 
 android/local.properties
+# Gradle local cache
+.gradle_user_home/
