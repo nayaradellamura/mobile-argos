@@ -117,20 +117,22 @@ class _AiChatPageState extends State<AiChatPage> {
   Future<void> _openCamera() async {
     FocusScope.of(context).unfocus();
 
-    final XFile? photo = await Navigator.of(
+    final List<XFile>? photos = await Navigator.of(
       context,
-    ).push<XFile?>(MaterialPageRoute(builder: (_) => const CameraPage()));
+    ).push<List<XFile>?>(MaterialPageRoute(builder: (_) => const CameraPage()));
 
-    if (photo == null) return;
+    if (photos == null || photos.isEmpty) return;
 
     setState(() {
-      messages.add(
-        ChatMessage(
-          type: ChatMessageType.photo,
-          text: 'Foto anexada à vistoria',
-          imagePath: photo.path,
-        ),
-      );
+      for (final photo in photos) {
+        messages.add(
+          ChatMessage(
+            type: ChatMessageType.photo,
+            text: 'Foto anexada à vistoria',
+            imagePath: photo.path,
+          ),
+        );
+      }
     });
 
     _scrollToBottom();
@@ -140,10 +142,10 @@ class _AiChatPageState extends State<AiChatPage> {
 
       setState(() {
         messages.add(
-          const ChatMessage(
+          ChatMessage(
             type: ChatMessageType.ai,
             text:
-                'Foto recebida. Verifique se o dano está bem enquadrado e, se possível, envie também um relato técnico por áudio ou texto.',
+                '${photos.length} foto${photos.length > 1 ? 's' : ''} recebida${photos.length > 1 ? 's' : ''}. Essas evidências serão vinculadas à vistoria.',
           ),
         );
       });
