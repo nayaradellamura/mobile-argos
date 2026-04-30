@@ -174,7 +174,7 @@ class _SplashPageState extends State<SplashPage> {
                     return Opacity(opacity: value, child: child);
                   },
                   child: Text(
-                    'PRECISION MONITORING',
+                    'INSPEÇÃO INTELIGENTE',
                     style: GoogleFonts.inter(
                       fontSize: 11,
                       letterSpacing: 3.6,
