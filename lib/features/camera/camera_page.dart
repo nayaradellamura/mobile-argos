@@ -11,19 +11,16 @@ class CameraPage extends StatefulWidget {
   State<CameraPage> createState() => _CameraPageState();
 }
 
-class _CameraPageState extends State<CameraPage>
-    with WidgetsBindingObserver, AutomaticKeepAliveClientMixin {
+class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
   CameraController? _controller;
   List<CameraDescription> _cameras = [];
 
-  bool _isInitializing = true;
-  bool _isTakingPicture = false;
   int _selectedCameraIndex = 0;
 
-  XFile? _capturedImage;
+  bool _isInitializing = true;
+  bool _isTakingPicture = false;
 
-  @override
-  bool get wantKeepAlive => true;
+  XFile? _capturedImage;
 
   @override
   void initState() {
@@ -35,23 +32,30 @@ class _CameraPageState extends State<CameraPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _controller?.dispose();
+    _disposeCamera();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    final controller = _controller;
-
-    if (controller == null || !controller.value.isInitialized) return;
+    if (!mounted) return;
 
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused) {
-      controller.dispose();
+      _disposeCamera();
     }
 
-    if (state == AppLifecycleState.resumed) {
+    if (state == AppLifecycleState.resumed && _capturedImage == null) {
       _initializeCamera(_selectedCameraIndex);
+    }
+  }
+
+  Future<void> _disposeCamera() async {
+    final controller = _controller;
+    _controller = null;
+
+    if (controller != null) {
+      await controller.dispose();
     }
   }
 
@@ -71,12 +75,13 @@ class _CameraPageState extends State<CameraPage>
 
       _selectedCameraIndex = cameraIndex.clamp(0, _cameras.length - 1);
 
-      await _controller?.dispose();
+      await _disposeCamera();
 
       final controller = CameraController(
         _cameras[_selectedCameraIndex],
         ResolutionPreset.high,
         enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.jpeg,
       );
 
       _controller = controller;
@@ -126,12 +131,7 @@ class _CameraPageState extends State<CameraPage>
         _capturedImage = image;
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Foto capturada com sucesso.'),
-          backgroundColor: Colors.green,
-        ),
-      );
+      await _disposeCamera();
     } catch (e) {
       if (!mounted) return;
 
@@ -151,29 +151,44 @@ class _CameraPageState extends State<CameraPage>
   }
 
   Future<void> _switchCamera() async {
-    if (_cameras.length < 2 || _isInitializing) return;
+    if (_cameras.length < 2 || _isInitializing || _capturedImage != null) {
+      return;
+    }
 
     final nextIndex = (_selectedCameraIndex + 1) % _cameras.length;
-
-    setState(() {
-      _capturedImage = null;
-    });
 
     await _initializeCamera(nextIndex);
   }
 
-  void _clearCapturedImage() {
+  Future<void> _retakePhoto() async {
     setState(() {
       _capturedImage = null;
     });
+
+    await _initializeCamera(_selectedCameraIndex);
   }
 
-  Widget _buildCameraPreview() {
+  void _usePhoto() {
+    if (_capturedImage == null) return;
+
+    Navigator.of(context).pop<XFile>(_capturedImage);
+  }
+
+  Future<void> _closePage() async {
+    await _disposeCamera();
+
+    if (!mounted) return;
+
+    Navigator.of(context).pop<XFile?>(null);
+  }
+
+  Widget _buildPreview() {
+    final capturedImage = _capturedImage;
     final controller = _controller;
 
-    if (_capturedImage != null) {
+    if (capturedImage != null) {
       return Image.file(
-        File(_capturedImage!.path),
+        File(capturedImage.path),
         width: double.infinity,
         height: double.infinity,
         fit: BoxFit.cover,
@@ -182,9 +197,7 @@ class _CameraPageState extends State<CameraPage>
 
     if (_isInitializing || controller == null) {
       return const Center(
-        child: CircularProgressIndicator(
-          color: Colors.white,
-        ),
+        child: CircularProgressIndicator(color: Colors.white),
       );
     }
 
@@ -193,7 +206,7 @@ class _CameraPageState extends State<CameraPage>
       return const Center(
         child: Text(
           'Câmera não inicializada',
-          style: TextStyle(color: Colors.white),
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
         ),
       );
     }
@@ -214,166 +227,145 @@ class _CameraPageState extends State<CameraPage>
 
   @override
   Widget build(BuildContext context) {
-    super.build(context);
-
     final hasCapturedImage = _capturedImage != null;
 
-    return SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(24, 24, 24, 120),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Stack(
           children: [
-            Text(
-              'Câmera',
-              style: GoogleFonts.spaceGrotesk(
-                color: const Color(0xFF0057C0),
-                fontSize: 34,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              'Capture evidências fotográficas da vistoria.',
-              style: TextStyle(
-                color: Color(0xFF414755),
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            const SizedBox(height: 28),
+            Positioned.fill(child: _buildPreview()),
 
-            Container(
-              width: double.infinity,
-              height: 460,
-              decoration: BoxDecoration(
-                color: Colors.black,
-                borderRadius: BorderRadius.circular(32),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(.16),
-                    blurRadius: 30,
-                    offset: const Offset(0, 12),
+            Positioned.fill(
+              child: IgnorePointer(
+                child: Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [
+                        Colors.black.withOpacity(.55),
+                        Colors.transparent,
+                        Colors.black.withOpacity(.75),
+                      ],
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+            Positioned(
+              top: 18,
+              left: 18,
+              right: 18,
+              child: Row(
+                children: [
+                  IconButton(
+                    onPressed: _closePage,
+                    style: IconButton.styleFrom(
+                      backgroundColor: Colors.black.withOpacity(.45),
+                      foregroundColor: Colors.white,
+                    ),
+                    icon: const Icon(Icons.close),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'Captura de Evidência',
+                      style: GoogleFonts.spaceGrotesk(
+                        color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: hasCapturedImage ? null : _switchCamera,
+                    style: IconButton.styleFrom(
+                      backgroundColor: Colors.black.withOpacity(.45),
+                      foregroundColor: Colors.white,
+                      disabledForegroundColor: Colors.white38,
+                    ),
+                    icon: const Icon(Icons.cameraswitch),
                   ),
                 ],
               ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(32),
-                child: Stack(
+            ),
+
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 28),
+                child: AspectRatio(
+                  aspectRatio: .72,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(32),
+                      border: Border.all(
+                        color: Colors.white.withOpacity(.35),
+                        width: 2,
+                      ),
+                    ),
+                    child: Stack(
+                      children: const [
+                        _CornerGuide(
+                          alignment: Alignment.topLeft,
+                          top: true,
+                          left: true,
+                        ),
+                        _CornerGuide(
+                          alignment: Alignment.topRight,
+                          top: true,
+                          right: true,
+                        ),
+                        _CornerGuide(
+                          alignment: Alignment.bottomLeft,
+                          bottom: true,
+                          left: true,
+                        ),
+                        _CornerGuide(
+                          alignment: Alignment.bottomRight,
+                          bottom: true,
+                          right: true,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+            Positioned(
+              top: 88,
+              left: 24,
+              right: 24,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(.45),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: Colors.white.withOpacity(.08)),
+                ),
+                child: Row(
                   children: [
-                    Positioned.fill(
-                      child: _buildCameraPreview(),
+                    const Icon(
+                      Icons.remove_red_eye,
+                      color: Color(0xFFE5F6FF),
+                      size: 18,
                     ),
-
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        child: Padding(
-                          padding: const EdgeInsets.all(30),
-                          child: Container(
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(28),
-                              border: Border.all(
-                                color: Colors.white.withOpacity(.35),
-                                width: 2,
-                              ),
-                            ),
-                          ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        hasCapturedImage
+                            ? 'Foto capturada. Confira antes de anexar.'
+                            : 'Posicione o dano dentro do quadro.',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
                         ),
-                      ),
-                    ),
-
-                    Positioned(
-                      top: 18,
-                      left: 18,
-                      right: 18,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 12,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(.48),
-                          borderRadius: BorderRadius.circular(18),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(
-                              Icons.remove_red_eye,
-                              color: Color(0xFFE5F6FF),
-                              size: 18,
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                hasCapturedImage
-                                    ? 'Foto capturada para análise'
-                                    : 'Posicione o dano dentro do quadro',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-
-                    Positioned(
-                      bottom: 18,
-                      left: 18,
-                      right: 18,
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          _CameraSmallButton(
-                            icon: hasCapturedImage
-                                ? Icons.close
-                                : Icons.photo_library,
-                            label: hasCapturedImage ? 'Limpar' : 'Galeria',
-                            onTap:
-                                hasCapturedImage ? _clearCapturedImage : null,
-                          ),
-
-                          GestureDetector(
-                            onTap: hasCapturedImage ? null : _takePicture,
-                            child: AnimatedContainer(
-                              duration: const Duration(milliseconds: 180),
-                              width: 82,
-                              height: 82,
-                              padding: const EdgeInsets.all(6),
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: Colors.white.withOpacity(.75),
-                                  width: 4,
-                                ),
-                              ),
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  color: _isTakingPicture
-                                      ? Colors.white.withOpacity(.65)
-                                      : Colors.white,
-                                  shape: BoxShape.circle,
-                                ),
-                                child: _isTakingPicture
-                                    ? const Center(
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: Color(0xFF0057C0),
-                                        ),
-                                      )
-                                    : null,
-                              ),
-                            ),
-                          ),
-
-                          _CameraSmallButton(
-                            icon: Icons.cameraswitch,
-                            label: 'Virar',
-                            onTap: hasCapturedImage ? null : _switchCamera,
-                          ),
-                        ],
                       ),
                     ),
                   ],
@@ -381,63 +373,84 @@ class _CameraPageState extends State<CameraPage>
               ),
             ),
 
-            if (hasCapturedImage) ...[
-              const SizedBox(height: 22),
-              SizedBox(
-                width: double.infinity,
-                height: 58,
-                child: ElevatedButton.icon(
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text(
-                          'Imagem vinculada à vistoria simulada.',
-                        ),
-                        backgroundColor: Colors.green,
-                      ),
-                    );
-                  },
-                  icon: const Icon(Icons.check_circle),
-                  label: const Text('Usar esta foto na vistoria'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF0057C0),
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-
-            const SizedBox(height: 20),
-
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(18),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(
-                  color: Colors.black.withOpacity(.05),
-                ),
-              ),
-              child: Row(
+            Positioned(
+              left: 24,
+              right: 24,
+              bottom: 28,
+              child: Column(
                 children: [
-                  const Icon(
-                    Icons.info_outline,
-                    color: Color(0xFF0057C0),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      'Dica: fotografe o dano com boa iluminação e tente manter a peça inteira visível.',
-                      style: GoogleFonts.inter(
-                        color: const Color(0xFF414755),
-                        fontWeight: FontWeight.w600,
-                        height: 1.35,
+                  if (hasCapturedImage)
+                    SizedBox(
+                      width: double.infinity,
+                      height: 56,
+                      child: ElevatedButton.icon(
+                        onPressed: _usePhoto,
+                        icon: const Icon(Icons.check_circle),
+                        label: const Text('Usar esta foto na vistoria'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF0057C0),
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                        ),
                       ),
                     ),
+
+                  if (hasCapturedImage) const SizedBox(height: 14),
+
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      _CameraOptionButton(
+                        icon: hasCapturedImage
+                            ? Icons.refresh
+                            : Icons.photo_library_outlined,
+                        label: hasCapturedImage ? 'Refazer' : 'Galeria',
+                        onTap: hasCapturedImage ? _retakePhoto : null,
+                      ),
+
+                      GestureDetector(
+                        onTap: hasCapturedImage ? null : _takePicture,
+                        child: AnimatedOpacity(
+                          duration: const Duration(milliseconds: 180),
+                          opacity: hasCapturedImage ? .35 : 1,
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 180),
+                            width: 84,
+                            height: 84,
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: Colors.white.withOpacity(.78),
+                                width: 4,
+                              ),
+                            ),
+                            child: Container(
+                              decoration: const BoxDecoration(
+                                color: Colors.white,
+                                shape: BoxShape.circle,
+                              ),
+                              child: _isTakingPicture
+                                  ? const Center(
+                                      child: CircularProgressIndicator(
+                                        color: Color(0xFF0057C0),
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : null,
+                            ),
+                          ),
+                        ),
+                      ),
+
+                      _CameraOptionButton(
+                        icon: Icons.cameraswitch,
+                        label: 'Virar',
+                        onTap: hasCapturedImage ? null : _switchCamera,
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -449,12 +462,55 @@ class _CameraPageState extends State<CameraPage>
   }
 }
 
-class _CameraSmallButton extends StatelessWidget {
+class _CornerGuide extends StatelessWidget {
+  final Alignment alignment;
+  final bool top;
+  final bool bottom;
+  final bool left;
+  final bool right;
+
+  const _CornerGuide({
+    required this.alignment,
+    this.top = false,
+    this.bottom = false,
+    this.left = false,
+    this.right = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: alignment,
+      child: Container(
+        width: 36,
+        height: 36,
+        decoration: BoxDecoration(
+          border: Border(
+            top: top
+                ? const BorderSide(color: Color(0xFFE5F6FF), width: 4)
+                : BorderSide.none,
+            bottom: bottom
+                ? const BorderSide(color: Color(0xFFE5F6FF), width: 4)
+                : BorderSide.none,
+            left: left
+                ? const BorderSide(color: Color(0xFFE5F6FF), width: 4)
+                : BorderSide.none,
+            right: right
+                ? const BorderSide(color: Color(0xFFE5F6FF), width: 4)
+                : BorderSide.none,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CameraOptionButton extends StatelessWidget {
   final IconData icon;
   final String label;
   final VoidCallback? onTap;
 
-  const _CameraSmallButton({
+  const _CameraOptionButton({
     required this.icon,
     required this.label,
     this.onTap,
@@ -472,21 +528,16 @@ class _CameraSmallButton extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              width: 52,
-              height: 52,
+              width: 54,
+              height: 54,
               decoration: BoxDecoration(
                 color: Colors.black.withOpacity(.45),
                 borderRadius: BorderRadius.circular(18),
-                border: Border.all(
-                  color: Colors.white.withOpacity(.15),
-                ),
+                border: Border.all(color: Colors.white.withOpacity(.14)),
               ),
-              child: Icon(
-                icon,
-                color: Colors.white,
-              ),
+              child: Icon(icon, color: Colors.white),
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 7),
             Text(
               label.toUpperCase(),
               style: const TextStyle(
