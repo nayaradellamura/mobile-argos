@@ -5,6 +5,8 @@ import 'dart:math';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
 
 import '../camera/camera_page.dart';
 
@@ -14,8 +16,16 @@ class ChatMessage {
   final ChatMessageType type;
   final String text;
   final String? imagePath;
+  final String? audioPath;
+  final int? durationSeconds;
 
-  const ChatMessage({required this.type, required this.text, this.imagePath});
+  const ChatMessage({
+    required this.type,
+    required this.text,
+    this.imagePath,
+    this.audioPath,
+    this.durationSeconds,
+  });
 }
 
 class AiChatPage extends StatefulWidget {
@@ -28,6 +38,7 @@ class AiChatPage extends StatefulWidget {
 class _AiChatPageState extends State<AiChatPage> {
   final TextEditingController messageController = TextEditingController();
   final ScrollController scrollController = ScrollController();
+  final AudioRecorder audioRecorder = AudioRecorder();
 
   final List<ChatMessage> messages = [
     const ChatMessage(
@@ -38,15 +49,17 @@ class _AiChatPageState extends State<AiChatPage> {
     const ChatMessage(
       type: ChatMessageType.ai,
       text:
-          'Descreva os principais pontos de impacto ou envie uma foto da avaria.',
+          'Descreva os principais pontos de impacto ou envie fotos e áudio da avaria.',
     ),
   ];
 
   bool hasText = false;
   bool isRecording = false;
+  bool isStartingRecording = false;
 
   Timer? recordingTimer;
   int recordingSeconds = 0;
+  String? currentRecordingPath;
 
   @override
   void initState() {
@@ -65,10 +78,28 @@ class _AiChatPageState extends State<AiChatPage> {
 
   @override
   void dispose() {
+    recordingTimer?.cancel();
+
+    if (isRecording) {
+      audioRecorder.stop();
+    }
+
+    audioRecorder.dispose();
     messageController.dispose();
     scrollController.dispose();
-    recordingTimer?.cancel();
+
     super.dispose();
+  }
+
+  void _showSnack(
+    String message, {
+    Color backgroundColor = const Color(0xFF0057C0),
+  }) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), backgroundColor: backgroundColor),
+    );
   }
 
   void _scrollToBottom() {
@@ -140,12 +171,14 @@ class _AiChatPageState extends State<AiChatPage> {
     Future.delayed(const Duration(milliseconds: 650), () {
       if (!mounted) return;
 
+      final quantity = photos.length;
+
       setState(() {
         messages.add(
           ChatMessage(
             type: ChatMessageType.ai,
             text:
-                '${photos.length} foto${photos.length > 1 ? 's' : ''} recebida${photos.length > 1 ? 's' : ''}. Essas evidências serão vinculadas à vistoria.',
+                '$quantity foto${quantity > 1 ? 's' : ''} recebida${quantity > 1 ? 's' : ''}. Essas evidências serão vinculadas à vistoria.',
           ),
         );
       });
@@ -154,46 +187,178 @@ class _AiChatPageState extends State<AiChatPage> {
     });
   }
 
-  void _startRecording() {
+  Future<String> _createAudioFilePath() async {
+    final directory = await getApplicationDocumentsDirectory();
+
+    final audioDirectory = Directory('${directory.path}/argos_audios');
+
+    if (!await audioDirectory.exists()) {
+      await audioDirectory.create(recursive: true);
+    }
+
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+
+    return '${audioDirectory.path}/argos_audio_$timestamp.m4a';
+  }
+
+  Future<void> _startRecording() async {
+    if (isRecording || isStartingRecording) return;
+
     FocusScope.of(context).unfocus();
 
     setState(() {
-      isRecording = true;
-      recordingSeconds = 0;
+      isStartingRecording = true;
     });
 
-    recordingTimer?.cancel();
-    recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    try {
+      final hasPermission = await audioRecorder.hasPermission();
+
+      if (!hasPermission) {
+        _showSnack(
+          'Permissão de microfone necessária para gravar áudio.',
+          backgroundColor: Colors.orange,
+        );
+        return;
+      }
+
+      final path = await _createAudioFilePath();
+
+      await audioRecorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.aacLc,
+          bitRate: 128000,
+          sampleRate: 44100,
+          numChannels: 1,
+        ),
+        path: path,
+      );
+
       if (!mounted) return;
 
       setState(() {
-        recordingSeconds++;
+        isRecording = true;
+        recordingSeconds = 0;
+        currentRecordingPath = path;
       });
+
+      recordingTimer?.cancel();
+      recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (!mounted) return;
+
+        setState(() {
+          recordingSeconds++;
+        });
+      });
+    } catch (e) {
+      debugPrint('Start recording error: $e');
+
+      _showSnack(
+        'Erro ao iniciar gravação de áudio.',
+        backgroundColor: Colors.redAccent,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          isStartingRecording = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _cancelRecording() async {
+    recordingTimer?.cancel();
+
+    if (isRecording) {
+      try {
+        await audioRecorder.stop();
+      } catch (_) {}
+    }
+
+    final path = currentRecordingPath;
+
+    if (path != null) {
+      final file = File(path);
+
+      if (await file.exists()) {
+        try {
+          await file.delete();
+        } catch (_) {}
+      }
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      isRecording = false;
+      isStartingRecording = false;
+      recordingSeconds = 0;
+      currentRecordingPath = null;
     });
   }
 
-  void _cancelRecording() {
+  Future<void> _finishRecording() async {
+    if (!isRecording) return;
+
+    final duration = recordingSeconds;
+    final fallbackPath = currentRecordingPath;
+
     recordingTimer?.cancel();
+
+    String? recordedPath;
+
+    try {
+      recordedPath = await audioRecorder.stop();
+    } catch (e) {
+      debugPrint('Stop recording error: $e');
+    }
+
+    final path = recordedPath ?? fallbackPath;
+
+    if (!mounted) return;
 
     setState(() {
       isRecording = false;
       recordingSeconds = 0;
+      currentRecordingPath = null;
     });
-  }
 
-  void _finishRecording() {
-    final duration = _formatDuration(recordingSeconds);
+    if (path == null) {
+      _showSnack(
+        'Não foi possível salvar o áudio.',
+        backgroundColor: Colors.redAccent,
+      );
+      return;
+    }
 
-    recordingTimer?.cancel();
+    final file = File(path);
+
+    if (!await file.exists()) {
+      _showSnack(
+        'Arquivo de áudio não encontrado.',
+        backgroundColor: Colors.redAccent,
+      );
+      return;
+    }
+
+    if (duration <= 0) {
+      try {
+        await file.delete();
+      } catch (_) {}
+
+      _showSnack(
+        'Gravação muito curta. Grave novamente.',
+        backgroundColor: Colors.orange,
+      );
+      return;
+    }
 
     setState(() {
-      isRecording = false;
-      recordingSeconds = 0;
-
       messages.add(
         ChatMessage(
           type: ChatMessageType.audio,
-          text: 'Áudio técnico enviado • $duration',
+          text: '• ${_formatDuration(duration)}',
+          audioPath: path,
+          durationSeconds: duration,
         ),
       );
     });
@@ -205,11 +370,7 @@ class _AiChatPageState extends State<AiChatPage> {
 
       setState(() {
         messages.add(
-          const ChatMessage(
-            type: ChatMessageType.ai,
-            text:
-                'Áudio recebido. Na versão final, esse relato poderá ser transcrito e usado junto às imagens para gerar o laudo estruturado.',
-          ),
+          const ChatMessage(type: ChatMessageType.ai, text: 'Áudio recebido.'),
         );
       });
 
@@ -231,7 +392,7 @@ class _AiChatPageState extends State<AiChatPage> {
     return SafeArea(
       child: Column(
         children: [
-          _ChatHeader(),
+          const _ChatHeader(),
 
           Expanded(
             child: ListView.builder(
@@ -269,6 +430,7 @@ class _AiChatPageState extends State<AiChatPage> {
                     key: const ValueKey('composer'),
                     controller: messageController,
                     hasText: hasText,
+                    isStartingRecording: isStartingRecording,
                     onCameraTap: _openCamera,
                     onSendTap: _sendTextMessage,
                     onMicTap: _startRecording,
@@ -281,6 +443,8 @@ class _AiChatPageState extends State<AiChatPage> {
 }
 
 class _ChatHeader extends StatelessWidget {
+  const _ChatHeader();
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -367,7 +531,7 @@ class _ChatBubble extends StatelessWidget {
         return _PhotoBubble(text: message.text, imagePath: message.imagePath);
 
       case ChatMessageType.audio:
-        return _AudioBubble(text: message.text);
+        return _AudioBubble(text: message.text, audioPath: message.audioPath);
     }
   }
 }
@@ -517,36 +681,67 @@ class _PhotoBubble extends StatelessWidget {
 
 class _AudioBubble extends StatelessWidget {
   final String text;
+  final String? audioPath;
 
-  const _AudioBubble({required this.text});
+  const _AudioBubble({required this.text, required this.audioPath});
 
   @override
   Widget build(BuildContext context) {
+    final fileName = audioPath == null
+        ? 'audio.m4a'
+        : audioPath!.split(Platform.pathSeparator).last;
+
     return Row(
       mainAxisAlignment: MainAxisAlignment.end,
       children: [
         Flexible(
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-            decoration: BoxDecoration(
-              color: const Color(0xFF0057C0),
-              borderRadius: BorderRadius.circular(22),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.play_arrow, color: Colors.white),
-                const SizedBox(width: 8),
-                const _StaticAudioBars(),
-                const SizedBox(width: 10),
-                Text(
-                  text,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w700,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 300),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0057C0),
+                borderRadius: BorderRadius.circular(22),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.graphic_eq,
+                        color: Colors.white,
+                        size: 22,
+                      ),
+                      const SizedBox(width: 8),
+                      const _StaticAudioBars(),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          text,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-              ],
+                  const SizedBox(height: 8),
+                  Text(
+                    'Arquivo salvo: $fileName',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Colors.white.withOpacity(.72),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -558,6 +753,7 @@ class _AudioBubble extends StatelessWidget {
 class _TextComposer extends StatelessWidget {
   final TextEditingController controller;
   final bool hasText;
+  final bool isStartingRecording;
   final VoidCallback onCameraTap;
   final VoidCallback onSendTap;
   final VoidCallback onMicTap;
@@ -566,6 +762,7 @@ class _TextComposer extends StatelessWidget {
     super.key,
     required this.controller,
     required this.hasText,
+    required this.isStartingRecording,
     required this.onCameraTap,
     required this.onSendTap,
     required this.onMicTap,
@@ -629,6 +826,7 @@ class _TextComposer extends StatelessWidget {
                     key: const ValueKey('mic'),
                     icon: Icons.mic,
                     onTap: onMicTap,
+                    isLoading: isStartingRecording,
                   ),
           ),
         ],
@@ -700,11 +898,13 @@ class _RecordingComposer extends StatelessWidget {
 class _RoundActionButton extends StatelessWidget {
   final IconData icon;
   final VoidCallback onTap;
+  final bool isLoading;
 
   const _RoundActionButton({
     super.key,
     required this.icon,
     required this.onTap,
+    this.isLoading = false,
   });
 
   @override
@@ -714,11 +914,22 @@ class _RoundActionButton extends StatelessWidget {
       shape: const CircleBorder(),
       child: InkWell(
         customBorder: const CircleBorder(),
-        onTap: onTap,
+        onTap: isLoading ? null : onTap,
         child: SizedBox(
           width: 48,
           height: 48,
-          child: Icon(icon, color: Colors.white, size: 21),
+          child: Center(
+            child: isLoading
+                ? const SizedBox(
+                    width: 19,
+                    height: 19,
+                    child: CircularProgressIndicator(
+                      color: Colors.white,
+                      strokeWidth: 2,
+                    ),
+                  )
+                : Icon(icon, color: Colors.white, size: 21),
+          ),
         ),
       ),
     );
@@ -735,8 +946,6 @@ class _AnimatedAudioWaves extends StatefulWidget {
 class _AnimatedAudioWavesState extends State<_AnimatedAudioWaves>
     with SingleTickerProviderStateMixin {
   late final AnimationController controller;
-
-  final random = Random();
 
   @override
   void initState() {
