@@ -52,11 +52,5 @@ class DefaultFirebaseOptions {
     }
   }
 
-  static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'AIzaSyADqzVITu18A_mQzvBgj9bU0LlM8s-736k',
-    appId: '1:106941102363:android:11db267d6a3de28e207bbe',
-    messagingSenderId: '106941102363',
-    projectId: 'fho-argos',
-    storageBucket: 'fho-argos.firebasestorage.app',
-  );
+
 }
