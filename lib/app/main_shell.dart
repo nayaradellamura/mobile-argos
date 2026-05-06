@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
@@ -17,30 +18,121 @@ class MainShell extends StatefulWidget {
 class _MainShellState extends State<MainShell> {
   int selectedIndex = 0;
 
-  late final List<Widget> pages = [
-    InspectionsPage(
-      onOpenInspection: () {
-        setState(() {
-          selectedIndex = 1;
-        });
-      },
-    ),
-    const AiChatPage(),
-    ProfilePage(user: widget.user),
-  ];
+  bool isLoadingProfile = true;
+  bool profileCompletionRequired = false;
+
+  String get _emailKey => (widget.user.email ?? '').trim().toLowerCase();
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProfileCompletionStatus();
+  }
+
+  Future<void> _loadProfileCompletionStatus() async {
+    final email = _emailKey;
+
+    if (email.isEmpty) {
+      setState(() {
+        isLoadingProfile = false;
+        profileCompletionRequired = true;
+        selectedIndex = 2;
+      });
+
+      return;
+    }
+
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(email)
+          .get();
+
+      final data = doc.data();
+      final isComplete = data?['cadastroCompleto'] == true;
+
+      if (!mounted) return;
+
+      setState(() {
+        profileCompletionRequired = !isComplete;
+        selectedIndex = isComplete ? 0 : 2;
+        isLoadingProfile = false;
+      });
+    } catch (e) {
+      debugPrint('Profile completion check error: $e');
+
+      if (!mounted) return;
+
+      setState(() {
+        profileCompletionRequired = true;
+        selectedIndex = 2;
+        isLoadingProfile = false;
+      });
+    }
+  }
+
+  void _handleProfileCompleted() {
+    setState(() {
+      profileCompletionRequired = false;
+      selectedIndex = 0;
+    });
+  }
+
+  void _handleNavTap(int index) {
+    if (profileCompletionRequired && index != 2) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Finalize seu cadastro para continuar.'),
+          backgroundColor: Color(0xFF0057C0),
+        ),
+      );
+
+      setState(() {
+        selectedIndex = 2;
+      });
+
+      return;
+    }
+
+    setState(() {
+      selectedIndex = index;
+    });
+  }
+
+  List<Widget> get pages {
+    return [
+      InspectionsPage(
+        onOpenInspection: () {
+          _handleNavTap(1);
+        },
+      ),
+      const AiChatPage(),
+      ProfilePage(
+        user: widget.user,
+        requireCompletion: profileCompletionRequired,
+        onProfileCompleted: _handleProfileCompleted,
+      ),
+    ];
+  }
 
   @override
   Widget build(BuildContext context) {
+    if (isLoadingProfile) {
+      return const Scaffold(
+        backgroundColor: Color(0xFFF3FBFF),
+        body: Center(
+          child: CircularProgressIndicator(color: Color(0xFF0057C0)),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: const Color(0xFFF3FBFF),
       body: IndexedStack(index: selectedIndex, children: pages),
       bottomNavigationBar: _ArgosBottomNav(
         currentIndex: selectedIndex,
-        onTap: (index) {
-          setState(() {
-            selectedIndex = index;
-          });
-        },
+        completionRequired: profileCompletionRequired,
+        onTap: _handleNavTap,
       ),
     );
   }
@@ -48,9 +140,14 @@ class _MainShellState extends State<MainShell> {
 
 class _ArgosBottomNav extends StatelessWidget {
   final int currentIndex;
+  final bool completionRequired;
   final ValueChanged<int> onTap;
 
-  const _ArgosBottomNav({required this.currentIndex, required this.onTap});
+  const _ArgosBottomNav({
+    required this.currentIndex,
+    required this.completionRequired,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -81,6 +178,7 @@ class _ArgosBottomNav extends StatelessWidget {
           children: List.generate(items.length, (index) {
             final item = items[index];
             final isActive = currentIndex == index;
+            final isLocked = completionRequired && index != 2;
 
             return GestureDetector(
               behavior: HitTestBehavior.opaque,
@@ -98,28 +196,31 @@ class _ArgosBottomNav extends StatelessWidget {
                       : Colors.transparent,
                   borderRadius: BorderRadius.circular(18),
                 ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      item.icon,
-                      color: isActive
-                          ? const Color(0xFF0057C0)
-                          : const Color(0xFF414755).withOpacity(.45),
-                      size: 24,
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      item.label.toUpperCase(),
-                      style: TextStyle(
-                        fontSize: 9.5,
-                        fontWeight: FontWeight.w800,
+                child: Opacity(
+                  opacity: isLocked ? .35 : 1,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        isLocked ? Icons.lock_outline : item.icon,
                         color: isActive
                             ? const Color(0xFF0057C0)
                             : const Color(0xFF414755).withOpacity(.45),
+                        size: 24,
                       ),
-                    ),
-                  ],
+                      const SizedBox(height: 4),
+                      Text(
+                        item.label.toUpperCase(),
+                        style: TextStyle(
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w800,
+                          color: isActive
+                              ? const Color(0xFF0057C0)
+                              : const Color(0xFF414755).withOpacity(.45),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             );

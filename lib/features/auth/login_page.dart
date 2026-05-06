@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
@@ -23,6 +24,8 @@ class _LoginPageState extends State<LoginPage> {
 
   static const String webClientId = '';
 
+  static const String usersCollection = 'users';
+
   @override
   void dispose() {
     emailController.dispose();
@@ -42,6 +45,10 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 
+  String _normalizeEmail(String email) {
+    return email.trim().toLowerCase();
+  }
+
   String _authErrorMessage(FirebaseAuthException e) {
     switch (e.code) {
       case 'user-disabled':
@@ -57,9 +64,150 @@ class _LoginPageState extends State<LoginPage> {
         return 'Muitas tentativas. Aguarde alguns minutos e tente novamente.';
       case 'network-request-failed':
         return 'Falha de conexão. Verifique sua internet.';
+      case 'missing-id-token':
+        return 'O Google não retornou idToken. Confira as configurações do Firebase/Google Sign-In.';
       default:
         return e.message ?? 'Erro ao autenticar.';
     }
+  }
+
+  String _accessStatusMessage(String status) {
+    switch (status) {
+      case 'pendente':
+        return 'Seu acesso está pendente de aprovação pelo administrador.';
+      case 'bloqueado':
+        return 'Seu acesso foi bloqueado pelo administrador.';
+      default:
+        return 'Você não possui permissão para acessar o sistema.';
+    }
+  }
+
+  Future<void> _signOutDeniedAccess({bool google = false}) async {
+    await FirebaseAuth.instance.signOut();
+
+    if (google) {
+      try {
+        await GoogleSignIn().signOut();
+      } catch (_) {
+        // Ignora erro ao sair da conta Google.
+      }
+    }
+  }
+
+  Future<bool> _validateUserAccessAfterLogin(
+    User user, {
+    required String provider,
+  }) async {
+    final email = _normalizeEmail(user.email ?? '');
+    final expectedTipoAcesso = provider == 'google'
+        ? 'sso_google'
+        : 'email_senha';
+
+    if (email.isEmpty) {
+      await _signOutDeniedAccess(google: provider == 'google');
+
+      _showSnack(
+        'Não foi possível identificar o e-mail da conta.',
+        backgroundColor: Colors.redAccent,
+      );
+
+      return false;
+    }
+
+    // Regra nova: o documento do parceiro sempre é users/{email_normalizado}.
+    // O uid do Firebase Authentication fica dentro do campo authUid.
+    final userRef = FirebaseFirestore.instance
+        .collection(usersCollection)
+        .doc(email);
+
+    final userSnap = await userRef.get();
+
+    if (!userSnap.exists) {
+      await userRef.set({
+        'uid': user.uid,
+        'authUid': user.uid,
+        'email': email,
+        'emailKey': email,
+        'nome': user.displayName ?? '',
+        'displayName': user.displayName ?? '',
+        'photoURL': user.photoURL ?? '',
+        'foto': user.photoURL ?? '',
+        'telefone': '',
+        'empresa': '',
+        'departamento': '',
+        'provider': provider,
+        'tipoAcesso': expectedTipoAcesso,
+        'status': 'pendente',
+        'origem': provider == 'google' ? 'sso_google' : 'login_email_senha',
+        'criadoEm': FieldValue.serverTimestamp(),
+        'atualizadoEm': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      await _signOutDeniedAccess(google: provider == 'google');
+
+      _showSnack(
+        'Solicitação de acesso criada. Aguarde aprovação do administrador.',
+        backgroundColor: Colors.green,
+      );
+
+      return false;
+    }
+
+    final data = userSnap.data() ?? {};
+    final status = data['status']?.toString() ?? 'pendente';
+    final tipoAcesso = data['tipoAcesso']?.toString() ?? '';
+
+    // Bloqueia redundância: o mesmo e-mail não pode trocar de modalidade sozinho.
+    if (tipoAcesso.isNotEmpty && tipoAcesso != expectedTipoAcesso) {
+      await _signOutDeniedAccess(google: provider == 'google');
+
+      _showSnack(
+        expectedTipoAcesso == 'sso_google'
+            ? 'Este e-mail já possui solicitação/cadastro por e-mail e senha. Use esse método ou contate o administrador.'
+            : 'Este e-mail já possui solicitação/cadastro por Google SSO. Use o botão Continuar com Google ou contate o administrador.',
+        backgroundColor: Colors.redAccent,
+      );
+
+      return false;
+    }
+
+    // Se for o mesmo tipo de acesso, mantém o documento único por e-mail e atualiza o authUid quando existir login autenticado.
+    await userRef.set({
+      'uid': user.uid,
+      'authUid': user.uid,
+      'email': email,
+      'emailKey': email,
+      'provider': provider,
+      'tipoAcesso': expectedTipoAcesso,
+      'displayName':
+          user.displayName ?? data['displayName'] ?? data['nome'] ?? '',
+      'nome': data['nome'] ?? user.displayName ?? '',
+      'photoURL': user.photoURL ?? data['photoURL'] ?? '',
+      'foto': user.photoURL ?? data['foto'] ?? '',
+      'ultimoLoginEm': FieldValue.serverTimestamp(),
+      'ultimoProvider': provider,
+      'atualizadoEm': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    if (status == 'ativo') {
+      await userRef.set({
+        'ultimoAcesso': FieldValue.serverTimestamp(),
+        'atualizadoEm': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      return true;
+    }
+
+    await _signOutDeniedAccess(google: provider == 'google');
+
+    _showSnack(
+      _accessStatusMessage(status),
+      backgroundColor: status == 'bloqueado'
+          ? Colors.redAccent
+          : const Color(0xFF0057C0),
+    );
+
+    return false;
   }
 
   Future<void> signInWithEmailAndPassword() async {
@@ -76,10 +224,21 @@ class _LoginPageState extends State<LoginPage> {
     });
 
     try {
-      await FirebaseAuth.instance.signInWithEmailAndPassword(
+      final credential = await FirebaseAuth.instance.signInWithEmailAndPassword(
         email: emailController.text.trim(),
         password: passwordController.text.trim(),
       );
+
+      final user = credential.user;
+
+      if (user == null) {
+        throw FirebaseAuthException(
+          code: 'user-null',
+          message: 'Não foi possível carregar os dados do usuário.',
+        );
+      }
+
+      await _validateUserAccessAfterLogin(user, provider: 'password');
     } on FirebaseAuthException catch (e) {
       debugPrint('Email login error: ${e.code} - ${e.message}');
 
@@ -143,7 +302,19 @@ class _LoginPageState extends State<LoginPage> {
         idToken: googleAuth.idToken,
       );
 
-      await FirebaseAuth.instance.signInWithCredential(credential);
+      final firebaseCredential = await FirebaseAuth.instance
+          .signInWithCredential(credential);
+
+      final user = firebaseCredential.user;
+
+      if (user == null) {
+        throw FirebaseAuthException(
+          code: 'user-null',
+          message: 'Não foi possível carregar os dados do usuário Google.',
+        );
+      }
+
+      await _validateUserAccessAfterLogin(user, provider: 'google');
     } on FirebaseAuthException catch (e) {
       debugPrint('Google Firebase Auth Error: ${e.code} - ${e.message}');
 
@@ -192,7 +363,7 @@ class _LoginPageState extends State<LoginPage> {
             children: [
               Text(
                 firstAccess
-                    ? 'Informe seu e-mail cadastrado para receber um link de definição de senha.'
+                    ? 'Informe seu e-mail para solicitar liberação de acesso.'
                     : 'Informe seu e-mail cadastrado para receber um link de redefinição de senha.',
                 style: const TextStyle(color: Color(0xFF414755)),
               ),
@@ -240,7 +411,9 @@ class _LoginPageState extends State<LoginPage> {
 
     if (email == null || email.isEmpty) return;
 
-    if (!email.contains('@')) {
+    final normalizedEmail = _normalizeEmail(email);
+
+    if (!normalizedEmail.contains('@')) {
       _showSnack(
         'Informe um e-mail válido.',
         backgroundColor: Colors.redAccent,
@@ -255,12 +428,87 @@ class _LoginPageState extends State<LoginPage> {
     });
 
     try {
-      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      if (firstAccess) {
+        final existingUserRef = FirebaseFirestore.instance
+            .collection(usersCollection)
+            .doc(normalizedEmail);
+        final existingUserSnap = await existingUserRef.get();
+
+        if (existingUserSnap.exists) {
+          final existingData = existingUserSnap.data() ?? {};
+          final existingStatus =
+              existingData['status']?.toString() ?? 'pendente';
+          final existingTipoAcesso =
+              existingData['tipoAcesso']?.toString() ?? '';
+
+          if (existingTipoAcesso == 'sso_google') {
+            _showSnack(
+              'Este e-mail já possui solicitação/cadastro por Google SSO. Use o botão Continuar com Google ou contate o administrador.',
+              backgroundColor: Colors.redAccent,
+            );
+            return;
+          }
+
+          if (existingStatus == 'ativo') {
+            _showSnack(
+              'Este e-mail já está liberado. Faça login com e-mail e senha.',
+              backgroundColor: Colors.green,
+            );
+            return;
+          }
+
+          if (existingStatus == 'bloqueado') {
+            _showSnack(
+              'Este acesso está bloqueado pelo administrador.',
+              backgroundColor: Colors.redAccent,
+            );
+            return;
+          }
+
+          _showSnack(
+            'Sua solicitação já está pendente de aprovação.',
+            backgroundColor: const Color(0xFF0057C0),
+          );
+          return;
+        }
+
+        await FirebaseFirestore.instance
+            .collection(usersCollection)
+            .doc(normalizedEmail)
+            .set({
+              'uid': '',
+              'authUid': '',
+              'email': normalizedEmail,
+              'emailKey': normalizedEmail,
+              'nome': '',
+              'displayName': '',
+              'photoURL': '',
+              'foto': '',
+              'telefone': '',
+              'empresa': '',
+              'departamento': '',
+              'provider': 'password',
+              'tipoAcesso': 'email_senha',
+              'status': 'pendente',
+              'origem': 'primeiro_acesso',
+              'criadoEm': FieldValue.serverTimestamp(),
+              'atualizadoEm': FieldValue.serverTimestamp(),
+            }, SetOptions(merge: true));
+
+        _showSnack(
+          'Solicitação de primeiro acesso enviada. Aguarde aprovação do administrador.',
+          backgroundColor: Colors.green,
+        );
+
+        return;
+      }
+
+      await FirebaseAuth.instance.sendPasswordResetEmail(
+        email: normalizedEmail,
+      );
 
       _showSnack(
-        firstAccess
-            ? 'Enviamos um link para definição de senha. Verifique seu e-mail.'
-            : 'Enviamos um link para redefinir sua senha. Verifique seu e-mail.',
+        'Enviamos um link para redefinir sua senha. Verifique seu e-mail.',
         backgroundColor: Colors.green,
       );
     } on FirebaseAuthException catch (e) {
@@ -284,10 +532,10 @@ class _LoginPageState extends State<LoginPage> {
 
       _showSnack(_authErrorMessage(e), backgroundColor: Colors.redAccent);
     } catch (e) {
-      debugPrint('Password email unexpected error: $e');
+      debugPrint('Access/password email unexpected error: $e');
 
       _showSnack(
-        'Erro ao enviar e-mail. Tente novamente.',
+        'Erro ao processar solicitação. Tente novamente.',
         backgroundColor: Colors.redAccent,
       );
     } finally {

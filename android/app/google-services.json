@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "106941102363",
+    "project_id": "fho-argos",
+    "storage_bucket": "fho-argos.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:106941102363:android:11db267d6a3de28e207bbe",
+        "android_client_info": {
+          "package_name": "com.example.argos_app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "106941102363-8s2m95c1raumno5alf8796i9qj82ef0g.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.argos_app",
+            "certificate_hash": "443308a662755c3e451dcbd8c6f227a1e2bb3631"
+          }
+        },
+        {
+          "client_id": "106941102363-jtsha955ruj1vod9v98v7if1remvf87r.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyADqzVITu18A_mQzvBgj9bU0LlM8s-736k"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "106941102363-jtsha955ruj1vod9v98v7if1remvf87r.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

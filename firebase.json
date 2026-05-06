@@ -1,1 +1,35 @@
-{"flutter":{"platforms":{"android":{"default":{"projectId":"fho-argos","appId":"1:106941102363:android:11db267d6a3de28e207bbe","fileOutput":"android/app/google-services.json"}},"dart":{"lib/firebase_options.dart":{"projectId":"fho-argos","configurations":{"android":"1:106941102363:android:11db267d6a3de28e207bbe"}}}}}}
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "fho-argos",
+          "appId": "1:106941102363:android:11db267d6a3de28e207bbe",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "fho-argos",
+          "configurations": {
+            "android": "1:106941102363:android:11db267d6a3de28e207bbe"
+          }
+        }
+      }
+    }
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "disallowLegacyRuntimeConfig": true,
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local"
+      ]
+        }
+  ]
+}

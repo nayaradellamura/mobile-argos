@@ -7,7 +7,8 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
-
+import '../../services/argos_ai_service.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import '../camera/camera_page.dart';
 
 enum ChatMessageType { ai, user, photo, audio }
@@ -56,6 +57,7 @@ class _AiChatPageState extends State<AiChatPage> {
   bool hasText = false;
   bool isRecording = false;
   bool isStartingRecording = false;
+  bool isAiTyping = false;
 
   Timer? recordingTimer;
   int recordingSeconds = 0;
@@ -114,7 +116,7 @@ class _AiChatPageState extends State<AiChatPage> {
     });
   }
 
-  void _sendTextMessage() {
+  Future<void> _sendTextMessage() async {
     final text = messageController.text.trim();
 
     if (text.isEmpty) return;
@@ -124,25 +126,65 @@ class _AiChatPageState extends State<AiChatPage> {
 
       messageController.clear();
       hasText = false;
+      isAiTyping = true;
     });
 
     _scrollToBottom();
 
-    Future.delayed(const Duration(milliseconds: 650), () {
+    try {
+      final reply = await ArgosAiService.instance.sendMessage(
+        text: text,
+        inspectionId: 'INS-001',
+      );
+
       if (!mounted) return;
 
       setState(() {
+        isAiTyping = false;
+
+        messages.add(ChatMessage(type: ChatMessageType.ai, text: reply));
+      });
+
+      _scrollToBottom();
+    } on FirebaseFunctionsException catch (e) {
+      debugPrint('ERRO CLOUD FUNCTION');
+      debugPrint('code: ${e.code}');
+      debugPrint('message: ${e.message}');
+      debugPrint('details: ${e.details}');
+
+      if (!mounted) return;
+
+      setState(() {
+        isAiTyping = false;
+
         messages.add(
-          const ChatMessage(
+          ChatMessage(
             type: ChatMessageType.ai,
             text:
-                'Entendido. Vou considerar essa descrição no laudo técnico da vistoria. Você pode complementar com fotos ou áudio, se necessário.',
+                'O assistente Argos está temporariamente indisponível.\nCódigo: ${e.code}',
           ),
         );
       });
 
       _scrollToBottom();
-    });
+    } catch (e) {
+      debugPrint('ERRO GERAL CHAT IA: $e');
+
+      if (!mounted) return;
+
+      setState(() {
+        isAiTyping = false;
+
+        messages.add(
+          ChatMessage(
+            type: ChatMessageType.ai,
+            text: 'Erro inesperado ao chamar o assistente.',
+          ),
+        );
+      });
+
+      _scrollToBottom();
+    }
   }
 
   Future<void> _openCamera() async {
@@ -398,8 +440,15 @@ class _AiChatPageState extends State<AiChatPage> {
             child: ListView.builder(
               controller: scrollController,
               padding: const EdgeInsets.fromLTRB(18, 22, 18, 18),
-              itemCount: messages.length,
+              itemCount: messages.length + (isAiTyping ? 1 : 0),
               itemBuilder: (context, index) {
+                if (isAiTyping && index == messages.length) {
+                  return const Padding(
+                    padding: EdgeInsets.only(bottom: 16),
+                    child: _TypingBubble(),
+                  );
+                }
+
                 final message = messages[index];
 
                 return Padding(
@@ -1011,6 +1060,88 @@ class _StaticAudioBars extends StatelessWidget {
           ),
         );
       }).toList(),
+    );
+  }
+}
+
+class _TypingBubble extends StatefulWidget {
+  const _TypingBubble();
+
+  @override
+  State<_TypingBubble> createState() => _TypingBubbleState();
+}
+
+class _TypingBubbleState extends State<_TypingBubble>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController controller;
+
+  @override
+  void initState() {
+    super.initState();
+
+    controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const CircleAvatar(
+          radius: 18,
+          backgroundColor: Color(0xFF0057C0),
+          child: Icon(Icons.smart_toy, color: Colors.white, size: 18),
+        ),
+        const SizedBox(width: 10),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: const BoxDecoration(
+            color: Color(0xFFE5F6FF),
+            borderRadius: BorderRadius.only(
+              topLeft: Radius.circular(4),
+              topRight: Radius.circular(22),
+              bottomLeft: Radius.circular(22),
+              bottomRight: Radius.circular(22),
+            ),
+          ),
+          child: AnimatedBuilder(
+            animation: controller,
+            builder: (context, child) {
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                children: List.generate(3, (index) {
+                  final progress = (controller.value + (index * .18)) % 1;
+                  final opacity = progress < .5
+                      ? progress * 2
+                      : (1 - progress) * 2;
+
+                  return AnimatedContainer(
+                    duration: const Duration(milliseconds: 120),
+                    margin: const EdgeInsets.symmetric(horizontal: 3),
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: const Color(
+                        0xFF0057C0,
+                      ).withOpacity(.35 + (.65 * opacity)),
+                      shape: BoxShape.circle,
+                    ),
+                  );
+                }),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 }

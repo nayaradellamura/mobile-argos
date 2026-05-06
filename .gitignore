@@ -1,53 +1,121 @@
-# Miscellaneous
-*.class
-*.log
-*.pyc
-*.swp
-.DS_Store
-.atom/
-.build/
-.buildlog/
-.history
-.svn/
-.swiftpm/
-migrate_working_dir/
-
-# IntelliJ related
-*.iml
-*.ipr
-*.iws
-.idea/
-
-# VSCode (opcional - pode comentar se quiser versionar configs)
-.vscode/
-
-# Flutter/Dart/Pub
-**/doc/api/
-**/ios/Flutter/.last_build_id
+# Flutter / Dart
 .dart_tool/
+.flutter-plugins
 .flutter-plugins-dependencies
+.packages
 .pub-cache/
 .pub/
-/build/
-/coverage/
+build/
+coverage/
 
-# Symbolication
-app.*.symbols
-
-# Obfuscation
-app.*.map.json
-
-# Android build outputs
-/android/app/debug
-/android/app/profile
-/android/app/release
-
-# FIREBASE 
-android/app/google-services.json
-ios/Runner/GoogleService-Info.plist
-lib/firebase_options.dart
-
-# LOCAL CONFIG 
-android/local.properties
-# Gradle local cache
+# Android / Gradle
+.gradle/
 .gradle_user_home/
+android/.gradle/
+android/app/build/
+android/build/
+**/build/
+
+# iOS / macOS
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/Flutter/Generated.xcconfig
+ios/Flutter/ephemeral/
+ios/Runner/GeneratedPluginRegistrant.*
+macos/Flutter/ephemeral/
+macos/Pods/
+
+# Linux / Windows / Web builds
+linux/flutter/ephemeral/
+windows/flutter/ephemeral/
+web/.dart_tool/
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# Logs
+*.log
+log_revisoes.txt
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.env
+serviceAccountKey.json
+firebase-admin-key.json
+*service-account*.json
+*firebase-admin*.json
+
+# Firebase Functions
+functions/node_modules/
+functions/lib/
+functions/.env
+functions/.env.*
+functions/firebase-debug.log
+functions/ui-debug.log
+
+# Firebase emulators
+.firebase/
+firestore-debug.log
+ui-debug.log
+database-debug.log
+
+# Backups gerados pelos scripts
+_backup_atualizacao_*/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# AI / agent tool folders
+.adal/
+.agents/
+.aider-desk/
+.augment/
+.bob/
+.claude/
+.codeartsdoer/
+.codebuddy/
+.codemaker/
+.codestudio/
+.commandcode/
+.continue/
+.cortex/
+.crush/
+.devin/
+.factory/
+.forge/
+.goose/
+.iflow/
+.junie/
+.kilocode/
+.kiro/
+.kode/
+.mcpjam/
+.mux/
+.neovate/
+.openhands/
+.pi/
+.pochi/
+.qoder/
+.qwen/
+.roo/
+.rovodev/
+.tabnine/
+.trae/
+.vibe/
+.windsurf/
+.zencoder/
+
+# Local generated helpers
+skills/
+skills-lock.json
