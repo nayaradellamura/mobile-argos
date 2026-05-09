@@ -3,56 +3,15 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:camera/camera.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+
 import '../../services/argos_ai_service.dart';
-import 'package:cloud_functions/cloud_functions.dart';
+import '../../services/user_audio_storage_service.dart';
 import '../camera/camera_page.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_functions/cloud_functions.dart';
-
-class ArgosAiService {
-  ArgosAiService._();
-
-  static final ArgosAiService instance = ArgosAiService._();
-
-  final FirebaseFunctions _functions = FirebaseFunctions.instanceFor(
-    region: 'us-central1',
-  );
-
-  Future<String> sendMessage({
-    required String text,
-    required String inspectionId,
-  }) async {
-    final user = FirebaseAuth.instance.currentUser;
-
-    debugPrint('Usuário Firebase atual: ${user?.uid}');
-    debugPrint('Email Firebase atual: ${user?.email}');
-
-    if (user == null) {
-      throw FirebaseFunctionsException(
-        code: 'unauthenticated',
-        message: 'Usuário não está logado no Firebase Auth.',
-      );
-    }
-
-    await user.getIdToken(true);
-
-    final callable = _functions.httpsCallable('sendArgosMessage');
-
-    final result = await callable.call<Map<String, dynamic>>({
-      'text': text.trim(),
-      'inspectionId': inspectionId,
-    });
-
-    final data = result.data;
-
-    return data['reply']?.toString() ??
-        'Entendi. Pode continuar descrevendo a vistoria.';
-  }
-}
 
 enum ChatMessageType { ai, user, photo, audio }
 
@@ -63,17 +22,42 @@ class ChatMessage {
   final String? audioPath;
   final int? durationSeconds;
 
+  /// ID do registro criado em users/{uid}/audios/{audioId}.
+  final String? audioId;
+
+  /// Caminho original enviado para o Storage:
+  /// users/{uid}/audios/original/{audioId}.m4a
+  final String? originalStoragePath;
+
+  /// Caminho futuro do MP3 gerado pela Cloud Function:
+  /// users/{uid}/audios/mp3/{audioId}.mp3
+  final String? mp3StoragePath;
+
+  /// Status visual do áudio no app:
+  /// local, uploading, processing, done ou error.
+  final String? audioStatus;
+
   const ChatMessage({
     required this.type,
     required this.text,
     this.imagePath,
     this.audioPath,
     this.durationSeconds,
+    this.audioId,
+    this.originalStoragePath,
+    this.mp3StoragePath,
+    this.audioStatus,
   });
 }
 
 class AiChatPage extends StatefulWidget {
-  const AiChatPage({super.key});
+  /// ID do sinistro atual.
+  ///
+  /// Quando o chat for aberto a partir da tela de vistorias, passe este valor
+  /// para vincular mensagens, fotos e áudios ao sinistro correto.
+  final String? sinistroId;
+
+  const AiChatPage({super.key, this.sinistroId});
 
   @override
   State<AiChatPage> createState() => _AiChatPageState();
@@ -177,7 +161,7 @@ class _AiChatPageState extends State<AiChatPage> {
     try {
       final reply = await ArgosAiService.instance.sendMessage(
         text: text,
-        inspectionId: 'INS-001',
+        inspectionId: widget.sinistroId ?? 'INS-001',
       );
 
       if (!mounted) return;
@@ -441,26 +425,90 @@ class _AiChatPageState extends State<AiChatPage> {
       messages.add(
         ChatMessage(
           type: ChatMessageType.audio,
-          text: '• ${_formatDuration(duration)}',
+          text: 'Enviando áudio • ${_formatDuration(duration)}',
           audioPath: path,
           durationSeconds: duration,
+          audioStatus: 'uploading',
         ),
       );
     });
 
     _scrollToBottom();
 
-    Future.delayed(const Duration(milliseconds: 650), () {
+    try {
+      final uploadedAudio = await UserAudioStorageService.instance
+          .uploadOriginalAudioForMp3Conversion(
+            localAudioPath: path,
+            sinistroId: widget.sinistroId,
+            duration: Duration(seconds: duration),
+          );
+
       if (!mounted) return;
 
       setState(() {
+        final index = messages.lastIndexWhere(
+          (message) =>
+              message.type == ChatMessageType.audio &&
+              message.audioPath == path,
+        );
+
+        if (index >= 0) {
+          messages[index] = ChatMessage(
+            type: ChatMessageType.audio,
+            text: 'Áudio enviado • ${_formatDuration(duration)}',
+            audioPath: path,
+            durationSeconds: duration,
+            audioId: uploadedAudio.audioId,
+            originalStoragePath: uploadedAudio.originalStoragePath,
+            audioStatus: 'processing',
+          );
+        }
+
         messages.add(
-          const ChatMessage(type: ChatMessageType.ai, text: 'Áudio recebido.'),
+          const ChatMessage(
+            type: ChatMessageType.ai,
+            text:
+                'Áudio recebido. Estou enviando para o Firebase Storage e a conversão para MP3 será feita no backend.',
+          ),
         );
       });
 
       _scrollToBottom();
-    });
+    } catch (e) {
+      debugPrint('Upload audio error: $e');
+
+      if (!mounted) return;
+
+      setState(() {
+        final index = messages.lastIndexWhere(
+          (message) =>
+              message.type == ChatMessageType.audio &&
+              message.audioPath == path,
+        );
+
+        if (index >= 0) {
+          messages[index] = ChatMessage(
+            type: ChatMessageType.audio,
+            text: 'Falha ao enviar • ${_formatDuration(duration)}',
+            audioPath: path,
+            durationSeconds: duration,
+            audioStatus: 'error',
+          );
+        }
+
+        messages.add(
+          const ChatMessage(
+            type: ChatMessageType.ai,
+            text:
+                'Não consegui enviar o áudio para o Firebase Storage. Verifique sua conexão e tente novamente.',
+          ),
+        );
+      });
+
+      _scrollToBottom();
+
+      _showSnack('Erro ao enviar áudio.', backgroundColor: Colors.redAccent);
+    }
   }
 
   String _formatDuration(int seconds) {
@@ -623,7 +671,12 @@ class _ChatBubble extends StatelessWidget {
         return _PhotoBubble(text: message.text, imagePath: message.imagePath);
 
       case ChatMessageType.audio:
-        return _AudioBubble(text: message.text, audioPath: message.audioPath);
+        return _AudioBubble(
+          text: message.text,
+          audioPath: message.audioPath,
+          audioStatus: message.audioStatus,
+          audioId: message.audioId,
+        );
     }
   }
 }
@@ -774,14 +827,41 @@ class _PhotoBubble extends StatelessWidget {
 class _AudioBubble extends StatelessWidget {
   final String text;
   final String? audioPath;
+  final String? audioStatus;
+  final String? audioId;
 
-  const _AudioBubble({required this.text, required this.audioPath});
+  const _AudioBubble({
+    required this.text,
+    required this.audioPath,
+    this.audioStatus,
+    this.audioId,
+  });
 
   @override
   Widget build(BuildContext context) {
     final fileName = audioPath == null
         ? 'audio.m4a'
         : audioPath!.split(Platform.pathSeparator).last;
+
+    final status = audioStatus ?? 'local';
+
+    String statusLabel;
+    switch (status) {
+      case 'uploading':
+        statusLabel = 'Enviando para Storage...';
+        break;
+      case 'processing':
+        statusLabel = 'Convertendo para MP3...';
+        break;
+      case 'done':
+        statusLabel = 'MP3 disponível';
+        break;
+      case 'error':
+        statusLabel = 'Erro no envio';
+        break;
+      default:
+        statusLabel = 'Áudio local';
+    }
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.end,
@@ -823,7 +903,20 @@ class _AudioBubble extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Arquivo salvo: $fileName',
+                    statusLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Colors.white.withOpacity(.84),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    audioId == null
+                        ? 'Arquivo salvo: $fileName'
+                        : 'ID: $audioId',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(

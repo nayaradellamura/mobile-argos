@@ -1,11 +1,14 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 
 class ProfilePage extends StatefulWidget {
@@ -39,6 +42,7 @@ class _ProfilePageState extends State<ProfilePage> {
   bool isLoading = true;
   bool isSaving = false;
   bool isEditing = false;
+  bool isLoadingOptions = true;
 
   File? selectedPhoto;
   String? photoURL;
@@ -47,11 +51,17 @@ class _ProfilePageState extends State<ProfilePage> {
   String tipoAcesso = '';
   bool cadastroCompleto = false;
 
+  List<CredenciadoOption> credenciados = [];
+  List<CityOption> cities = [];
+
+  CredenciadoOption? selectedCredenciado;
+  CityOption? selectedCity;
+
   String get emailKey => (widget.user.email ?? '').trim().toLowerCase();
 
   bool get isPasswordAccess {
     if (provider == 'password') return true;
-    if (tipoAcesso == 'email_senha') return true;
+    if (tipoAcesso.contains('email_senha')) return true;
 
     return widget.user.providerData.any(
       (providerInfo) => providerInfo.providerId == 'password',
@@ -65,7 +75,7 @@ class _ProfilePageState extends State<ProfilePage> {
     super.initState();
 
     isEditing = widget.requireCompletion;
-    _loadProfileData();
+    _loadInitialData();
   }
 
   @override
@@ -118,13 +128,113 @@ class _ProfilePageState extends State<ProfilePage> {
     return 'email_senha';
   }
 
+  Future<void> _loadInitialData() async {
+    setState(() {
+      isLoading = true;
+      isLoadingOptions = true;
+    });
+
+    try {
+      await Future.wait([_loadCredenciados(), _loadBrazilianCities()]);
+
+      await _loadProfileData();
+
+      if (!mounted) return;
+
+      setState(() {
+        isLoading = false;
+        isLoadingOptions = false;
+      });
+    } catch (e) {
+      debugPrint('Load initial profile data error: $e');
+
+      if (!mounted) return;
+
+      setState(() {
+        isLoading = false;
+        isLoadingOptions = false;
+        isEditing = true;
+      });
+
+      _showSnack(
+        'Não foi possível carregar todos os dados do perfil.',
+        backgroundColor: Colors.redAccent,
+      );
+    }
+  }
+
+  Future<void> _loadCredenciados() async {
+    final snapshot = await FirebaseFirestore.instance
+        .collection('credenciados')
+        .orderBy('name')
+        .get();
+
+    final loaded = snapshot.docs
+        .map((doc) {
+          final data = doc.data();
+          final name = data['name']?.toString().trim() ?? '';
+
+          if (name.isEmpty) return null;
+
+          return CredenciadoOption(id: doc.id, name: name);
+        })
+        .whereType<CredenciadoOption>()
+        .toList();
+
+    credenciados = loaded;
+  }
+
+  Future<void> _loadBrazilianCities() async {
+    final uri = Uri.parse(
+      'https://servicodados.ibge.gov.br/api/v1/localidades/municipios',
+    );
+
+    final response = await http.get(uri);
+
+    if (response.statusCode != 200) {
+      throw Exception('Erro ao buscar cidades do IBGE.');
+    }
+
+    final decoded = jsonDecode(response.body);
+
+    if (decoded is! List) {
+      throw Exception('Retorno inesperado ao buscar cidades.');
+    }
+
+    final loaded = decoded
+        .map((item) {
+          if (item is! Map<String, dynamic>) return null;
+
+          final cityName = item['nome']?.toString().trim() ?? '';
+
+          final uf =
+              item['microrregiao']?['mesorregiao']?['UF']?['sigla']
+                  ?.toString()
+                  .trim()
+                  .toUpperCase() ??
+              item['regiao-imediata']?['regiao-intermediaria']?['UF']?['sigla']
+                  ?.toString()
+                  .trim()
+                  .toUpperCase() ??
+              '';
+
+          if (cityName.isEmpty || uf.isEmpty) return null;
+
+          return CityOption(name: cityName, uf: uf);
+        })
+        .whereType<CityOption>()
+        .toList();
+
+    loaded.sort((a, b) => a.label.compareTo(b.label));
+
+    cities = loaded;
+  }
+
   Future<void> _loadProfileData() async {
     final email = emailKey;
 
     if (email.isEmpty) {
-      setState(() {
-        isLoading = false;
-      });
+      isLoading = false;
       return;
     }
 
@@ -144,20 +254,45 @@ class _ProfilePageState extends State<ProfilePage> {
           ? data['nome'].toString()
           : widget.user.displayName ?? '';
 
-      telefoneController.text = data['telefone']?.toString() ?? '';
-      empresaController.text = data['empresa']?.toString() ?? '';
-      documentoController.text = data['documento']?.toString() ?? '';
+      telefoneController.text = BrazilianPhoneFormatter.format(
+        data['telefone']?.toString() ?? '',
+      );
+
+      final empresa =
+          data['empresa']?.toString() ??
+          data['credenciadoNome']?.toString() ??
+          '';
+
+      empresaController.text = empresa;
+
+      documentoController.text = CpfInputFormatter.format(
+        data['cpf']?.toString() ?? data['documento']?.toString() ?? '',
+      );
+
       cidadeController.text = data['cidade']?.toString() ?? '';
-      ufController.text = data['uf']?.toString() ?? '';
+      ufController.text = data['uf']?.toString().toUpperCase() ?? '';
 
       photoURL = data['photoURL']?.toString().trim().isNotEmpty == true
           ? data['photoURL'].toString()
           : widget.user.photoURL;
 
+      final credenciadoId = data['credenciadoId']?.toString() ?? '';
+
+      if (credenciadoId.isNotEmpty) {
+        selectedCredenciado = _findCredenciadoById(credenciadoId);
+      }
+
+      selectedCredenciado ??= _findCredenciadoByName(empresa);
+
+      if (selectedCredenciado != null) {
+        empresaController.text = selectedCredenciado!.name;
+      }
+
+      selectedCity = _findCity(cidadeController.text, ufController.text);
+
       if (!mounted) return;
 
       setState(() {
-        isLoading = false;
         isEditing = widget.requireCompletion || !cadastroCompleto;
       });
     } catch (e) {
@@ -166,7 +301,6 @@ class _ProfilePageState extends State<ProfilePage> {
       if (!mounted) return;
 
       setState(() {
-        isLoading = false;
         isEditing = true;
       });
 
@@ -175,6 +309,44 @@ class _ProfilePageState extends State<ProfilePage> {
         backgroundColor: Colors.redAccent,
       );
     }
+  }
+
+  CredenciadoOption? _findCredenciadoById(String id) {
+    for (final credenciado in credenciados) {
+      if (credenciado.id == id) return credenciado;
+    }
+
+    return null;
+  }
+
+  CredenciadoOption? _findCredenciadoByName(String name) {
+    final normalized = name.trim().toLowerCase();
+
+    if (normalized.isEmpty) return null;
+
+    for (final credenciado in credenciados) {
+      if (credenciado.name.trim().toLowerCase() == normalized) {
+        return credenciado;
+      }
+    }
+
+    return null;
+  }
+
+  CityOption? _findCity(String name, String uf) {
+    final normalizedName = name.trim().toLowerCase();
+    final normalizedUf = uf.trim().toUpperCase();
+
+    if (normalizedName.isEmpty) return null;
+
+    for (final city in cities) {
+      final sameName = city.name.trim().toLowerCase() == normalizedName;
+      final sameUf = normalizedUf.isEmpty || city.uf == normalizedUf;
+
+      if (sameName && sameUf) return city;
+    }
+
+    return null;
   }
 
   Future<void> _pickPhoto() async {
@@ -208,6 +380,7 @@ class _ProfilePageState extends State<ProfilePage> {
     if (photo == null) return photoURL;
 
     final safeEmail = Uri.encodeComponent(emailKey);
+
     final path =
         'users/$safeEmail/profile_${DateTime.now().millisecondsSinceEpoch}.jpg';
 
@@ -222,6 +395,31 @@ class _ProfilePageState extends State<ProfilePage> {
     if (selectedPhoto != null) return true;
 
     return photoURL != null && photoURL!.trim().isNotEmpty;
+  }
+
+  bool _isValidCpf(String value) {
+    final cpf = value.replaceAll(RegExp(r'\D'), '');
+
+    if (cpf.length != 11) return false;
+
+    if (RegExp(r'^(\d)\1{10}$').hasMatch(cpf)) return false;
+
+    int calcDigit(int length) {
+      var sum = 0;
+
+      for (var i = 0; i < length; i++) {
+        sum += int.parse(cpf[i]) * (length + 1 - i);
+      }
+
+      final remainder = (sum * 10) % 11;
+
+      return remainder == 10 ? 0 : remainder;
+    }
+
+    final digit1 = calcDigit(9);
+    final digit2 = calcDigit(10);
+
+    return digit1 == int.parse(cpf[9]) && digit2 == int.parse(cpf[10]);
   }
 
   Future<void> _saveProfile() async {
@@ -247,6 +445,32 @@ class _ProfilePageState extends State<ProfilePage> {
       return;
     }
 
+    if (selectedCredenciado == null) {
+      _showSnack(
+        'Selecione sua oficina ou empresa.',
+        backgroundColor: Colors.orange,
+      );
+      return;
+    }
+
+    final selectedOrTypedCity =
+        selectedCity ?? _findCity(cidadeController.text, ufController.text);
+
+    if (selectedOrTypedCity == null) {
+      _showSnack(
+        'Selecione uma cidade da lista.',
+        backgroundColor: Colors.orange,
+      );
+      return;
+    }
+
+    final cpfDigits = documentoController.text.replaceAll(RegExp(r'\D'), '');
+
+    if (cpfDigits.length != 11 || !_isValidCpf(cpfDigits)) {
+      _showSnack('Informe um CPF válido.', backgroundColor: Colors.orange);
+      return;
+    }
+
     FocusScope.of(context).unfocus();
 
     setState(() {
@@ -255,14 +479,27 @@ class _ProfilePageState extends State<ProfilePage> {
 
     try {
       final uploadedPhotoURL = await _uploadSelectedPhoto();
-      final nome = nomeController.text.trim();
 
+      final nome = nomeController.text.trim();
       final resolvedProvider = provider.isEmpty ? _inferProvider() : provider;
       final resolvedTipoAcesso = tipoAcesso.isEmpty
           ? _inferTipoAcesso()
           : tipoAcesso;
 
-      await FirebaseFirestore.instance.collection('users').doc(emailKey).set({
+      final credenciado = selectedCredenciado!;
+      final city = selectedOrTypedCity;
+
+      final userRef = FirebaseFirestore.instance
+          .collection('users')
+          .doc(emailKey);
+
+      final credenciadoRef = FirebaseFirestore.instance
+          .collection('credenciados')
+          .doc(credenciado.id);
+
+      final batch = FirebaseFirestore.instance.batch();
+
+      batch.set(userRef, {
         'uid': widget.user.uid,
         'authUid': widget.user.uid,
         'email': emailKey,
@@ -270,17 +507,29 @@ class _ProfilePageState extends State<ProfilePage> {
         'nome': nome,
         'displayName': nome,
         'telefone': telefoneController.text.trim(),
-        'empresa': empresaController.text.trim(),
-        'documento': documentoController.text.trim(),
-        'cidade': cidadeController.text.trim(),
-        'uf': ufController.text.trim().toUpperCase(),
+        'empresa': credenciado.name,
+        'credenciadoId': credenciado.id,
+        'credenciadoNome': credenciado.name,
+        'documento': CpfInputFormatter.format(cpfDigits),
+        'cpf': cpfDigits,
+        'tipoDocumento': 'CPF',
+        'cidade': city.name,
+        'uf': city.uf,
         'photoURL': uploadedPhotoURL ?? '',
         'provider': resolvedProvider,
         'tipoAcesso': resolvedTipoAcesso,
         'cadastroCompleto': true,
+        'primeiroAcessoConcluido': true,
         'cadastroFinalizadoEm': FieldValue.serverTimestamp(),
         'atualizadoEm': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
+
+      batch.set(credenciadoRef, {
+        'funcionariosUids': FieldValue.arrayUnion([widget.user.uid]),
+        'atualizadoEm': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      await batch.commit();
 
       if (nome.isNotEmpty && widget.user.displayName != nome) {
         await widget.user.updateDisplayName(nome);
@@ -300,6 +549,11 @@ class _ProfilePageState extends State<ProfilePage> {
         cadastroCompleto = true;
         photoURL = uploadedPhotoURL;
         selectedPhoto = null;
+        selectedCity = city;
+        cidadeController.text = city.name;
+        ufController.text = city.uf;
+        empresaController.text = credenciado.name;
+        documentoController.text = CpfInputFormatter.format(cpfDigits);
         isEditing = false;
       });
 
@@ -336,6 +590,241 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
+  InputDecoration _fieldDecoration({
+    required String label,
+    IconData? icon,
+    bool enabled = true,
+  }) {
+    return InputDecoration(
+      labelText: label,
+      prefixIcon: icon == null ? null : Icon(icon),
+      filled: true,
+      fillColor: enabled ? const Color(0xFFE5F6FF) : Colors.white,
+      disabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: BorderSide(color: Colors.black.withOpacity(.05)),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: BorderSide.none,
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: const BorderSide(color: Color(0xFF0057C0)),
+      ),
+      errorBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: const BorderSide(color: Colors.redAccent),
+      ),
+      focusedErrorBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: const BorderSide(color: Colors.redAccent),
+      ),
+    );
+  }
+
+  Widget _buildCredenciadoField() {
+    if (!canEdit) {
+      return _ProfileTextField(
+        controller: empresaController,
+        label: 'Oficina / Empresa',
+        enabled: false,
+        icon: Icons.business_outlined,
+      );
+    }
+
+    return DropdownButtonFormField<CredenciadoOption>(
+      value: selectedCredenciado,
+      isExpanded: true,
+      decoration: _fieldDecoration(
+        label: 'Oficina / Empresa',
+        icon: Icons.business_outlined,
+        enabled: !isSaving && !isLoadingOptions,
+      ),
+      items: credenciados.map((credenciado) {
+        return DropdownMenuItem<CredenciadoOption>(
+          value: credenciado,
+          child: Text(credenciado.name, overflow: TextOverflow.ellipsis),
+        );
+      }).toList(),
+      onChanged: isSaving || isLoadingOptions
+          ? null
+          : (value) {
+              setState(() {
+                selectedCredenciado = value;
+                empresaController.text = value?.name ?? '';
+              });
+            },
+      validator: (value) {
+        if (value == null) {
+          return isLoadingOptions
+              ? 'Aguarde o carregamento das oficinas.'
+              : 'Selecione sua oficina ou empresa.';
+        }
+
+        return null;
+      },
+    );
+  }
+
+  Widget _buildCityField() {
+    if (!canEdit) {
+      return Row(
+        children: [
+          Expanded(
+            flex: 2,
+            child: _ProfileTextField(
+              controller: cidadeController,
+              label: 'Cidade',
+              enabled: false,
+              icon: Icons.location_city_outlined,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: _ProfileTextField(
+              controller: ufController,
+              label: 'UF',
+              enabled: false,
+              textCapitalization: TextCapitalization.characters,
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Row(
+      children: [
+        Expanded(
+          flex: 2,
+          child: Autocomplete<CityOption>(
+            initialValue: TextEditingValue(text: cidadeController.text),
+            displayStringForOption: (option) => option.label,
+            optionsBuilder: (textEditingValue) {
+              final query = textEditingValue.text.trim().toLowerCase();
+
+              if (query.length < 2 || cities.isEmpty) {
+                return const Iterable<CityOption>.empty();
+              }
+
+              return cities
+                  .where((city) {
+                    final cityName = city.name.toLowerCase();
+                    final label = city.label.toLowerCase();
+                    final uf = city.uf.toLowerCase();
+
+                    return cityName.contains(query) ||
+                        label.contains(query) ||
+                        uf == query;
+                  })
+                  .take(40);
+            },
+            onSelected: (city) {
+              setState(() {
+                selectedCity = city;
+                cidadeController.text = city.name;
+                ufController.text = city.uf;
+              });
+            },
+            fieldViewBuilder:
+                (context, textEditingController, focusNode, onFieldSubmitted) {
+                  if (cidadeController.text.isNotEmpty &&
+                      textEditingController.text.isEmpty) {
+                    textEditingController.text = cidadeController.text;
+                  }
+
+                  return TextFormField(
+                    controller: textEditingController,
+                    focusNode: focusNode,
+                    enabled: !isSaving && !isLoadingOptions,
+                    textCapitalization: TextCapitalization.words,
+                    decoration: _fieldDecoration(
+                      label: 'Cidade',
+                      icon: Icons.location_city_outlined,
+                      enabled: !isSaving && !isLoadingOptions,
+                    ),
+                    onChanged: (value) {
+                      cidadeController.text = value;
+
+                      if (selectedCity != null &&
+                          selectedCity!.name.toLowerCase() !=
+                              value.trim().toLowerCase()) {
+                        setState(() {
+                          selectedCity = null;
+                          ufController.clear();
+                        });
+                      }
+                    },
+                    validator: (value) {
+                      final typed = value?.trim() ?? '';
+
+                      if (typed.isEmpty) {
+                        return 'Informe sua cidade.';
+                      }
+
+                      final found =
+                          selectedCity ?? _findCity(typed, ufController.text);
+
+                      if (found == null) {
+                        return 'Selecione uma cidade da lista.';
+                      }
+
+                      return null;
+                    },
+                  );
+                },
+            optionsViewBuilder: (context, onSelected, options) {
+              return Align(
+                alignment: Alignment.topLeft,
+                child: Material(
+                  elevation: 8,
+                  borderRadius: BorderRadius.circular(16),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(
+                      maxHeight: 260,
+                      maxWidth: 360,
+                    ),
+                    child: ListView.builder(
+                      padding: EdgeInsets.zero,
+                      itemCount: options.length,
+                      itemBuilder: (context, index) {
+                        final option = options.elementAt(index);
+
+                        return ListTile(
+                          dense: true,
+                          title: Text(option.name),
+                          trailing: Text(
+                            option.uf,
+                            style: const TextStyle(
+                              color: Color(0xFF0057C0),
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          onTap: () {
+                            onSelected(option);
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: _ProfileTextField(
+            controller: ufController,
+            label: 'UF',
+            enabled: false,
+            textCapitalization: TextCapitalization.characters,
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (isLoading) {
@@ -367,9 +856,7 @@ class _ProfilePageState extends State<ProfilePage> {
                   color: const Color(0xFF0057C0),
                 ),
               ),
-
               const SizedBox(height: 12),
-
               if (widget.requireCompletion)
                 _CompletionBanner(isPasswordAccess: isPasswordAccess)
               else
@@ -378,9 +865,7 @@ class _ProfilePageState extends State<ProfilePage> {
                   tipoAcesso: tipoAcesso,
                   cadastroCompleto: cadastroCompleto,
                 ),
-
               const SizedBox(height: 28),
-
               Stack(
                 alignment: Alignment.bottomRight,
                 children: [
@@ -416,9 +901,7 @@ class _ProfilePageState extends State<ProfilePage> {
                     ),
                 ],
               ),
-
               const SizedBox(height: 16),
-
               Text(
                 nomeController.text.trim().isEmpty
                     ? 'Usuário sem nome'
@@ -429,17 +912,13 @@ class _ProfilePageState extends State<ProfilePage> {
                   fontWeight: FontWeight.bold,
                 ),
               ),
-
               const SizedBox(height: 6),
-
               Text(
                 widget.user.email ?? 'Email não informado',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: Color(0xFF414755)),
               ),
-
               const SizedBox(height: 28),
-
               _ProfileTextField(
                 controller: nomeController,
                 label: 'Nome completo',
@@ -453,76 +932,55 @@ class _ProfilePageState extends State<ProfilePage> {
                   return null;
                 },
               ),
-
               const SizedBox(height: 16),
-
               _ProfileTextField(
                 controller: telefoneController,
                 label: 'Telefone',
                 enabled: canEdit && !isSaving,
                 keyboardType: TextInputType.phone,
                 icon: Icons.phone_outlined,
+                inputFormatters: [BrazilianPhoneFormatter()],
                 validator: (value) {
-                  if ((value ?? '').trim().isEmpty) {
+                  final digits = (value ?? '').replaceAll(RegExp(r'\D'), '');
+
+                  if (digits.isEmpty) {
                     return 'Informe seu telefone.';
                   }
 
-                  return null;
-                },
-              ),
-
-              const SizedBox(height: 16),
-
-              _ProfileTextField(
-                controller: empresaController,
-                label: 'Oficina / Empresa',
-                enabled: canEdit && !isSaving,
-                icon: Icons.business_outlined,
-                validator: (value) {
-                  if ((value ?? '').trim().isEmpty) {
-                    return 'Informe sua oficina ou empresa.';
+                  if (digits.length != 11) {
+                    return 'Informe um telefone válido com DDD.';
                   }
 
                   return null;
                 },
               ),
-
               const SizedBox(height: 16),
-
+              _buildCredenciadoField(),
+              const SizedBox(height: 16),
               _ProfileTextField(
                 controller: documentoController,
-                label: 'CPF/CNPJ',
+                label: 'CPF',
                 enabled: canEdit && !isSaving,
+                keyboardType: TextInputType.number,
                 icon: Icons.badge_outlined,
-              ),
+                inputFormatters: [CpfInputFormatter()],
+                validator: (value) {
+                  final cpf = (value ?? '').replaceAll(RegExp(r'\D'), '');
 
+                  if (cpf.isEmpty) {
+                    return 'Informe seu CPF.';
+                  }
+
+                  if (cpf.length != 11 || !_isValidCpf(cpf)) {
+                    return 'Informe um CPF válido.';
+                  }
+
+                  return null;
+                },
+              ),
               const SizedBox(height: 16),
-
-              Row(
-                children: [
-                  Expanded(
-                    flex: 2,
-                    child: _ProfileTextField(
-                      controller: cidadeController,
-                      label: 'Cidade',
-                      enabled: canEdit && !isSaving,
-                      icon: Icons.location_city_outlined,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _ProfileTextField(
-                      controller: ufController,
-                      label: 'UF',
-                      enabled: canEdit && !isSaving,
-                      textCapitalization: TextCapitalization.characters,
-                    ),
-                  ),
-                ],
-              ),
-
+              _buildCityField(),
               const SizedBox(height: 28),
-
               if (canEdit)
                 SizedBox(
                   width: double.infinity,
@@ -579,7 +1037,6 @@ class _ProfilePageState extends State<ProfilePage> {
                     ),
                   ),
                 ),
-
               if (isEditing && !widget.requireCompletion) ...[
                 const SizedBox(height: 12),
                 SizedBox(
@@ -593,7 +1050,6 @@ class _ProfilePageState extends State<ProfilePage> {
                               isEditing = false;
                               selectedPhoto = null;
                             });
-
                             _loadProfileData();
                           },
                     icon: const Icon(Icons.close),
@@ -609,9 +1065,7 @@ class _ProfilePageState extends State<ProfilePage> {
                   ),
                 ),
               ],
-
               const SizedBox(height: 18),
-
               SizedBox(
                 width: double.infinity,
                 height: 56,
@@ -733,6 +1187,7 @@ class _ProfileTextField extends StatelessWidget {
   final TextInputType? keyboardType;
   final TextCapitalization textCapitalization;
   final String? Function(String?)? validator;
+  final List<TextInputFormatter>? inputFormatters;
 
   const _ProfileTextField({
     required this.controller,
@@ -742,6 +1197,7 @@ class _ProfileTextField extends StatelessWidget {
     this.keyboardType,
     this.textCapitalization = TextCapitalization.none,
     this.validator,
+    this.inputFormatters,
   });
 
   @override
@@ -752,6 +1208,7 @@ class _ProfileTextField extends StatelessWidget {
       keyboardType: keyboardType,
       textCapitalization: textCapitalization,
       validator: validator,
+      inputFormatters: inputFormatters,
       decoration: InputDecoration(
         labelText: label,
         prefixIcon: icon == null ? null : Icon(icon),
@@ -778,6 +1235,92 @@ class _ProfileTextField extends StatelessWidget {
           borderSide: const BorderSide(color: Colors.redAccent),
         ),
       ),
+    );
+  }
+}
+
+class CredenciadoOption {
+  final String id;
+  final String name;
+
+  const CredenciadoOption({required this.id, required this.name});
+}
+
+class CityOption {
+  final String name;
+  final String uf;
+
+  const CityOption({required this.name, required this.uf});
+
+  String get label => '$name - $uf';
+}
+
+class BrazilianPhoneFormatter extends TextInputFormatter {
+  static String format(String value) {
+    final digits = value.replaceAll(RegExp(r'\D'), '');
+
+    final limited = digits.length > 11 ? digits.substring(0, 11) : digits;
+
+    if (limited.isEmpty) return '';
+
+    if (limited.length <= 2) {
+      return '($limited';
+    }
+
+    if (limited.length <= 7) {
+      return '(${limited.substring(0, 2)}) ${limited.substring(2)}';
+    }
+
+    return '(${limited.substring(0, 2)}) ${limited.substring(2, 7)}-${limited.substring(7)}';
+  }
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final formatted = format(newValue.text);
+
+    return TextEditingValue(
+      text: formatted,
+      selection: TextSelection.collapsed(offset: formatted.length),
+    );
+  }
+}
+
+class CpfInputFormatter extends TextInputFormatter {
+  static String format(String value) {
+    final digits = value.replaceAll(RegExp(r'\D'), '');
+
+    final limited = digits.length > 11 ? digits.substring(0, 11) : digits;
+
+    if (limited.isEmpty) return '';
+
+    if (limited.length <= 3) {
+      return limited;
+    }
+
+    if (limited.length <= 6) {
+      return '${limited.substring(0, 3)}.${limited.substring(3)}';
+    }
+
+    if (limited.length <= 9) {
+      return '${limited.substring(0, 3)}.${limited.substring(3, 6)}.${limited.substring(6)}';
+    }
+
+    return '${limited.substring(0, 3)}.${limited.substring(3, 6)}.${limited.substring(6, 9)}-${limited.substring(9)}';
+  }
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final formatted = format(newValue.text);
+
+    return TextEditingValue(
+      text: formatted,
+      selection: TextSelection.collapsed(offset: formatted.length),
     );
   }
 }

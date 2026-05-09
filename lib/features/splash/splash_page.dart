@@ -1,5 +1,5 @@
 import 'dart:async';
-
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
@@ -131,10 +131,16 @@ class _SplashPageState extends State<SplashPage> {
                             ),
                           ],
                         ),
-                        child: const Icon(
-                          Icons.remove_red_eye,
-                          size: 64,
-                          color: brandColor,
+                        child: Center(
+                          child: SvgPicture.asset(
+                            'assets/images/eye_argos.svg',
+                            width: 64,
+                            height: 64,
+                            colorFilter: const ColorFilter.mode(
+                              brandColor,
+                              BlendMode.srcIn,
+                            ),
+                          ),
                         ),
                       ),
                     ],
@@ -153,13 +159,12 @@ class _SplashPageState extends State<SplashPage> {
                       child: Opacity(opacity: 1 - (value / 20), child: child),
                     );
                   },
-                  child: Text(
-                    'Argos',
-                    style: GoogleFonts.spaceGrotesk(
-                      fontSize: 58,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                      letterSpacing: -1.8,
+                  child: SvgPicture.asset(
+                    'assets/images/display_argos.svg',
+                    width: 220,
+                    colorFilter: const ColorFilter.mode(
+                      Colors.white,
+                      BlendMode.srcIn,
                     ),
                   ),
                 ),

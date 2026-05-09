@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
@@ -181,7 +181,7 @@ class _LoginPageState extends State<LoginPage> {
         'tipoAcesso': newTipoAcesso,
         'providers': FieldValue.arrayUnion([newTipoAcesso]),
         'authProviderIds': FieldValue.arrayUnion([newProviderId]),
-        'status': 'pendente',
+        'status': 'ativo',
         'origem': provider == 'google' ? 'sso_google' : 'login_email_senha',
         'origens': FieldValue.arrayUnion([
           provider == 'google' ? 'sso_google' : 'login_email_senha',
@@ -967,19 +967,25 @@ class _LoginPageState extends State<LoginPage> {
                       ),
                     ],
                   ),
-                  child: const Icon(
-                    Icons.remove_red_eye,
-                    color: Colors.white,
-                    size: 42,
+                  child: Center(
+                    child: SvgPicture.asset(
+                      'assets/images/eye_argos.svg',
+                      width: 42,
+                      height: 42,
+                      colorFilter: const ColorFilter.mode(
+                        Colors.white,
+                        BlendMode.srcIn,
+                      ),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 24),
-                Text(
-                  'Argos',
-                  style: GoogleFonts.spaceGrotesk(
-                    fontSize: 52,
-                    fontWeight: FontWeight.bold,
-                    color: const Color(0xFF0057C0),
+                SvgPicture.asset(
+                  'assets/images/display_argos.svg',
+                  width: 210,
+                  colorFilter: const ColorFilter.mode(
+                    Color(0xFF0057C0),
+                    BlendMode.srcIn,
                   ),
                 ),
                 const SizedBox(height: 8),

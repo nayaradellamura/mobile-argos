@@ -119,3 +119,8 @@ Thumbs.db
 # Local generated helpers
 skills/
 skills-lock.json
+
+lib/
+firebase_options.dart
+
+functions/

@@ -28,6 +28,9 @@ dependencies:
   cloud_functions: ^6.2.0
   cloud_firestore: ^6.3.0
   firebase_storage: ^13.3.0
+  http: ^1.6.0
+  flutter_svg: ^2.0.10
+  audio_converter_native: ^1.0.4
 
 dev_dependencies:
   flutter_test:
@@ -41,6 +44,7 @@ flutter:
 
   assets:
     - assets/icon/
+    - assets/images/
 
 flutter_launcher_icons:
   android: true
