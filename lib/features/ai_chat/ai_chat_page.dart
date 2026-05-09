@@ -10,6 +10,49 @@ import 'package:record/record.dart';
 import '../../services/argos_ai_service.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import '../camera/camera_page.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+
+class ArgosAiService {
+  ArgosAiService._();
+
+  static final ArgosAiService instance = ArgosAiService._();
+
+  final FirebaseFunctions _functions = FirebaseFunctions.instanceFor(
+    region: 'us-central1',
+  );
+
+  Future<String> sendMessage({
+    required String text,
+    required String inspectionId,
+  }) async {
+    final user = FirebaseAuth.instance.currentUser;
+
+    debugPrint('Usuário Firebase atual: ${user?.uid}');
+    debugPrint('Email Firebase atual: ${user?.email}');
+
+    if (user == null) {
+      throw FirebaseFunctionsException(
+        code: 'unauthenticated',
+        message: 'Usuário não está logado no Firebase Auth.',
+      );
+    }
+
+    await user.getIdToken(true);
+
+    final callable = _functions.httpsCallable('sendArgosMessage');
+
+    final result = await callable.call<Map<String, dynamic>>({
+      'text': text.trim(),
+      'inspectionId': inspectionId,
+    });
+
+    final data = result.data;
+
+    return data['reply']?.toString() ??
+        'Entendi. Pode continuar descrevendo a vistoria.';
+  }
+}
 
 enum ChatMessageType { ai, user, photo, audio }
 

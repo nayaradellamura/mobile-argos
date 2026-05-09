@@ -1,70 +1,128 @@
+const crypto = require("crypto");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
-const { GoogleAuth } = require("google-auth-library");
+const dialogflowCx = require("@google-cloud/dialogflow-cx");
+
+/**
+ * Arquitetura atual:
+ *
+ * Function roda no projeto Firebase principal:
+ * - fho-argos
+ *
+ * Agente IA / Dialogflow CX fica em outro projeto:
+ * - tcc-fho
+ *
+ * Firestore/banco:
+ * - ajuste DB_PROJECT_ID conforme onde está seu banco.
+ */
+
+const FUNCTION_PROJECT_ID = process.env.GCLOUD_PROJECT || "fho-argos";
+
+const AI_PROJECT_ID = "tcc-fho";
+const DB_PROJECT_ID = "tcc-fho";
+
+const LOCATION = "us-central1";
+const AGENT_ID = "8ece03b0-a71c-4860-818f-422d9c61ddac";
+const LANGUAGE_CODE = "pt-BR";
 
 admin.initializeApp();
 
-const db = admin.firestore();
-
-const CES_PROJECT_ID = "fho-argos";
-const CES_LOCATION = "us";
-const CES_APP_ID = "bf229998-26cb-4f10-bdf6-aa64656acafc";
-const CES_APP_VERSION =
-  "projects/fho-argos/locations/us/apps/bf229998-26cb-4f10-bdf6-aa64656acafc/versions/09d758a4-dcd9-4234-8076-e131c837267a";
-const CES_DEPLOYMENT =
-  "projects/fho-argos/locations/us/apps/bf229998-26cb-4f10-bdf6-aa64656acafc/deployments/ae6ecdc5-17f7-4223-8e95-3b00f9be3d4e";
-
-const auth = new GoogleAuth({
-  scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+const dialogflowClient = new dialogflowCx.SessionsClient({
+  apiEndpoint: LOCATION + "-dialogflow.googleapis.com",
 });
 
-function sanitizeSessionId(value) {
-  return String(value || "session")
-    .replace(/[^a-zA-Z0-9_-]/g, "_")
-    .slice(0, 80);
+function getFirestoreDb() {
+  if (DB_PROJECT_ID === FUNCTION_PROJECT_ID) {
+    return admin.firestore();
+  }
+
+  try {
+    return admin.app("db-project").firestore();
+  } catch (error) {
+    const dbApp = admin.initializeApp(
+      {
+        projectId: DB_PROJECT_ID,
+      },
+      "db-project"
+    );
+
+    return dbApp.firestore();
+  }
 }
 
-function extractReplyFromCes(responseJson) {
-  const outputs = responseJson.outputs || [];
-  const parts = [];
+const db = getFirestoreDb();
 
-  for (const output of outputs) {
-    if (output.text) {
-      parts.push(output.text);
-    }
+function createSessionId(uid, inspectionId) {
+  return crypto
+    .createHash("sha256")
+    .update(String(uid) + "_" + String(inspectionId))
+    .digest("hex")
+    .slice(0, 32);
+}
 
-    if (output.message && output.message.text) {
-      parts.push(output.message.text);
-    }
+function extractDialogflowReply(response) {
+  let responseMessages = [];
 
-    if (output.response && output.response.text) {
-      parts.push(output.response.text);
-    }
+  if (
+    response &&
+    response.queryResult &&
+    response.queryResult.responseMessages
+  ) {
+    responseMessages = response.queryResult.responseMessages;
+  }
 
-    if (output.content && output.content.text) {
-      parts.push(output.content.text);
-    }
+  const replyParts = [];
 
-    if (output.messages && Array.isArray(output.messages)) {
-      for (const message of output.messages) {
-        if (message.text) {
-          parts.push(message.text);
-        }
-
-        if (message.content && message.content.text) {
-          parts.push(message.content.text);
+  for (const message of responseMessages) {
+    if (
+      message.text &&
+      message.text.text &&
+      Array.isArray(message.text.text)
+    ) {
+      for (const textPart of message.text.text) {
+        if (textPart) {
+          replyParts.push(String(textPart));
         }
       }
     }
   }
 
-  return (
-    parts
-      .filter(Boolean)
-      .map((item) => String(item))
-      .join("\n")
-      .trim() || "Entendi. Pode continuar descrevendo a vistoria."
-  );
+  const reply = replyParts.join("\n").trim();
+
+  if (reply) {
+    return reply;
+  }
+
+  return "Entendi. Pode continuar descrevendo a vistoria.";
+}
+
+function buildErrorDetails(error, step) {
+  return {
+    step: step,
+    code: error && error.code ? error.code : null,
+    message: error && error.message ? error.message : null,
+    details: error && error.details ? error.details : null,
+  };
+}
+
+async function saveChatMessage({
+  inspectionId,
+  senderId,
+  senderType,
+  messageType,
+  text,
+}) {
+  await db
+    .collection("inspections")
+    .doc(inspectionId)
+    .collection("chatMessages")
+    .add({
+      senderId: senderId,
+      senderType: senderType,
+      messageType: messageType,
+      text: text,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
 }
 
 exports.sendArgosMessage = onCall(
@@ -73,10 +131,11 @@ exports.sendArgosMessage = onCall(
   },
   async (request) => {
     if (!request.auth) {
-      throw new HttpsError(
+      /*throw new HttpsError(
         "unauthenticated",
         "Usuário precisa estar autenticado."
-      );
+      ); */
+      const uid = request.auth ? request.auth.uid : "debug_user";
     }
 
     const uid = request.auth.uid;
@@ -87,97 +146,88 @@ exports.sendArgosMessage = onCall(
       throw new HttpsError("invalid-argument", "Mensagem vazia.");
     }
 
-    const sessionId = sanitizeSessionId(`${uid}_${inspectionId}`);
-    const session =
-      `projects/${CES_PROJECT_ID}/locations/${CES_LOCATION}` +
-      `/apps/${CES_APP_ID}/sessions/${sessionId}`;
+    const sessionId = createSessionId(uid, inspectionId);
 
-    const url =
-      `https://ces.googleapis.com/v1beta/projects/${CES_PROJECT_ID}` +
-      `/locations/${CES_LOCATION}/apps/${CES_APP_ID}` +
-      `/sessions/${sessionId}:runSession`;
+    const sessionPath = dialogflowClient.projectLocationAgentSessionPath(
+      AI_PROJECT_ID,
+      LOCATION,
+      AGENT_ID,
+      sessionId
+    );
 
-    const body = {
-      config: {
-        session: session,
-        app_version: CES_APP_VERSION,
-        deployment: CES_DEPLOYMENT,
-      },
-      inputs: [
-        {
-          text: text,
-        },
-      ],
-    };
+    let currentStep = "start";
+
+    console.log("sendArgosMessage iniciado");
+    console.log("FUNCTION_PROJECT_ID:", FUNCTION_PROJECT_ID);
+    console.log("AI_PROJECT_ID:", AI_PROJECT_ID);
+    console.log("DB_PROJECT_ID:", DB_PROJECT_ID);
+    console.log("LOCATION:", LOCATION);
+    console.log("AGENT_ID:", AGENT_ID);
+    console.log("inspectionId:", inspectionId);
+    console.log("sessionPath:", sessionPath);
 
     try {
-      await db
-        .collection("inspections")
-        .doc(inspectionId)
-        .collection("chatMessages")
-        .add({
-          senderId: uid,
-          senderType: "mechanic",
-          messageType: "text",
-          text: text,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
+      currentStep = "save_user_message_firestore";
+      console.log("1 - Salvando mensagem do usuário no Firestore");
 
-      const client = await auth.getClient();
-      const accessTokenResponse = await client.getAccessToken();
-      const accessToken = accessTokenResponse.token;
-
-      const cesResponse = await fetch(url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
+      await saveChatMessage({
+        inspectionId: inspectionId,
+        senderId: uid,
+        senderType: "mechanic",
+        messageType: "text",
+        text: text,
       });
 
-      const responseText = await cesResponse.text();
+      currentStep = "dialogflow_detect_intent";
+      console.log("2 - Mensagem salva. Chamando Dialogflow CX");
 
-      if (!cesResponse.ok) {
-        console.error("CES status:", cesResponse.status);
-        console.error("CES response:", responseText);
+      const detectIntentRequest = {
+        session: sessionPath,
+        queryInput: {
+          text: {
+            text: text,
+          },
+          languageCode: LANGUAGE_CODE,
+        },
+      };
 
-        throw new Error(
-          `CES API error ${cesResponse.status}: ${responseText}`
-        );
-      }
+      const result = await dialogflowClient.detectIntent(detectIntentRequest);
+      const response = result[0];
 
-      const responseJson = JSON.parse(responseText);
-      console.log("CES response JSON:", JSON.stringify(responseJson));
+      console.log("3 - Dialogflow CX respondeu");
 
-      const reply = extractReplyFromCes(responseJson);
+      const reply = extractDialogflowReply(response);
 
-      await db
-        .collection("inspections")
-        .doc(inspectionId)
-        .collection("chatMessages")
-        .add({
-          senderId: "argos_ai",
-          senderType: "ai",
-          messageType: "text",
-          text: reply,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
+      currentStep = "save_ai_message_firestore";
+      console.log("4 - Salvando resposta da IA no Firestore");
+
+      await saveChatMessage({
+        inspectionId: inspectionId,
+        senderId: "argos_ai",
+        senderType: "ai",
+        messageType: "text",
+        text: reply,
+      });
+
+      console.log("5 - Fluxo concluído com sucesso");
 
       return {
         reply: reply,
         inspectionId: inspectionId,
+        sessionId: sessionId,
       };
     } catch (error) {
-      console.error("Erro ao conversar com CES:", error);
-      console.error("message:", error.message);
+      console.error("Erro ao conversar com o assistente Argos");
+      console.error("step:", currentStep);
+      console.error("code:", error && error.code ? error.code : null);
+      console.error("message:", error && error.message ? error.message : null);
+      console.error("details:", error && error.details ? error.details : null);
+      console.error("raw error:", error);
 
       throw new HttpsError(
         "internal",
         "Não foi possível conversar com o assistente Argos.",
-        {
-          message: error.message || null,
-        }
+        buildErrorDetails(error, currentStep)
       );
     }
   }

@@ -66,6 +66,16 @@ class _LoginPageState extends State<LoginPage> {
         return 'Falha de conexão. Verifique sua internet.';
       case 'missing-id-token':
         return 'O Google não retornou idToken. Confira as configurações do Firebase/Google Sign-In.';
+      case 'account-exists-with-different-credential':
+        return 'Já existe uma conta com este e-mail usando outro método de login.';
+      case 'credential-already-in-use':
+        return 'Essa credencial já está vinculada a outra conta.';
+      case 'provider-already-linked':
+        return 'Esse método de login já está vinculado à sua conta.';
+      case 'google-email-mismatch':
+        return 'A conta Google selecionada é diferente do e-mail informado.';
+      case 'google-sign-in-cancelled':
+        return 'Login com Google cancelado.';
       default:
         return e.message ?? 'Erro ao autenticar.';
     }
@@ -80,6 +90,41 @@ class _LoginPageState extends State<LoginPage> {
       default:
         return 'Você não possui permissão para acessar o sistema.';
     }
+  }
+
+  String _tipoAcessoFromProvider(String provider) {
+    return provider == 'google' ? 'sso_google' : 'email_senha';
+  }
+
+  String _providerIdFromProvider(String provider) {
+    return provider == 'google'
+        ? GoogleAuthProvider.PROVIDER_ID
+        : EmailAuthProvider.PROVIDER_ID;
+  }
+
+  String _mergedTipoAcesso({
+    required String currentTipoAcesso,
+    required String newTipoAcesso,
+  }) {
+    final hasPassword =
+        currentTipoAcesso.contains('email_senha') ||
+        currentTipoAcesso.contains('password') ||
+        newTipoAcesso == 'email_senha';
+
+    final hasGoogle =
+        currentTipoAcesso.contains('sso_google') ||
+        currentTipoAcesso.contains('google') ||
+        newTipoAcesso == 'sso_google';
+
+    if (hasPassword && hasGoogle) {
+      return 'email_senha_sso_google';
+    }
+
+    if (hasGoogle) {
+      return 'sso_google';
+    }
+
+    return 'email_senha';
   }
 
   Future<void> _signOutDeniedAccess({bool google = false}) async {
@@ -99,9 +144,8 @@ class _LoginPageState extends State<LoginPage> {
     required String provider,
   }) async {
     final email = _normalizeEmail(user.email ?? '');
-    final expectedTipoAcesso = provider == 'google'
-        ? 'sso_google'
-        : 'email_senha';
+    final newTipoAcesso = _tipoAcessoFromProvider(provider);
+    final newProviderId = _providerIdFromProvider(provider);
 
     if (email.isEmpty) {
       await _signOutDeniedAccess(google: provider == 'google');
@@ -114,8 +158,6 @@ class _LoginPageState extends State<LoginPage> {
       return false;
     }
 
-    // Regra nova: o documento do parceiro sempre é users/{email_normalizado}.
-    // O uid do Firebase Authentication fica dentro do campo authUid.
     final userRef = FirebaseFirestore.instance
         .collection(usersCollection)
         .doc(email);
@@ -136,9 +178,14 @@ class _LoginPageState extends State<LoginPage> {
         'empresa': '',
         'departamento': '',
         'provider': provider,
-        'tipoAcesso': expectedTipoAcesso,
+        'tipoAcesso': newTipoAcesso,
+        'providers': FieldValue.arrayUnion([newTipoAcesso]),
+        'authProviderIds': FieldValue.arrayUnion([newProviderId]),
         'status': 'pendente',
         'origem': provider == 'google' ? 'sso_google' : 'login_email_senha',
+        'origens': FieldValue.arrayUnion([
+          provider == 'google' ? 'sso_google' : 'login_email_senha',
+        ]),
         'criadoEm': FieldValue.serverTimestamp(),
         'atualizadoEm': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
@@ -155,30 +202,26 @@ class _LoginPageState extends State<LoginPage> {
 
     final data = userSnap.data() ?? {};
     final status = data['status']?.toString() ?? 'pendente';
-    final tipoAcesso = data['tipoAcesso']?.toString() ?? '';
+    final currentTipoAcesso = data['tipoAcesso']?.toString() ?? '';
 
-    // Bloqueia redundância: o mesmo e-mail não pode trocar de modalidade sozinho.
-    if (tipoAcesso.isNotEmpty && tipoAcesso != expectedTipoAcesso) {
-      await _signOutDeniedAccess(google: provider == 'google');
+    final mergedTipoAcesso = _mergedTipoAcesso(
+      currentTipoAcesso: currentTipoAcesso,
+      newTipoAcesso: newTipoAcesso,
+    );
 
-      _showSnack(
-        expectedTipoAcesso == 'sso_google'
-            ? 'Este e-mail já possui solicitação/cadastro por e-mail e senha. Use esse método ou contate o administrador.'
-            : 'Este e-mail já possui solicitação/cadastro por Google SSO. Use o botão Continuar com Google ou contate o administrador.',
-        backgroundColor: Colors.redAccent,
-      );
-
-      return false;
-    }
-
-    // Se for o mesmo tipo de acesso, mantém o documento único por e-mail e atualiza o authUid quando existir login autenticado.
+    // Nova regra:
+    // Mesmo e-mail pode usar e-mail/senha e Google.
+    // Não bloqueia mais troca de modalidade.
+    // O documento continua único em users/{email_normalizado}.
     await userRef.set({
       'uid': user.uid,
       'authUid': user.uid,
       'email': email,
       'emailKey': email,
       'provider': provider,
-      'tipoAcesso': expectedTipoAcesso,
+      'tipoAcesso': mergedTipoAcesso,
+      'providers': FieldValue.arrayUnion([newTipoAcesso]),
+      'authProviderIds': FieldValue.arrayUnion([newProviderId]),
       'displayName':
           user.displayName ?? data['displayName'] ?? data['nome'] ?? '',
       'nome': data['nome'] ?? user.displayName ?? '',
@@ -210,6 +253,244 @@ class _LoginPageState extends State<LoginPage> {
     return false;
   }
 
+  Future<String?> _showPasswordToLinkGoogleDialog({
+    required String email,
+  }) async {
+    final controller = TextEditingController();
+
+    final password = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        bool obscure = true;
+
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(24),
+              ),
+              title: Text(
+                'Vincular conta Google',
+                style: GoogleFonts.spaceGrotesk(fontWeight: FontWeight.bold),
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Já existe uma conta com o e-mail $email. Digite a senha atual para vincular o login com Google à mesma conta.',
+                    style: const TextStyle(color: Color(0xFF414755)),
+                  ),
+                  const SizedBox(height: 18),
+                  TextField(
+                    controller: controller,
+                    obscureText: obscure,
+                    autofocus: true,
+                    decoration: InputDecoration(
+                      labelText: 'Senha atual',
+                      prefixIcon: const Icon(Icons.lock_outline),
+                      suffixIcon: IconButton(
+                        onPressed: () {
+                          setDialogState(() {
+                            obscure = !obscure;
+                          });
+                        },
+                        icon: Icon(
+                          obscure
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined,
+                        ),
+                      ),
+                      filled: true,
+                      fillColor: const Color(0xFFE5F6FF),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(18),
+                        borderSide: BorderSide.none,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.of(dialogContext).pop(null);
+                  },
+                  child: const Text('Cancelar'),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    Navigator.of(dialogContext).pop(controller.text);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0057C0),
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('Vincular'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    controller.dispose();
+
+    return password;
+  }
+
+  Future<bool> _showConfirmLinkPasswordToGoogleDialog({
+    required String email,
+  }) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          title: Text(
+            'Vincular senha',
+            style: GoogleFonts.spaceGrotesk(fontWeight: FontWeight.bold),
+          ),
+          content: Text(
+            'Este e-mail parece estar cadastrado com Google. Deseja entrar com Google e vincular a senha informada para acessar também por e-mail e senha?',
+            style: const TextStyle(color: Color(0xFF414755)),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(dialogContext).pop(false);
+              },
+              child: const Text('Cancelar'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(dialogContext).pop(true);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF0057C0),
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('Entrar com Google'),
+            ),
+          ],
+        );
+      },
+    );
+
+    return result ?? false;
+  }
+
+  Future<UserCredential> _linkGoogleToEmailPasswordAccount({
+    required String email,
+    required String password,
+    required AuthCredential googleCredential,
+  }) async {
+    final emailCredential = await FirebaseAuth.instance
+        .signInWithEmailAndPassword(email: email, password: password);
+
+    final user = emailCredential.user;
+
+    if (user == null) {
+      throw FirebaseAuthException(
+        code: 'user-null',
+        message: 'Não foi possível carregar os dados do usuário.',
+      );
+    }
+
+    try {
+      return await user.linkWithCredential(googleCredential);
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'provider-already-linked' ||
+          e.code == 'credential-already-in-use') {
+        return emailCredential;
+      }
+
+      rethrow;
+    }
+  }
+
+  Future<UserCredential> _signInWithGoogleAndLinkPassword({
+    required String email,
+    required String password,
+  }) async {
+    final normalizedEmail = _normalizeEmail(email);
+
+    final googleSignIn = GoogleSignIn(
+      scopes: const ['email', 'profile'],
+      serverClientId: webClientId.isEmpty ? null : webClientId,
+    );
+
+    await googleSignIn.signOut();
+
+    final googleUser = await googleSignIn.signIn();
+
+    if (googleUser == null) {
+      throw FirebaseAuthException(
+        code: 'google-sign-in-cancelled',
+        message: 'Login com Google cancelado.',
+      );
+    }
+
+    final googleEmail = _normalizeEmail(googleUser.email);
+
+    if (googleEmail != normalizedEmail) {
+      await googleSignIn.signOut();
+
+      throw FirebaseAuthException(
+        code: 'google-email-mismatch',
+        message: 'A conta Google selecionada é diferente do e-mail informado.',
+      );
+    }
+
+    final googleAuth = await googleUser.authentication;
+
+    if (googleAuth.idToken == null) {
+      throw FirebaseAuthException(
+        code: 'missing-id-token',
+        message:
+            'O Google não retornou idToken. Confira SHA-1, SHA-256, OAuth Client e google-services.json.',
+      );
+    }
+
+    final googleCredential = GoogleAuthProvider.credential(
+      accessToken: googleAuth.accessToken,
+      idToken: googleAuth.idToken,
+    );
+
+    final firebaseCredential = await FirebaseAuth.instance.signInWithCredential(
+      googleCredential,
+    );
+
+    final user = firebaseCredential.user;
+
+    if (user == null) {
+      throw FirebaseAuthException(
+        code: 'user-null',
+        message: 'Não foi possível carregar os dados do usuário Google.',
+      );
+    }
+
+    final passwordCredential = EmailAuthProvider.credential(
+      email: normalizedEmail,
+      password: password,
+    );
+
+    try {
+      return await user.linkWithCredential(passwordCredential);
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'provider-already-linked' ||
+          e.code == 'email-already-in-use' ||
+          e.code == 'credential-already-in-use') {
+        return firebaseCredential;
+      }
+
+      rethrow;
+    }
+  }
+
   Future<void> signInWithEmailAndPassword() async {
     if (isLoading) return;
 
@@ -219,14 +500,17 @@ class _LoginPageState extends State<LoginPage> {
 
     FocusScope.of(context).unfocus();
 
+    final email = _normalizeEmail(emailController.text);
+    final password = passwordController.text.trim();
+
     setState(() {
       isLoading = true;
     });
 
     try {
       final credential = await FirebaseAuth.instance.signInWithEmailAndPassword(
-        email: emailController.text.trim(),
-        password: passwordController.text.trim(),
+        email: email,
+        password: password,
       );
 
       final user = credential.user;
@@ -244,6 +528,89 @@ class _LoginPageState extends State<LoginPage> {
 
       if (e.code == 'user-disabled') {
         await FirebaseAuth.instance.signOut();
+        _showSnack(_authErrorMessage(e), backgroundColor: Colors.redAccent);
+        return;
+      }
+
+      if (e.code == 'invalid-credential' || e.code == 'wrong-password') {
+        try {
+          final userRef = FirebaseFirestore.instance
+              .collection(usersCollection)
+              .doc(email);
+
+          final userSnap = await userRef.get();
+          final data = userSnap.data() ?? {};
+
+          final tipoAcesso = data['tipoAcesso']?.toString() ?? '';
+          final provider = data['provider']?.toString() ?? '';
+          final ultimoProvider = data['ultimoProvider']?.toString() ?? '';
+
+          final providersRaw = data['providers'];
+          final authProviderIdsRaw = data['authProviderIds'];
+
+          final providers = providersRaw is List
+              ? providersRaw.map((item) => item.toString()).toList()
+              : <String>[];
+
+          final authProviderIds = authProviderIdsRaw is List
+              ? authProviderIdsRaw.map((item) => item.toString()).toList()
+              : <String>[];
+
+          final hasGoogleProvider =
+              tipoAcesso.contains('sso_google') ||
+              tipoAcesso.contains('google') ||
+              provider == 'google' ||
+              ultimoProvider == 'google' ||
+              providers.contains('sso_google') ||
+              providers.contains('google') ||
+              authProviderIds.contains(GoogleAuthProvider.PROVIDER_ID);
+
+          if (hasGoogleProvider) {
+            final shouldLink = await _showConfirmLinkPasswordToGoogleDialog(
+              email: email,
+            );
+
+            if (!shouldLink) {
+              _showSnack(
+                'Use o botão Continuar com Google para acessar esta conta.',
+                backgroundColor: const Color(0xFF0057C0),
+              );
+              return;
+            }
+
+            final linkedCredential = await _signInWithGoogleAndLinkPassword(
+              email: email,
+              password: password,
+            );
+
+            final user = linkedCredential.user;
+
+            if (user == null) {
+              throw FirebaseAuthException(
+                code: 'user-null',
+                message: 'Não foi possível carregar os dados do usuário.',
+              );
+            }
+
+            _showSnack(
+              'Senha vinculada à conta Google com sucesso.',
+              backgroundColor: Colors.green,
+            );
+
+            await _validateUserAccessAfterLogin(user, provider: 'password');
+            return;
+          }
+        } catch (linkError) {
+          debugPrint('Email -> Google link flow error: $linkError');
+
+          if (linkError is FirebaseAuthException) {
+            _showSnack(
+              _authErrorMessage(linkError),
+              backgroundColor: Colors.redAccent,
+            );
+            return;
+          }
+        }
       }
 
       _showSnack(_authErrorMessage(e), backgroundColor: Colors.redAccent);
@@ -272,12 +639,12 @@ class _LoginPageState extends State<LoginPage> {
       isLoading = true;
     });
 
-    try {
-      final googleSignIn = GoogleSignIn(
-        scopes: const ['email', 'profile'],
-        serverClientId: webClientId.isEmpty ? null : webClientId,
-      );
+    final googleSignIn = GoogleSignIn(
+      scopes: const ['email', 'profile'],
+      serverClientId: webClientId.isEmpty ? null : webClientId,
+    );
 
+    try {
       await googleSignIn.signOut();
 
       final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
@@ -302,8 +669,41 @@ class _LoginPageState extends State<LoginPage> {
         idToken: googleAuth.idToken,
       );
 
-      final firebaseCredential = await FirebaseAuth.instance
-          .signInWithCredential(credential);
+      UserCredential firebaseCredential;
+
+      try {
+        firebaseCredential = await FirebaseAuth.instance.signInWithCredential(
+          credential,
+        );
+      } on FirebaseAuthException catch (e) {
+        if (e.code != 'account-exists-with-different-credential') {
+          rethrow;
+        }
+
+        final email = _normalizeEmail(e.email ?? googleUser.email);
+
+        if (email.isEmpty) {
+          rethrow;
+        }
+
+        final password = await _showPasswordToLinkGoogleDialog(email: email);
+
+        if (password == null || password.trim().isEmpty) {
+          await googleSignIn.signOut();
+          return;
+        }
+
+        firebaseCredential = await _linkGoogleToEmailPasswordAccount(
+          email: email,
+          password: password.trim(),
+          googleCredential: credential,
+        );
+
+        _showSnack(
+          'Conta Google vinculada com sucesso.',
+          backgroundColor: Colors.green,
+        );
+      }
 
       final user = firebaseCredential.user;
 
@@ -438,20 +838,10 @@ class _LoginPageState extends State<LoginPage> {
           final existingData = existingUserSnap.data() ?? {};
           final existingStatus =
               existingData['status']?.toString() ?? 'pendente';
-          final existingTipoAcesso =
-              existingData['tipoAcesso']?.toString() ?? '';
-
-          if (existingTipoAcesso == 'sso_google') {
-            _showSnack(
-              'Este e-mail já possui solicitação/cadastro por Google SSO. Use o botão Continuar com Google ou contate o administrador.',
-              backgroundColor: Colors.redAccent,
-            );
-            return;
-          }
 
           if (existingStatus == 'ativo') {
             _showSnack(
-              'Este e-mail já está liberado. Faça login com e-mail e senha.',
+              'Este e-mail já está liberado. Entre com o método usado anteriormente. Se quiser adicionar outro método, use a opção de vinculação no login.',
               backgroundColor: Colors.green,
             );
             return;
@@ -489,8 +879,13 @@ class _LoginPageState extends State<LoginPage> {
               'departamento': '',
               'provider': 'password',
               'tipoAcesso': 'email_senha',
+              'providers': FieldValue.arrayUnion(['email_senha']),
+              'authProviderIds': FieldValue.arrayUnion([
+                EmailAuthProvider.PROVIDER_ID,
+              ]),
               'status': 'pendente',
               'origem': 'primeiro_acesso',
+              'origens': FieldValue.arrayUnion(['primeiro_acesso']),
               'criadoEm': FieldValue.serverTimestamp(),
               'atualizadoEm': FieldValue.serverTimestamp(),
             }, SetOptions(merge: true));
@@ -558,7 +953,6 @@ class _LoginPageState extends State<LoginPage> {
             child: Column(
               children: [
                 const SizedBox(height: 32),
-
                 Container(
                   width: 90,
                   height: 90,
@@ -579,9 +973,7 @@ class _LoginPageState extends State<LoginPage> {
                     size: 42,
                   ),
                 ),
-
                 const SizedBox(height: 24),
-
                 Text(
                   'Argos',
                   style: GoogleFonts.spaceGrotesk(
@@ -590,9 +982,7 @@ class _LoginPageState extends State<LoginPage> {
                     color: const Color(0xFF0057C0),
                   ),
                 ),
-
                 const SizedBox(height: 8),
-
                 Text(
                   'VISTORIAS INTELIGENTES',
                   style: GoogleFonts.spaceGrotesk(
@@ -602,9 +992,7 @@ class _LoginPageState extends State<LoginPage> {
                     color: const Color(0xFF414755),
                   ),
                 ),
-
                 const SizedBox(height: 42),
-
                 Container(
                   padding: const EdgeInsets.all(28),
                   decoration: BoxDecoration(
@@ -630,17 +1018,13 @@ class _LoginPageState extends State<LoginPage> {
                             fontWeight: FontWeight.bold,
                           ),
                         ),
-
                         const SizedBox(height: 8),
-
                         const Text(
                           'Entre com e-mail e senha ou utilize SSO Google',
                           textAlign: TextAlign.center,
                           style: TextStyle(color: Color(0xFF414755)),
                         ),
-
                         const SizedBox(height: 28),
-
                         TextFormField(
                           controller: emailController,
                           keyboardType: TextInputType.emailAddress,
@@ -669,9 +1053,7 @@ class _LoginPageState extends State<LoginPage> {
                             return null;
                           },
                         ),
-
                         const SizedBox(height: 16),
-
                         TextFormField(
                           controller: passwordController,
                           obscureText: obscurePassword,
@@ -715,9 +1097,7 @@ class _LoginPageState extends State<LoginPage> {
                             return null;
                           },
                         ),
-
                         const SizedBox(height: 20),
-
                         SizedBox(
                           width: double.infinity,
                           height: 56,
@@ -754,9 +1134,7 @@ class _LoginPageState extends State<LoginPage> {
                             ),
                           ),
                         ),
-
                         const SizedBox(height: 14),
-
                         Wrap(
                           alignment: WrapAlignment.center,
                           spacing: 12,
@@ -780,9 +1158,7 @@ class _LoginPageState extends State<LoginPage> {
                             ),
                           ],
                         ),
-
                         const SizedBox(height: 16),
-
                         Row(
                           children: [
                             Expanded(
@@ -805,9 +1181,7 @@ class _LoginPageState extends State<LoginPage> {
                             ),
                           ],
                         ),
-
                         const SizedBox(height: 20),
-
                         SizedBox(
                           width: double.infinity,
                           height: 56,
@@ -830,9 +1204,7 @@ class _LoginPageState extends State<LoginPage> {
                             ),
                           ),
                         ),
-
                         const SizedBox(height: 24),
-
                         const Text(
                           'Acesso exclusivo para mecânicos credenciados.',
                           textAlign: TextAlign.center,
@@ -845,9 +1217,7 @@ class _LoginPageState extends State<LoginPage> {
                     ),
                   ),
                 ),
-
                 const SizedBox(height: 32),
-
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -872,7 +1242,6 @@ class _LoginPageState extends State<LoginPage> {
                     ),
                   ],
                 ),
-
                 const SizedBox(height: 20),
               ],
             ),

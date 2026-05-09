@@ -13,9 +13,9 @@
   },
   "main": "index.js",
   "dependencies": {
+    "@google-cloud/dialogflow-cx": "^5.6.0",
     "firebase-admin": "^12.7.0",
-    "firebase-functions": "^6.1.2",
-    "google-auth-library": "^9.15.1"
+    "firebase-functions": "^6.1.2"
   },
   "devDependencies": {},
   "private": true
