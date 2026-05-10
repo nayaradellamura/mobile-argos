@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shimmer/shimmer.dart';
 
 class InspectionsPage extends StatefulWidget {
   final VoidCallback onOpenInspection;
@@ -192,23 +193,7 @@ class _InspectionsPageState extends State<InspectionsPage> {
       future: _credenciadoFuture,
       builder: (context, accessSnapshot) {
         if (accessSnapshot.connectionState == ConnectionState.waiting) {
-          return const SafeArea(
-            child: Column(
-              children: [
-                _InspectionsHeader(
-                  total: 0,
-                  pending: 0,
-                  inProgress: 0,
-                  checkedIn: 0,
-                ),
-                Expanded(
-                  child: Center(
-                    child: CircularProgressIndicator(color: Color(0xFF0057C0)),
-                  ),
-                ),
-              ],
-            ),
-          );
+          return const _InspectionsSkeleton();
         }
 
         if (accessSnapshot.hasError) {
@@ -273,51 +258,14 @@ class _InspectionsPageState extends State<InspectionsPage> {
         final contextData = accessSnapshot.data;
 
         if (contextData == null || contextData.credenciadoId.isEmpty) {
-          return const SafeArea(
-            child: Column(
-              children: [
-                _InspectionsHeader(
-                  total: 0,
-                  pending: 0,
-                  inProgress: 0,
-                  checkedIn: 0,
-                ),
-                Expanded(
-                  child: _StateMessage(
-                    icon: Icons.business_outlined,
-                    title: 'Oficina não encontrada',
-                    message:
-                        'Não foi possível encontrar uma oficina vinculada ao seu usuário.',
-                  ),
-                ),
-              ],
-            ),
-          );
+          return const _InspectionsSkeleton();
         }
 
         return StreamBuilder<List<InspectionCase>>(
           stream: _inspectionStream(contextData.credenciadoId),
           builder: (context, inspectionSnapshot) {
             if (inspectionSnapshot.connectionState == ConnectionState.waiting) {
-              return const SafeArea(
-                child: Column(
-                  children: [
-                    _InspectionsHeader(
-                      total: 0,
-                      pending: 0,
-                      inProgress: 0,
-                      checkedIn: 0,
-                    ),
-                    Expanded(
-                      child: Center(
-                        child: CircularProgressIndicator(
-                          color: Color(0xFF0057C0),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              );
+              return const _InspectionsSkeleton();
             }
 
             if (inspectionSnapshot.hasError) {
@@ -1359,6 +1307,130 @@ class _StateMessage extends StatelessWidget {
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _InspectionsSkeleton extends StatelessWidget {
+  const _InspectionsSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Column(
+        children: [
+          const _InspectionsHeader(
+            total: 0,
+            pending: 0,
+            inProgress: 0,
+            checkedIn: 0,
+          ),
+          Expanded(
+            child: ListView.separated(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+              itemCount: 5,
+              separatorBuilder: (_, __) => const SizedBox(height: 12),
+              itemBuilder: (context, index) {
+                return const _InspectionSkeletonCard();
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InspectionSkeletonCard extends StatelessWidget {
+  const _InspectionSkeletonCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return Shimmer.fromColors(
+      baseColor: const Color(0xFFE5EEF5),
+      highlightColor: Colors.white,
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: Colors.black.withOpacity(.04)),
+        ),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                _SkeletonBox(
+                  width: 52,
+                  height: 52,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _SkeletonBox(width: double.infinity, height: 16),
+                      SizedBox(height: 8),
+                      _SkeletonBox(width: 190, height: 12),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                _SkeletonBox(
+                  width: 22,
+                  height: 22,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            const Row(
+              children: [
+                _SkeletonBox(width: 92, height: 26),
+                SizedBox(width: 8),
+                _SkeletonBox(width: 72, height: 26),
+              ],
+            ),
+            const SizedBox(height: 12),
+            const Row(
+              children: [
+                _SkeletonBox(width: 18, height: 18),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _SkeletonBox(width: double.infinity, height: 12),
+                ),
+                SizedBox(width: 16),
+                _SkeletonBox(width: 70, height: 12),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SkeletonBox extends StatelessWidget {
+  final double width;
+  final double height;
+  final BorderRadius? borderRadius;
+
+  const _SkeletonBox({
+    required this.width,
+    required this.height,
+    this.borderRadius,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: width == double.infinity ? null : width,
+      height: height,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: borderRadius ?? BorderRadius.circular(999),
       ),
     );
   }
