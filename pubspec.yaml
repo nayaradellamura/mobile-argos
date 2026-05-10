@@ -31,6 +31,7 @@ dependencies:
   http: ^1.6.0
   flutter_svg: ^2.0.10
   audio_converter_native: ^1.0.4
+  connectivity_plus: ^7.1.1
 
 dev_dependencies:
   flutter_test:

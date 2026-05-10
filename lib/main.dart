@@ -10,6 +10,7 @@ import 'firebase_options.dart';
 
 import 'features/auth/login_page.dart';
 import 'app/main_shell.dart';
+import 'package:argos_app/features/network/argos_network_gate.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -37,6 +38,9 @@ class ArgosApp extends StatelessWidget {
         textTheme: GoogleFonts.interTextTheme(),
         useMaterial3: true,
       ),
+      builder: (context, child) {
+        return ArgosNetworkGate(child: child ?? const SizedBox.shrink());
+      },
       home: const StartupGate(),
     );
   }
