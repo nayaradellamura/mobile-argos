@@ -2,6 +2,8 @@
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'services/argos_push_notification_service.dart';
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -15,7 +17,13 @@ import 'package:argos_app/features/network/argos_network_gate.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  await Firebase.initializeApp();
+
+  FirebaseMessaging.onBackgroundMessage(
+    argosFirebaseMessagingBackgroundHandler,
+  );
+
+  await ArgosPushNotificationService.instance.initialize();
 
   runApp(const ArgosApp());
 }

@@ -4,6 +4,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import '../../services/argos_push_notification_service.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -522,7 +523,19 @@ class _LoginPageState extends State<LoginPage> {
         );
       }
 
-      await _validateUserAccessAfterLogin(user, provider: 'password');
+      final canAccess = await _validateUserAccessAfterLogin(
+        user,
+        provider: 'password',
+      );
+
+      if (canAccess) {
+        final user = FirebaseAuth.instance.currentUser;
+
+        if (user != null) {
+          await ArgosPushNotificationService.instance
+              .registerDeviceTokenForCurrentUser();
+        }
+      }
     } on FirebaseAuthException catch (e) {
       debugPrint('Email login error: ${e.code} - ${e.message}');
 
@@ -714,7 +727,15 @@ class _LoginPageState extends State<LoginPage> {
         );
       }
 
-      await _validateUserAccessAfterLogin(user, provider: 'google');
+      final canAccess = await _validateUserAccessAfterLogin(
+        user,
+        provider: 'google',
+      );
+
+      if (canAccess) {
+        await ArgosPushNotificationService.instance
+            .registerDeviceTokenForCurrentUser();
+      }
     } on FirebaseAuthException catch (e) {
       debugPrint('Google Firebase Auth Error: ${e.code} - ${e.message}');
 

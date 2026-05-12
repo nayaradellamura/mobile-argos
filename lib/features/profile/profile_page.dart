@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:argos_app/services/argos_push_notification_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
@@ -10,6 +11,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import '../../services/argos_push_notification_service.dart';
 
 class ProfilePage extends StatefulWidget {
   final User user;
@@ -583,6 +585,8 @@ class _ProfilePageState extends State<ProfilePage> {
 
   Future<void> _logout() async {
     try {
+      await ArgosPushNotificationService.instance
+          .unregisterCurrentDeviceToken();
       await GoogleSignIn().signOut();
       await FirebaseAuth.instance.signOut();
     } catch (_) {
