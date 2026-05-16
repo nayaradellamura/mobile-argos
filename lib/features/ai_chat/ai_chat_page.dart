@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:camera/camera.dart';
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:path_provider/path_provider.dart';
@@ -11,9 +13,12 @@ import 'package:record/record.dart';
 
 import '../../services/argos_ai_service.dart';
 import '../../services/user_audio_storage_service.dart';
+import '../../services/vistoria_chat_session_service.dart';
 import '../camera/camera_page.dart';
 
 enum ChatMessageType { ai, user, photo, audio }
+
+enum ContinueVistoriaAction { continueNow, continueLater, startNew }
 
 class ChatMessage {
   final ChatMessageType type;
@@ -25,17 +30,21 @@ class ChatMessage {
   /// ID do registro criado em users/{uid}/audios/{audioId}.
   final String? audioId;
 
-  /// Caminho original enviado para o Storage:
-  /// users/{uid}/audios/original/{audioId}.m4a
+  /// Caminho original enviado para o Storage.
   final String? originalStoragePath;
 
-  /// Caminho futuro do MP3 gerado pela Cloud Function:
-  /// users/{uid}/audios/mp3/{audioId}.mp3
+  /// Caminho do MP3 gerado/enviado para o Storage.
   final String? mp3StoragePath;
 
+  /// URL pública/autenticada do MP3, usada para reproduzir depois que o app reabrir.
+  final String? mp3DownloadUrl;
+
   /// Status visual do áudio no app:
-  /// local, uploading, processing, done ou error.
+  /// local, uploading, processing, transcribing, done ou error.
   final String? audioStatus;
+
+  /// Horário em que a mensagem foi criada/exibida no chat.
+  final DateTime? createdAt;
 
   const ChatMessage({
     required this.type,
@@ -46,7 +55,9 @@ class ChatMessage {
     this.audioId,
     this.originalStoragePath,
     this.mp3StoragePath,
+    this.mp3DownloadUrl,
     this.audioStatus,
+    this.createdAt,
   });
 }
 
@@ -68,18 +79,11 @@ class _AiChatPageState extends State<AiChatPage> {
   final ScrollController scrollController = ScrollController();
   final AudioRecorder audioRecorder = AudioRecorder();
 
-  final List<ChatMessage> messages = [
-    const ChatMessage(
-      type: ChatMessageType.ai,
-      text:
-          'Olá! Sou o assistente Argos. Vamos iniciar o registro de sinistro para o Toyota Corolla ABC-1234.',
-    ),
-    const ChatMessage(
-      type: ChatMessageType.ai,
-      text:
-          'Descreva os principais pontos de impacto ou envie fotos e áudio da avaria.',
-    ),
-  ];
+  final List<ChatMessage> messages = [];
+
+  VistoriaSession? currentSession;
+  List<SinistroVistoriaOption> availableSinistros = [];
+  bool isLoadingSession = true;
 
   bool hasText = false;
   bool isRecording = false;
@@ -103,6 +107,8 @@ class _AiChatPageState extends State<AiChatPage> {
         });
       }
     });
+
+    _bootstrapChatSession();
   }
 
   @override
@@ -143,13 +149,419 @@ class _AiChatPageState extends State<AiChatPage> {
     });
   }
 
+  Future<void> _bootstrapChatSession() async {
+    setState(() {
+      isLoadingSession = true;
+    });
+
+    try {
+      final directSinistroId = widget.sinistroId?.trim();
+
+      if (directSinistroId != null && directSinistroId.isNotEmpty) {
+        await _startVistoriaFromSinistro(
+          directSinistroId,
+          fromDirectSinistro: true,
+        );
+        return;
+      }
+
+      await _loadAvailableSinistros();
+    } catch (e) {
+      debugPrint('Erro ao iniciar sessão de vistoria: $e');
+
+      if (!mounted) return;
+
+      setState(() {
+        isLoadingSession = false;
+        messages
+          ..clear()
+          ..add(
+            ChatMessage(
+              type: ChatMessageType.ai,
+              text:
+                  'Não consegui preparar a sessão da vistoria. Detalhe: $e',
+            ),
+          );
+      });
+    }
+  }
+
+  Future<void> _loadAvailableSinistros({String? message}) async {
+    final options = await VistoriaChatSessionService.instance
+        .listCheckedInSinistrosForCurrentUser();
+
+    if (!mounted) return;
+
+    setState(() {
+      currentSession = null;
+      availableSinistros = options;
+      isLoadingSession = false;
+      isAiTyping = false;
+      messages
+        ..clear()
+        ..add(
+          ChatMessage(
+            type: ChatMessageType.ai,
+            text: message ??
+                'Selecione uma placa com check-in realizado para iniciar ou continuar a vistoria.',
+          ),
+        );
+    });
+  }
+
+  Future<ContinueVistoriaAction?> _askVistoriaAction(
+    VistoriaSession session,
+  ) {
+    return showDialog<ContinueVistoriaAction>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          title: const Text('Vistoria em andamento'),
+          content: Text(
+            'Encontramos uma vistoria aberta para este veículo.\n\n'
+            'Nº: ${session.idvistoria}\n'
+            'Placa: ${session.placa.isEmpty ? 'Sem placa' : session.placa}\n'
+            'Veículo: ${session.veiculo.isEmpty ? 'Não informado' : session.veiculo}\n\n'
+            'O que deseja fazer?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop(
+                  ContinueVistoriaAction.continueLater,
+                );
+              },
+              child: const Text('Continuar mais tarde'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop(
+                  ContinueVistoriaAction.startNew,
+                );
+              },
+              child: const Text('Começar nova'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop(
+                  ContinueVistoriaAction.continueNow,
+                );
+              },
+              child: const Text('Continuar agora'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<bool> _confirmStartNewVistoria(VistoriaSession session) async {
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          title: const Text('Descartar vistoria atual?'),
+          content: Text(
+            'A vistoria ${session.idvistoria} será marcada como abandonada.\n\n'
+            'O histórico não será apagado do banco, mas uma nova vistoria será iniciada para este veículo.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancelar'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.redAccent,
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('Descartar e iniciar nova'),
+            ),
+          ],
+        );
+      },
+    );
+
+    return result ?? false;
+  }
+
+  Future<void> _startVistoriaFromSinistro(
+    String sinistroId, {
+    bool fromDirectSinistro = false,
+  }) async {
+    setState(() {
+      isLoadingSession = true;
+    });
+
+    try {
+      final openSession = await VistoriaChatSessionService.instance
+          .findOpenVistoria(sinistroId: sinistroId);
+
+      if (!mounted) return;
+
+      if (openSession != null) {
+        setState(() {
+          isLoadingSession = false;
+        });
+
+        final action = await _askVistoriaAction(openSession);
+
+        if (!mounted) return;
+
+        if (action == ContinueVistoriaAction.continueNow) {
+          setState(() {
+            _loadSessionIntoChat(openSession);
+            isLoadingSession = false;
+          });
+
+          _scrollToBottom();
+          return;
+        }
+
+        if (action == ContinueVistoriaAction.continueLater || action == null) {
+          await _handleContinueLater(fromDirectSinistro: fromDirectSinistro);
+          return;
+        }
+
+        if (action == ContinueVistoriaAction.startNew) {
+          final confirmed = await _confirmStartNewVistoria(openSession);
+
+          if (!mounted) return;
+
+          if (!confirmed) {
+            await _handleContinueLater(fromDirectSinistro: fromDirectSinistro);
+            return;
+          }
+
+          setState(() {
+            isLoadingSession = true;
+          });
+
+          await VistoriaChatSessionService.instance.discardVistoria(
+            vistoriaDocId: openSession.docId,
+            hardDelete: false,
+          );
+        }
+      }
+
+      final session = await VistoriaChatSessionService.instance
+          .createOrResumeFromSinistro(sinistroId: sinistroId);
+
+      if (!mounted) return;
+
+      setState(() {
+        _loadSessionIntoChat(session);
+        isLoadingSession = false;
+      });
+
+      _scrollToBottom();
+
+      final shouldSendInitialOi = session.chatMessages.any(
+        (message) => message['backgroundStart'] == true,
+      );
+
+      final hasAiReply = session.chatMessages.any(
+        (message) => message['role'] == 'ai',
+      );
+
+      if (shouldSendInitialOi && !hasAiReply) {
+        await _sendInitialOiToAgent();
+      }
+    } catch (e) {
+      debugPrint('Erro ao criar vistoria pelo sinistro: $e');
+
+      if (!mounted) return;
+
+      setState(() {
+        isLoadingSession = false;
+        messages
+          ..clear()
+          ..add(
+            ChatMessage(
+              type: ChatMessageType.ai,
+              text:
+                  'Não foi possível iniciar a vistoria. Verifique se o veículo possui check-in. Detalhe: $e',
+            ),
+          );
+      });
+    }
+  }
+
+  Future<void> _handleContinueLater({
+    required bool fromDirectSinistro,
+  }) async {
+    if (fromDirectSinistro) {
+      final didPop = await Navigator.of(context).maybePop();
+
+      if (didPop || !mounted) return;
+    }
+
+    await _loadAvailableSinistros(
+      message:
+          'Tudo certo. A vistoria continua salva para mais tarde. Selecione uma placa quando quiser continuar.',
+    );
+  }
+
+  Future<void> _sendInitialOiToAgent() async {
+    final session = currentSession;
+
+    if (session == null) return;
+
+    setState(() {
+      isAiTyping = true;
+    });
+
+    try {
+      final reply = await ArgosAiService.instance.sendMessage(
+        text: 'oi',
+        inspectionId: session.idvistoria,
+      );
+
+      await VistoriaChatSessionService.instance.appendAiMessage(
+        vistoriaDocId: session.docId,
+        text: reply,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        isAiTyping = false;
+        messages.add(ChatMessage(type: ChatMessageType.ai, text: reply, createdAt: DateTime.now()));
+      });
+
+      _scrollToBottom();
+    } catch (e) {
+      debugPrint('Erro ao enviar oi inicial para IA: $e');
+
+      if (!mounted) return;
+
+      setState(() {
+        isAiTyping = false;
+      });
+    }
+  }
+
+  void _loadSessionIntoChat(VistoriaSession session) {
+    currentSession = session;
+
+    final loadedMessages = session.chatMessages
+        .where((item) => item['backgroundStart'] != true)
+        .map(_chatMessageFromFirestore)
+        .whereType<ChatMessage>()
+        .toList();
+
+    messages
+      ..clear()
+      ..addAll(loadedMessages);
+
+    if (messages.isEmpty) {
+      messages.add(
+        ChatMessage(
+          type: ChatMessageType.ai,
+          text:
+              'Vistoria ${session.idvistoria} iniciada para ${session.placa.isEmpty ? 'veículo sem placa' : session.placa}. Vamos começar.',
+          createdAt: DateTime.now(),
+        ),
+      );
+    }
+  }
+
+
+  DateTime? _dateFromFirestoreValue(dynamic value) {
+    if (value == null) return null;
+
+    try {
+      final dynamic dynamicValue = value;
+
+      if (dynamicValue is DateTime) return dynamicValue;
+
+      final toDate = dynamicValue.toDate;
+      if (toDate is Function) {
+        final parsed = toDate.call();
+        if (parsed is DateTime) return parsed;
+      }
+    } catch (_) {}
+
+    if (value is String) {
+      return DateTime.tryParse(value);
+    }
+
+    return null;
+  }
+
+  ChatMessage? _chatMessageFromFirestore(Map<String, dynamic> data) {
+    final role = data['role']?.toString() ?? '';
+    final type = data['type']?.toString() ?? '';
+    final text = data['text']?.toString() ?? '';
+    final createdAt = _dateFromFirestoreValue(data['createdAt']);
+
+    if (text.trim().isEmpty && role != 'audio') return null;
+
+    if (role == 'user') {
+      return ChatMessage(
+        type: ChatMessageType.user,
+        text: text,
+        createdAt: createdAt,
+      );
+    }
+
+    if (role == 'photo') {
+      return ChatMessage(
+        type: ChatMessageType.photo,
+        text: text,
+        createdAt: createdAt,
+      );
+    }
+
+    if (role == 'audio' || type == 'audio') {
+      return ChatMessage(
+        type: ChatMessageType.audio,
+        text: text,
+        audioId: data['audioId']?.toString(),
+        originalStoragePath: data['originalStoragePath']?.toString(),
+        mp3StoragePath: data['mp3StoragePath']?.toString() ?? data['storagePath']?.toString(),
+        mp3DownloadUrl: data['mp3DownloadUrl']?.toString(),
+        audioStatus: data['audioStatus']?.toString() ?? 'done',
+        createdAt: createdAt,
+      );
+    }
+
+    return ChatMessage(
+      type: ChatMessageType.ai,
+      text: text,
+      createdAt: createdAt,
+    );
+  }
+
+  Future<void> _handleSinistroSelected(SinistroVistoriaOption option) async {
+    await _startVistoriaFromSinistro(option.sinistroId);
+  }
+
   Future<void> _sendTextMessage() async {
+    final session = currentSession;
     final text = messageController.text.trim();
 
     if (text.isEmpty) return;
 
+    if (session == null) {
+      _showSnack(
+        'Selecione uma vistoria antes de enviar mensagens.',
+        backgroundColor: Colors.orange,
+      );
+      return;
+    }
+
     setState(() {
-      messages.add(ChatMessage(type: ChatMessageType.user, text: text));
+      messages.add(ChatMessage(type: ChatMessageType.user, text: text, createdAt: DateTime.now()));
 
       messageController.clear();
       hasText = false;
@@ -158,10 +570,20 @@ class _AiChatPageState extends State<AiChatPage> {
 
     _scrollToBottom();
 
+    await VistoriaChatSessionService.instance.appendUserMessage(
+      vistoriaDocId: session.docId,
+      text: text,
+    );
+
     try {
       final reply = await ArgosAiService.instance.sendMessage(
         text: text,
-        inspectionId: widget.sinistroId ?? 'INS-001',
+        inspectionId: session.idvistoria,
+      );
+
+      await VistoriaChatSessionService.instance.appendAiMessage(
+        vistoriaDocId: session.docId,
+        text: reply,
       );
 
       if (!mounted) return;
@@ -169,7 +591,7 @@ class _AiChatPageState extends State<AiChatPage> {
       setState(() {
         isAiTyping = false;
 
-        messages.add(ChatMessage(type: ChatMessageType.ai, text: reply));
+        messages.add(ChatMessage(type: ChatMessageType.ai, text: reply, createdAt: DateTime.now()));
       });
 
       _scrollToBottom();
@@ -181,14 +603,21 @@ class _AiChatPageState extends State<AiChatPage> {
 
       if (!mounted) return;
 
+      final errorText =
+          'O assistente Argos está temporariamente indisponível.\nCódigo: ${e.code}';
+
+      await VistoriaChatSessionService.instance.appendAiMessage(
+        vistoriaDocId: session.docId,
+        text: errorText,
+      );
+
       setState(() {
         isAiTyping = false;
 
         messages.add(
           ChatMessage(
             type: ChatMessageType.ai,
-            text:
-                'O assistente Argos está temporariamente indisponível.\nCódigo: ${e.code}',
+            text: errorText,
           ),
         );
       });
@@ -199,13 +628,20 @@ class _AiChatPageState extends State<AiChatPage> {
 
       if (!mounted) return;
 
+      const errorText = 'Erro inesperado ao chamar o assistente.';
+
+      await VistoriaChatSessionService.instance.appendAiMessage(
+        vistoriaDocId: session.docId,
+        text: errorText,
+      );
+
       setState(() {
         isAiTyping = false;
 
         messages.add(
-          ChatMessage(
+          const ChatMessage(
             type: ChatMessageType.ai,
-            text: 'Erro inesperado ao chamar o assistente.',
+            text: errorText,
           ),
         );
       });
@@ -215,6 +651,16 @@ class _AiChatPageState extends State<AiChatPage> {
   }
 
   Future<void> _openCamera() async {
+    final session = currentSession;
+
+    if (session == null) {
+      _showSnack(
+        'Selecione uma vistoria antes de anexar fotos.',
+        backgroundColor: Colors.orange,
+      );
+      return;
+    }
+
     FocusScope.of(context).unfocus();
 
     final List<XFile>? photos = await Navigator.of(
@@ -230,6 +676,7 @@ class _AiChatPageState extends State<AiChatPage> {
             type: ChatMessageType.photo,
             text: 'Foto anexada à vistoria',
             imagePath: photo.path,
+            createdAt: DateTime.now(),
           ),
         );
       }
@@ -237,17 +684,44 @@ class _AiChatPageState extends State<AiChatPage> {
 
     _scrollToBottom();
 
-    Future.delayed(const Duration(milliseconds: 650), () {
+    for (final photo in photos) {
+      try {
+        await VistoriaChatSessionService.instance.appendImageBase64FromFile(
+          vistoriaDocId: session.docId,
+          imagePath: photo.path,
+        );
+      } catch (e) {
+        debugPrint('Erro ao salvar foto em base64 na vistoria: $e');
+      }
+    }
+
+    await VistoriaChatSessionService.instance.appendChatMessage(
+      vistoriaDocId: session.docId,
+      role: 'photo',
+      text:
+          '${photos.length} foto${photos.length > 1 ? 's' : ''} anexada${photos.length > 1 ? 's' : ''} à vistoria.',
+    );
+
+    Future.delayed(const Duration(milliseconds: 650), () async {
       if (!mounted) return;
 
       final quantity = photos.length;
+      final aiText =
+          '$quantity foto${quantity > 1 ? 's' : ''} recebida${quantity > 1 ? 's' : ''}. Essas evidências foram vinculadas à vistoria.';
+
+      await VistoriaChatSessionService.instance.appendAiMessage(
+        vistoriaDocId: session.docId,
+        text: aiText,
+      );
+
+      if (!mounted) return;
 
       setState(() {
         messages.add(
           ChatMessage(
             type: ChatMessageType.ai,
-            text:
-                '$quantity foto${quantity > 1 ? 's' : ''} recebida${quantity > 1 ? 's' : ''}. Essas evidências serão vinculadas à vistoria.',
+            text: aiText,
+            createdAt: DateTime.now(),
           ),
         );
       });
@@ -368,6 +842,16 @@ class _AiChatPageState extends State<AiChatPage> {
   Future<void> _finishRecording() async {
     if (!isRecording) return;
 
+    final session = currentSession;
+
+    if (session == null) {
+      _showSnack(
+        'Selecione uma vistoria antes de enviar áudio.',
+        backgroundColor: Colors.orange,
+      );
+      return;
+    }
+
     final duration = recordingSeconds;
     final fallbackPath = currentRecordingPath;
 
@@ -425,10 +909,11 @@ class _AiChatPageState extends State<AiChatPage> {
       messages.add(
         ChatMessage(
           type: ChatMessageType.audio,
-          text: 'Enviando áudio • ${_formatDuration(duration)}',
+          text: '',
           audioPath: path,
           durationSeconds: duration,
           audioStatus: 'uploading',
+          createdAt: DateTime.now(),
         ),
       );
     });
@@ -439,9 +924,19 @@ class _AiChatPageState extends State<AiChatPage> {
       final uploadedAudio = await UserAudioStorageService.instance
           .uploadOriginalAudioForMp3Conversion(
             localAudioPath: path,
-            sinistroId: widget.sinistroId,
+            sinistroId: session.sinistroId,
             duration: Duration(seconds: duration),
           );
+
+      try {
+        await VistoriaChatSessionService.instance.appendAudioBase64FromFile(
+          vistoriaDocId: session.docId,
+          audioPath: path,
+          contentType: 'audio/mp4',
+        );
+      } catch (e) {
+        debugPrint('Erro ao salvar áudio em base64 na vistoria: $e');
+      }
 
       if (!mounted) return;
 
@@ -455,27 +950,30 @@ class _AiChatPageState extends State<AiChatPage> {
         if (index >= 0) {
           messages[index] = ChatMessage(
             type: ChatMessageType.audio,
-            text: 'Áudio enviado • ${_formatDuration(duration)}',
+            text: '',
             audioPath: path,
             durationSeconds: duration,
             audioId: uploadedAudio.audioId,
             originalStoragePath: uploadedAudio.originalStoragePath,
-            audioStatus: 'processing',
+            mp3StoragePath: uploadedAudio.mp3StoragePath,
+            mp3DownloadUrl: uploadedAudio.mp3DownloadUrl,
+            audioStatus: 'transcribing',
+            createdAt: messages[index].createdAt,
           );
         }
 
-        messages.add(
-          const ChatMessage(
-            type: ChatMessageType.ai,
-            text:
-                'Áudio recebido. Estou enviando para o Firebase Storage e a conversão para MP3 será feita no backend.',
-          ),
-        );
+        isAiTyping = true;
       });
 
       _scrollToBottom();
-    } catch (e) {
-      debugPrint('Upload audio error: $e');
+
+      final audioResult = await ArgosAiService.instance.sendAudioMessage(
+        idvistoria: session.idvistoria,
+        sinistroId: session.sinistroId,
+        audioId: uploadedAudio.audioId,
+        storagePath: uploadedAudio.mp3StoragePath,
+        durationSeconds: duration,
+      );
 
       if (!mounted) return;
 
@@ -489,10 +987,98 @@ class _AiChatPageState extends State<AiChatPage> {
         if (index >= 0) {
           messages[index] = ChatMessage(
             type: ChatMessageType.audio,
-            text: 'Falha ao enviar • ${_formatDuration(duration)}',
+            text: '',
+            audioPath: path,
+            durationSeconds: duration,
+            audioId: uploadedAudio.audioId,
+            originalStoragePath: uploadedAudio.originalStoragePath,
+            mp3StoragePath: uploadedAudio.mp3StoragePath,
+            mp3DownloadUrl: uploadedAudio.mp3DownloadUrl,
+            audioStatus: 'done',
+            createdAt: messages[index].createdAt,
+          );
+        }
+
+        if (audioResult.revisedTranscript.trim().isNotEmpty) {
+          messages.add(
+            ChatMessage(
+              type: ChatMessageType.user,
+              text: audioResult.revisedTranscript,
+              createdAt: DateTime.now(),
+            ),
+          );
+        }
+
+        messages.add(
+          ChatMessage(
+            type: ChatMessageType.ai,
+            text: audioResult.reply,
+            createdAt: DateTime.now(),
+          ),
+        );
+
+        isAiTyping = false;
+      });
+
+      _scrollToBottom();
+    } on FirebaseFunctionsException catch (e) {
+      debugPrint('ERRO CLOUD FUNCTION AUDIO');
+      debugPrint('code: ${e.code}');
+      debugPrint('message: ${e.message}');
+      debugPrint('details: ${e.details}');
+
+      if (!mounted) return;
+
+      setState(() {
+        final index = messages.lastIndexWhere(
+          (message) =>
+              message.type == ChatMessageType.audio &&
+              message.audioPath == path,
+        );
+
+        if (index >= 0) {
+          messages[index] = ChatMessage(
+            type: ChatMessageType.audio,
+            text: '',
             audioPath: path,
             durationSeconds: duration,
             audioStatus: 'error',
+            createdAt: messages[index].createdAt,
+          );
+        }
+
+        messages.add(
+          ChatMessage(
+            type: ChatMessageType.ai,
+            text:
+                'Recebi o áudio, mas não consegui transcrever agora. Código: ${e.code}',
+          ),
+        );
+
+        isAiTyping = false;
+      });
+
+      _scrollToBottom();
+    } catch (e) {
+      debugPrint('Upload/transcrição audio error: $e');
+
+      if (!mounted) return;
+
+      setState(() {
+        final index = messages.lastIndexWhere(
+          (message) =>
+              message.type == ChatMessageType.audio &&
+              message.audioPath == path,
+        );
+
+        if (index >= 0) {
+          messages[index] = ChatMessage(
+            type: ChatMessageType.audio,
+            text: '',
+            audioPath: path,
+            durationSeconds: duration,
+            audioStatus: 'error',
+            createdAt: messages[index].createdAt,
           );
         }
 
@@ -500,14 +1086,16 @@ class _AiChatPageState extends State<AiChatPage> {
           const ChatMessage(
             type: ChatMessageType.ai,
             text:
-                'Não consegui enviar o áudio para o Firebase Storage. Verifique sua conexão e tente novamente.',
+                'Não consegui processar o áudio. Verifique sua conexão e tente novamente.',
           ),
         );
+
+        isAiTyping = false;
       });
 
       _scrollToBottom();
 
-      _showSnack('Erro ao enviar áudio.', backgroundColor: Colors.redAccent);
+      _showSnack('Erro ao processar áudio.', backgroundColor: Colors.redAccent);
     }
   }
 
@@ -521,6 +1109,19 @@ class _AiChatPageState extends State<AiChatPage> {
   @override
   Widget build(BuildContext context) {
     final duration = _formatDuration(recordingSeconds);
+
+    if (isLoadingSession) {
+      return const SafeArea(child: _ChatSessionLoading());
+    }
+
+    if (currentSession == null) {
+      return SafeArea(
+        child: _SinistroSelectionView(
+          options: availableSinistros,
+          onSelect: _handleSinistroSelected,
+        ),
+      );
+    }
 
     return SafeArea(
       child: Column(
@@ -578,6 +1179,147 @@ class _AiChatPageState extends State<AiChatPage> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _ChatSessionLoading extends StatelessWidget {
+  const _ChatSessionLoading();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const _ChatHeader(),
+        Expanded(
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircularProgressIndicator(color: Color(0xFF0057C0)),
+                const SizedBox(height: 18),
+                Text(
+                  'Preparando sessão da vistoria...',
+                  style: GoogleFonts.spaceGrotesk(
+                    color: const Color(0xFF0057C0),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 17,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _SinistroSelectionView extends StatelessWidget {
+  final List<SinistroVistoriaOption> options;
+  final ValueChanged<SinistroVistoriaOption> onSelect;
+
+  const _SinistroSelectionView({
+    required this.options,
+    required this.onSelect,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const _ChatHeader(),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: options.isEmpty
+                ? Center(
+                    child: Container(
+                      padding: const EdgeInsets.all(22),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(24),
+                      ),
+                      child: const Text(
+                        'Nenhum veículo com check-in disponível para iniciar vistoria.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Color(0xFF414755),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  )
+                : ListView.separated(
+                    itemCount: options.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 12),
+                    itemBuilder: (context, index) {
+                      final option = options[index];
+
+                      return Material(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(22),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(22),
+                          onTap: () => onSelect(option),
+                          child: Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 46,
+                                  height: 46,
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFE5F6FF),
+                                    borderRadius: BorderRadius.circular(16),
+                                  ),
+                                  child: const Icon(
+                                    Icons.directions_car,
+                                    color: Color(0xFF0057C0),
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        option.placa.isEmpty
+                                            ? 'Sem placa'
+                                            : option.placa,
+                                        style: const TextStyle(
+                                          color: Color(0xFF1F2937),
+                                          fontWeight: FontWeight.w900,
+                                          fontSize: 16,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        option.veiculo.isEmpty
+                                            ? 'Veículo não informado'
+                                            : option.veiculo,
+                                        style: const TextStyle(
+                                          color: Color(0xFF414755),
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const Icon(
+                                  Icons.chevron_right,
+                                  color: Color(0xFF0057C0),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -662,13 +1404,17 @@ class _ChatBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     switch (message.type) {
       case ChatMessageType.ai:
-        return _AiBubble(text: message.text);
+        return _AiBubble(text: message.text, createdAt: message.createdAt);
 
       case ChatMessageType.user:
-        return _UserBubble(text: message.text);
+        return _UserBubble(text: message.text, createdAt: message.createdAt);
 
       case ChatMessageType.photo:
-        return _PhotoBubble(text: message.text, imagePath: message.imagePath);
+        return _PhotoBubble(
+          text: message.text,
+          imagePath: message.imagePath,
+          createdAt: message.createdAt,
+        );
 
       case ChatMessageType.audio:
         return _AudioBubble(
@@ -676,6 +1422,10 @@ class _ChatBubble extends StatelessWidget {
           audioPath: message.audioPath,
           audioStatus: message.audioStatus,
           audioId: message.audioId,
+          durationSeconds: message.durationSeconds,
+          mp3DownloadUrl: message.mp3DownloadUrl,
+          profilePhotoUrl: FirebaseAuth.instance.currentUser?.photoURL,
+          createdAt: message.createdAt,
         );
     }
   }
@@ -683,8 +1433,9 @@ class _ChatBubble extends StatelessWidget {
 
 class _AiBubble extends StatelessWidget {
   final String text;
+  final DateTime? createdAt;
 
-  const _AiBubble({required this.text});
+  const _AiBubble({required this.text, this.createdAt});
 
   @override
   Widget build(BuildContext context) {
@@ -699,7 +1450,7 @@ class _AiBubble extends StatelessWidget {
         const SizedBox(width: 10),
         Flexible(
           child: Container(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
             decoration: const BoxDecoration(
               color: Color(0xFFE5F6FF),
               borderRadius: BorderRadius.only(
@@ -709,13 +1460,31 @@ class _AiBubble extends StatelessWidget {
                 bottomRight: Radius.circular(22),
               ),
             ),
-            child: Text(
-              text,
-              style: const TextStyle(
-                color: Color(0xFF1F2937),
-                height: 1.35,
-                fontWeight: FontWeight.w500,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  text,
+                  style: const TextStyle(
+                    color: Color(0xFF1F2937),
+                    height: 1.35,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Text(
+                    _formatMessageTime(createdAt),
+                    style: TextStyle(
+                      color: const Color(0xFF414755).withOpacity(.60),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -726,8 +1495,9 @@ class _AiBubble extends StatelessWidget {
 
 class _UserBubble extends StatelessWidget {
   final String text;
+  final DateTime? createdAt;
 
-  const _UserBubble({required this.text});
+  const _UserBubble({required this.text, this.createdAt});
 
   @override
   Widget build(BuildContext context) {
@@ -736,7 +1506,7 @@ class _UserBubble extends StatelessWidget {
       children: [
         Flexible(
           child: Container(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
             decoration: const BoxDecoration(
               color: Color(0xFF0057C0),
               borderRadius: BorderRadius.only(
@@ -746,13 +1516,31 @@ class _UserBubble extends StatelessWidget {
                 bottomRight: Radius.circular(22),
               ),
             ),
-            child: Text(
-              text,
-              style: const TextStyle(
-                color: Colors.white,
-                height: 1.35,
-                fontWeight: FontWeight.w600,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  text,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    height: 1.35,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Text(
+                    _formatMessageTime(createdAt),
+                    style: TextStyle(
+                      color: Colors.white.withOpacity(.72),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -764,8 +1552,13 @@ class _UserBubble extends StatelessWidget {
 class _PhotoBubble extends StatelessWidget {
   final String text;
   final String? imagePath;
+  final DateTime? createdAt;
 
-  const _PhotoBubble({required this.text, required this.imagePath});
+  const _PhotoBubble({
+    required this.text,
+    required this.imagePath,
+    this.createdAt,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -814,7 +1607,21 @@ class _PhotoBubble extends StatelessWidget {
                     ],
                   ),
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 5),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: Text(
+                      _formatMessageTime(createdAt),
+                      style: TextStyle(
+                        color: Colors.white.withOpacity(.72),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
@@ -824,105 +1631,201 @@ class _PhotoBubble extends StatelessWidget {
   }
 }
 
-class _AudioBubble extends StatelessWidget {
+class _AudioBubble extends StatefulWidget {
   final String text;
   final String? audioPath;
   final String? audioStatus;
   final String? audioId;
+  final int? durationSeconds;
+  final String? mp3DownloadUrl;
+  final String? profilePhotoUrl;
+  final DateTime? createdAt;
 
   const _AudioBubble({
     required this.text,
     required this.audioPath,
     this.audioStatus,
     this.audioId,
+    this.durationSeconds,
+    this.mp3DownloadUrl,
+    this.profilePhotoUrl,
+    this.createdAt,
   });
 
   @override
-  Widget build(BuildContext context) {
-    final fileName = audioPath == null
-        ? 'audio.m4a'
-        : audioPath!.split(Platform.pathSeparator).last;
+  State<_AudioBubble> createState() => _AudioBubbleState();
+}
 
-    final status = audioStatus ?? 'local';
+class _AudioBubbleState extends State<_AudioBubble> {
+  final AudioPlayer player = AudioPlayer();
 
-    String statusLabel;
-    switch (status) {
-      case 'uploading':
-        statusLabel = 'Enviando para Storage...';
-        break;
-      case 'processing':
-        statusLabel = 'Convertendo para MP3...';
-        break;
-      case 'done':
-        statusLabel = 'MP3 disponível';
-        break;
-      case 'error':
-        statusLabel = 'Erro no envio';
-        break;
-      default:
-        statusLabel = 'Áudio local';
+  bool isPlaying = false;
+  Duration currentPosition = Duration.zero;
+  Duration totalDuration = Duration.zero;
+
+  @override
+  void initState() {
+    super.initState();
+
+    totalDuration = Duration(seconds: widget.durationSeconds ?? 0);
+
+    player.onDurationChanged.listen((duration) {
+      if (!mounted) return;
+      setState(() => totalDuration = duration);
+    });
+
+    player.onPositionChanged.listen((position) {
+      if (!mounted) return;
+      setState(() => currentPosition = position);
+    });
+
+    player.onPlayerComplete.listen((_) {
+      if (!mounted) return;
+      setState(() {
+        isPlaying = false;
+        currentPosition = Duration.zero;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    player.dispose();
+    super.dispose();
+  }
+
+  Future<void> _togglePlay() async {
+    final status = widget.audioStatus ?? 'local';
+
+    final isProcessing =
+        status == 'uploading' ||
+        status == 'processing' ||
+        status == 'transcribing';
+
+    if (isProcessing) return;
+
+    try {
+      if (isPlaying) {
+        await player.pause();
+        if (!mounted) return;
+        setState(() => isPlaying = false);
+        return;
+      }
+
+      final remoteUrl = widget.mp3DownloadUrl?.trim() ?? '';
+      final localPath = widget.audioPath?.trim() ?? '';
+
+      if (remoteUrl.isNotEmpty) {
+        await player.play(UrlSource(remoteUrl));
+      } else if (localPath.isNotEmpty) {
+        await player.play(DeviceFileSource(localPath));
+      } else {
+        return;
+      }
+
+      if (!mounted) return;
+      setState(() => isPlaying = true);
+    } catch (e) {
+      debugPrint('Erro ao reproduzir áudio: $e');
+      if (!mounted) return;
+      setState(() => isPlaying = false);
     }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = widget.audioStatus ?? 'local';
+
+    final isProcessing =
+        status == 'uploading' ||
+        status == 'processing' ||
+        status == 'transcribing';
+
+    final isDone = status == 'done';
+    final isError = status == 'error';
+
+    final baseDuration = totalDuration.inSeconds > 0
+        ? totalDuration
+        : Duration(seconds: widget.durationSeconds ?? 0);
+
+    final durationLabel = isPlaying && currentPosition.inSeconds > 0
+        ? _formatAudioBubbleDuration(currentPosition.inSeconds)
+        : _formatAudioBubbleDuration(baseDuration.inSeconds);
+
+    const bubbleColor = Color(0xFF0057C0);
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.end,
       children: [
         Flexible(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 300),
+            constraints: const BoxConstraints(maxWidth: 360),
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
               decoration: BoxDecoration(
-                color: const Color(0xFF0057C0),
+                color: bubbleColor,
                 borderRadius: BorderRadius.circular(22),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  Row(
-                    children: [
-                      const Icon(
-                        Icons.graphic_eq,
-                        color: Colors.white,
-                        size: 22,
-                      ),
-                      const SizedBox(width: 8),
-                      const _StaticAudioBars(),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          text,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    ],
+                  _AudioProfileAvatar(
+                    photoUrl: widget.profilePhotoUrl,
+                    bubbleColor: bubbleColor,
                   ),
-                  const SizedBox(height: 8),
-                  Text(
-                    statusLabel,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: Colors.white.withOpacity(.84),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
+                  const SizedBox(width: 10),
+                  GestureDetector(
+                    onTap: _togglePlay,
+                    child: _AudioPlayButton(
+                      isProcessing: isProcessing,
+                      isError: isError,
+                      isPlaying: isPlaying,
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    audioId == null
-                        ? 'Arquivo salvo: $fileName'
-                        : 'ID: $audioId',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: Colors.white.withOpacity(.72),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          height: 34,
+                          child: _WhatsappWaveform(
+                            isProcessing: isProcessing,
+                            isError: isError,
+                            isPlaying: isPlaying,
+                            progress: _audioProgress,
+                            color: Colors.white,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Row(
+                          children: [
+                            Text(
+                              durationLabel,
+                              style: TextStyle(
+                                color: Colors.white.withOpacity(.75),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const Spacer(),
+                            Text(
+                              _formatMessageTime(widget.createdAt),
+                              style: TextStyle(
+                                color: Colors.white.withOpacity(.75),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(width: 5),
+                            _AudioStatusIcon(
+                              isProcessing: isProcessing,
+                              isDone: isDone,
+                              isError: isError,
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -933,6 +1836,314 @@ class _AudioBubble extends StatelessWidget {
       ],
     );
   }
+
+  double get _audioProgress {
+    final totalMs = totalDuration.inMilliseconds;
+
+    if (totalMs <= 0) return 0;
+
+    final progress = currentPosition.inMilliseconds / totalMs;
+
+    if (progress.isNaN || progress.isInfinite) return 0;
+
+    return progress.clamp(0, 1);
+  }
+}
+
+class _AudioProfileAvatar extends StatelessWidget {
+  final String? photoUrl;
+  final Color bubbleColor;
+
+  const _AudioProfileAvatar({
+    required this.photoUrl,
+    required this.bubbleColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cleanUrl = photoUrl?.trim() ?? '';
+
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        CircleAvatar(
+          radius: 24,
+          backgroundColor: Colors.white.withOpacity(.18),
+          backgroundImage: cleanUrl.isNotEmpty ? NetworkImage(cleanUrl) : null,
+          child: cleanUrl.isEmpty
+              ? const Icon(
+                  Icons.person_rounded,
+                  color: Colors.white,
+                  size: 28,
+                )
+              : null,
+        ),
+        Positioned(
+          right: -3,
+          bottom: -3,
+          child: Container(
+            width: 21,
+            height: 21,
+            decoration: BoxDecoration(
+              color: bubbleColor,
+              shape: BoxShape.circle,
+              border: Border.all(color: bubbleColor, width: 2),
+            ),
+            child: const Icon(
+              Icons.mic_rounded,
+              color: Colors.white,
+              size: 15,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _AudioPlayButton extends StatelessWidget {
+  final bool isProcessing;
+  final bool isError;
+  final bool isPlaying;
+
+  const _AudioPlayButton({
+    required this.isProcessing,
+    required this.isError,
+    required this.isPlaying,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (isProcessing) {
+      return Container(
+        width: 42,
+        height: 42,
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(.16),
+          shape: BoxShape.circle,
+        ),
+        child: const Padding(
+          padding: EdgeInsets.all(10),
+          child: CircularProgressIndicator(
+            strokeWidth: 2.6,
+            color: Colors.white,
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      width: 42,
+      height: 42,
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(.16),
+        shape: BoxShape.circle,
+      ),
+      child: Icon(
+        isError
+            ? Icons.refresh_rounded
+            : isPlaying
+                ? Icons.pause_rounded
+                : Icons.play_arrow_rounded,
+        color: Colors.white.withOpacity(.92),
+        size: 30,
+      ),
+    );
+  }
+}
+
+class _AudioStatusIcon extends StatelessWidget {
+  final bool isProcessing;
+  final bool isDone;
+  final bool isError;
+
+  const _AudioStatusIcon({
+    required this.isProcessing,
+    required this.isDone,
+    required this.isError,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (isProcessing) {
+      return SizedBox(
+        width: 15,
+        height: 15,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          color: Colors.white.withOpacity(.78),
+        ),
+      );
+    }
+
+    if (isError) {
+      return const Icon(
+        Icons.error_outline_rounded,
+        color: Color(0xFFFFD166),
+        size: 17,
+      );
+    }
+
+    return Icon(
+      isDone ? Icons.done_all_rounded : Icons.done_rounded,
+      color: isDone ? const Color(0xFF8FD3FF) : Colors.white.withOpacity(.75),
+      size: 18,
+    );
+  }
+}
+
+class _WhatsappWaveform extends StatefulWidget {
+  final bool isProcessing;
+  final bool isError;
+  final bool isPlaying;
+  final double progress;
+  final Color color;
+
+  const _WhatsappWaveform({
+    required this.isProcessing,
+    required this.isError,
+    required this.isPlaying,
+    required this.progress,
+    required this.color,
+  });
+
+  @override
+  State<_WhatsappWaveform> createState() => _WhatsappWaveformState();
+}
+
+class _WhatsappWaveformState extends State<_WhatsappWaveform>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController controller;
+
+  final List<double> heights = const [
+    8,
+    14,
+    22,
+    12,
+    28,
+    18,
+    10,
+    26,
+    32,
+    16,
+    22,
+    12,
+    30,
+    20,
+    14,
+    25,
+    34,
+    19,
+    11,
+    27,
+    16,
+    24,
+    31,
+    13,
+    20,
+    29,
+    15,
+    23,
+    10,
+    18,
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+
+    controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 950),
+    );
+
+    if (widget.isProcessing || widget.isPlaying) {
+      controller.repeat();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _WhatsappWaveform oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    final shouldAnimate = widget.isProcessing || widget.isPlaying;
+
+    if (shouldAnimate && !controller.isAnimating) {
+      controller.repeat();
+    }
+
+    if (!shouldAnimate && controller.isAnimating) {
+      controller.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final baseColor = widget.isError
+        ? const Color(0xFFFFD166)
+        : widget.color.withOpacity(.48);
+
+    final playedColor = widget.color.withOpacity(.95);
+
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, child) {
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: List.generate(heights.length, (index) {
+            final progress = widget.isProcessing
+                ? ((controller.value + index * .045) % 1)
+                : 0.0;
+
+            final pulse = widget.isProcessing
+                ? 0.72 + (sin(progress * pi * 2).abs() * .45)
+                : 1.0;
+
+            final barProgress = (index + 1) / heights.length;
+            final isPlayed = widget.progress >= barProgress;
+
+            return Expanded(
+              child: Align(
+                alignment: Alignment.center,
+                child: Container(
+                  width: 3.2,
+                  height: heights[index] * pulse,
+                  margin: const EdgeInsets.symmetric(horizontal: 1.25),
+                  decoration: BoxDecoration(
+                    color: isPlayed ? playedColor : baseColor,
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                ),
+              ),
+            );
+          }),
+        );
+      },
+    );
+  }
+}
+
+String _formatMessageTime(DateTime? date) {
+  final value = date ?? DateTime.now();
+  final hour = value.hour.toString().padLeft(2, '0');
+  final minute = value.minute.toString().padLeft(2, '0');
+
+  return '$hour:$minute';
+}
+
+String _formatAudioBubbleDuration(int seconds) {
+  if (seconds <= 0) return '0:00';
+
+  final minutes = seconds ~/ 60;
+  final remainingSeconds = seconds % 60;
+
+  return '$minutes:${remainingSeconds.toString().padLeft(2, '0')}';
 }
 
 class _TextComposer extends StatelessWidget {
@@ -1173,29 +2384,6 @@ class _AnimatedAudioWavesState extends State<_AnimatedAudioWaves>
           }),
         );
       },
-    );
-  }
-}
-
-class _StaticAudioBars extends StatelessWidget {
-  const _StaticAudioBars();
-
-  @override
-  Widget build(BuildContext context) {
-    final heights = [8.0, 16.0, 11.0, 22.0, 14.0, 19.0, 10.0];
-
-    return Row(
-      children: heights.map((height) {
-        return Container(
-          width: 3,
-          height: height,
-          margin: const EdgeInsets.only(right: 3),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(.75),
-            borderRadius: BorderRadius.circular(99),
-          ),
-        );
-      }).toList(),
     );
   }
 }

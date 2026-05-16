@@ -179,7 +179,7 @@ class _SplashPageState extends State<SplashPage> {
                     return Opacity(opacity: value, child: child);
                   },
                   child: Text(
-                    'INSPEÇÃO INTELIGENTE',
+                    'VISTORIAS INTELIGENTES',
                     style: GoogleFonts.inter(
                       fontSize: 11,
                       letterSpacing: 3.6,
@@ -233,7 +233,7 @@ class _SplashPageState extends State<SplashPage> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Text(
-                        '9:41',
+                        'v1.0',
                         style: GoogleFonts.inter(
                           color: Colors.white,
                           fontSize: 10,

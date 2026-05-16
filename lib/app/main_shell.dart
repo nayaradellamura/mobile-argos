@@ -21,6 +21,10 @@ class _MainShellState extends State<MainShell> {
   bool isLoadingProfile = true;
   bool profileCompletionRequired = false;
 
+  /// Guarda o sinistro selecionado quando o usuário abre o Chat IA
+  /// a partir do botão dentro do sumário da vistoria.
+  String? selectedSinistroIdForChat;
+
   String get _emailKey => (widget.user.email ?? '').trim().toLowerCase();
 
   @override
@@ -96,17 +100,63 @@ class _MainShellState extends State<MainShell> {
 
     setState(() {
       selectedIndex = index;
+
+      /// Se o usuário tocar manualmente no Chat IA pela barra inferior,
+      /// abre o chat sem sinistro selecionado, mostrando a lista de placas.
+      if (index == 1) {
+        selectedSinistroIdForChat = null;
+      }
+    });
+  }
+
+  void _openGenericChat() {
+    if (profileCompletionRequired) {
+      _handleNavTap(1);
+      return;
+    }
+
+    setState(() {
+      selectedSinistroIdForChat = null;
+      selectedIndex = 1;
+    });
+  }
+
+  void _openChatForSinistro(String sinistroId) {
+    if (profileCompletionRequired) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Finalize seu cadastro para continuar.'),
+          backgroundColor: Color(0xFF0057C0),
+        ),
+      );
+
+      setState(() {
+        selectedIndex = 2;
+      });
+
+      return;
+    }
+
+    setState(() {
+      selectedSinistroIdForChat = sinistroId;
+      selectedIndex = 1;
     });
   }
 
   List<Widget> get pages {
     return [
       InspectionsPage(
-        onOpenInspection: () {
-          _handleNavTap(1);
-        },
+        onOpenInspection: _openGenericChat,
+        onOpenInspectionById: _openChatForSinistro,
       ),
-      const AiChatPage(),
+
+      /// O ValueKey força o Flutter a reconstruir o chat quando outro
+      /// sinistro for selecionado.
+      AiChatPage(
+        key: ValueKey(selectedSinistroIdForChat ?? 'chat_sem_sinistro'),
+        sinistroId: selectedSinistroIdForChat,
+      ),
+
       ProfilePage(
         user: widget.user,
         requireCompletion: profileCompletionRequired,

@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:argos_app/services/argos_push_notification_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
@@ -30,6 +29,9 @@ class ProfilePage extends StatefulWidget {
 }
 
 class _ProfilePageState extends State<ProfilePage> {
+  static List<CredenciadoOption>? _cachedCredenciados;
+  static List<CityOption>? _cachedCities;
+
   final formKey = GlobalKey<FormState>();
 
   final nomeController = TextEditingController();
@@ -48,6 +50,9 @@ class _ProfilePageState extends State<ProfilePage> {
 
   File? selectedPhoto;
   String? photoURL;
+  String? lockedCredenciadoId;
+  ImageProvider? cachedProfileImage;
+  String? cachedProfileImageUrl;
 
   String provider = '';
   String tipoAcesso = '';
@@ -71,6 +76,12 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   bool get canEdit => widget.requireCompletion || isEditing;
+
+  bool get isCredenciadoLocked {
+    final lockedId = lockedCredenciadoId?.trim() ?? '';
+
+    return cadastroCompleto && lockedId.isNotEmpty;
+  }
 
   @override
   void initState() {
@@ -166,6 +177,13 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   Future<void> _loadCredenciados() async {
+    final cached = _cachedCredenciados;
+
+    if (cached != null) {
+      credenciados = cached;
+      return;
+    }
+
     final snapshot = await FirebaseFirestore.instance
         .collection('credenciados')
         .orderBy('name')
@@ -183,10 +201,18 @@ class _ProfilePageState extends State<ProfilePage> {
         .whereType<CredenciadoOption>()
         .toList();
 
+    _cachedCredenciados = loaded;
     credenciados = loaded;
   }
 
   Future<void> _loadBrazilianCities() async {
+    final cached = _cachedCities;
+
+    if (cached != null) {
+      cities = cached;
+      return;
+    }
+
     final uri = Uri.parse(
       'https://servicodados.ibge.gov.br/api/v1/localidades/municipios',
     );
@@ -229,6 +255,7 @@ class _ProfilePageState extends State<ProfilePage> {
 
     loaded.sort((a, b) => a.label.compareTo(b.label));
 
+    _cachedCities = loaded;
     cities = loaded;
   }
 
@@ -271,20 +298,29 @@ class _ProfilePageState extends State<ProfilePage> {
         data['cpf']?.toString() ?? data['documento']?.toString() ?? '',
       );
 
-      cidadeController.text = data['cidade']?.toString() ?? '';
+      cidadeController.text = _cleanCityName(data['cidade']?.toString() ?? '');
       ufController.text = data['uf']?.toString().toUpperCase() ?? '';
 
       photoURL = data['photoURL']?.toString().trim().isNotEmpty == true
           ? data['photoURL'].toString()
           : widget.user.photoURL;
 
+      await _cacheProfilePhoto(photoURL);
+
       final credenciadoId = data['credenciadoId']?.toString() ?? '';
+      lockedCredenciadoId = credenciadoId.isNotEmpty ? credenciadoId : null;
 
       if (credenciadoId.isNotEmpty) {
         selectedCredenciado = _findCredenciadoById(credenciadoId);
       }
 
       selectedCredenciado ??= _findCredenciadoByName(empresa);
+
+      if ((lockedCredenciadoId == null || lockedCredenciadoId!.isEmpty) &&
+          cadastroCompleto &&
+          selectedCredenciado != null) {
+        lockedCredenciadoId = selectedCredenciado!.id;
+      }
 
       if (selectedCredenciado != null) {
         empresaController.text = selectedCredenciado!.name;
@@ -399,6 +435,35 @@ class _ProfilePageState extends State<ProfilePage> {
     return photoURL != null && photoURL!.trim().isNotEmpty;
   }
 
+  Future<void> _cacheProfilePhoto(String? url) async {
+    final cleanUrl = url?.trim() ?? '';
+
+    if (cleanUrl.isEmpty) {
+      cachedProfileImage = null;
+      cachedProfileImageUrl = null;
+      return;
+    }
+
+    if (cachedProfileImage != null && cachedProfileImageUrl == cleanUrl) {
+      return;
+    }
+
+    final provider = NetworkImage(cleanUrl);
+
+    cachedProfileImage = provider;
+    cachedProfileImageUrl = cleanUrl;
+
+    if (!mounted) return;
+
+    try {
+      await precacheImage(provider, context).timeout(
+        const Duration(seconds: 4),
+      );
+    } catch (e) {
+      debugPrint('Precache profile photo error: $e');
+    }
+  }
+
   bool _isValidCpf(String value) {
     final cpf = value.replaceAll(RegExp(r'\D'), '');
 
@@ -447,7 +512,11 @@ class _ProfilePageState extends State<ProfilePage> {
       return;
     }
 
-    if (selectedCredenciado == null) {
+    final effectiveCredenciado = isCredenciadoLocked
+        ? selectedCredenciado ?? _findCredenciadoById(lockedCredenciadoId ?? '')
+        : selectedCredenciado;
+
+    if (effectiveCredenciado == null) {
       _showSnack(
         'Selecione sua oficina ou empresa.',
         backgroundColor: Colors.orange,
@@ -488,7 +557,7 @@ class _ProfilePageState extends State<ProfilePage> {
           ? _inferTipoAcesso()
           : tipoAcesso;
 
-      final credenciado = selectedCredenciado!;
+      final credenciado = effectiveCredenciado;
       final city = selectedOrTypedCity;
 
       final userRef = FirebaseFirestore.instance
@@ -545,6 +614,8 @@ class _ProfilePageState extends State<ProfilePage> {
 
       await widget.user.reload();
 
+      await _cacheProfilePhoto(uploadedPhotoURL);
+
       if (!mounted) return;
 
       setState(() {
@@ -555,6 +626,7 @@ class _ProfilePageState extends State<ProfilePage> {
         cidadeController.text = city.name;
         ufController.text = city.uf;
         empresaController.text = credenciado.name;
+        lockedCredenciadoId = credenciado.id;
         documentoController.text = CpfInputFormatter.format(cpfDigits);
         isEditing = false;
       });
@@ -628,7 +700,7 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   Widget _buildCredenciadoField() {
-    if (!canEdit) {
+    if (!canEdit || isCredenciadoLocked) {
       return _ProfileTextField(
         controller: empresaController,
         label: 'Oficina / Empresa',
@@ -703,7 +775,7 @@ class _ProfilePageState extends State<ProfilePage> {
           flex: 2,
           child: Autocomplete<CityOption>(
             initialValue: TextEditingValue(text: cidadeController.text),
-            displayStringForOption: (option) => option.label,
+            displayStringForOption: (option) => option.name,
             optionsBuilder: (textEditingValue) {
               final query = textEditingValue.text.trim().toLowerCase();
 
@@ -748,7 +820,7 @@ class _ProfilePageState extends State<ProfilePage> {
                       enabled: !isSaving && !isLoadingOptions,
                     ),
                     onChanged: (value) {
-                      cidadeController.text = value;
+                      cidadeController.text = _cleanCityName(value);
 
                       if (selectedCity != null &&
                           selectedCity!.name.toLowerCase() !=
@@ -760,7 +832,7 @@ class _ProfilePageState extends State<ProfilePage> {
                       }
                     },
                     validator: (value) {
-                      final typed = value?.trim() ?? '';
+                      final typed = _cleanCityName(value ?? '');
 
                       if (typed.isEmpty) {
                         return 'Informe sua cidade.';
@@ -840,10 +912,11 @@ class _ProfilePageState extends State<ProfilePage> {
     }
 
     final avatarImage = selectedPhoto != null
-        ? FileImage(selectedPhoto!)
-        : photoURL != null && photoURL!.isNotEmpty
-        ? NetworkImage(photoURL!) as ImageProvider
-        : null;
+        ? FileImage(selectedPhoto!) as ImageProvider
+        : cachedProfileImage ??
+            (photoURL != null && photoURL!.isNotEmpty
+                ? NetworkImage(photoURL!) as ImageProvider
+                : null);
 
     return SafeArea(
       child: SingleChildScrollView(
@@ -1257,6 +1330,19 @@ class CityOption {
   const CityOption({required this.name, required this.uf});
 
   String get label => '$name - $uf';
+}
+
+
+String _cleanCityName(String value) {
+  final text = value.trim();
+
+  if (text.isEmpty) return '';
+
+  final match = RegExp(r'\s-\s[A-Z]{2}$').firstMatch(text);
+
+  if (match == null) return text;
+
+  return text.substring(0, match.start).trim();
 }
 
 class BrazilianPhoneFormatter extends TextInputFormatter {
