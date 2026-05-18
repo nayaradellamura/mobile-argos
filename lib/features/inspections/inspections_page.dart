@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -5,7 +6,13 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shimmer/shimmer.dart';
 
-enum InspectionFilter { all, pending, inProgress, aiAnalysis, completed }
+enum InspectionFilter {
+  all,
+  pending,
+  inProgress,
+  aiAnalysis,
+  completed,
+}
 
 extension InspectionFilterX on InspectionFilter {
   String get label {
@@ -225,9 +232,7 @@ class _InspectionsPageState extends State<InspectionsPage> {
         filter: inspections.where(filter.matches).length,
     };
 
-    final filteredInspections = inspections
-        .where(_selectedFilter.matches)
-        .toList();
+    final filteredInspections = inspections.where(_selectedFilter.matches).toList();
 
     return SafeArea(
       child: Column(
@@ -243,54 +248,36 @@ class _InspectionsPageState extends State<InspectionsPage> {
             },
           ),
           Expanded(
-            child: _buildInspectionsContent(inspections, filteredInspections),
+            child: inspections.isEmpty
+                ? const _StateMessage(
+                    icon: Icons.assignment_outlined,
+                    title: 'Nenhuma vistoria atribuída',
+                    message:
+                        'Não há sinistros atribuídos para esta oficina no momento.',
+                  )
+                : filteredInspections.isEmpty
+                    ? _StateMessage(
+                        icon: _selectedFilter.icon,
+                        title: 'Nenhum item em ${_selectedFilter.label}',
+                        message:
+                            'Não há vistorias nessa categoria no momento. Toque em outra categoria para alterar o filtro.',
+                      )
+                    : ListView.separated(
+                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+                        itemCount: filteredInspections.length,
+                        separatorBuilder: (_, __) => const SizedBox(height: 12),
+                        itemBuilder: (context, index) {
+                          final inspection = filteredInspections[index];
+
+                          return _InspectionCard(
+                            inspection: inspection,
+                            onTap: () => _openInspectionSummary(inspection),
+                          );
+                        },
+                      ),
           ),
         ],
       ),
-    );
-  }
-
-  Widget _buildInspectionsContent(
-    List<InspectionCase> inspections,
-    List<InspectionCase> filteredInspections,
-  ) {
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 280),
-      switchInCurve: Curves.easeOutCubic,
-      switchOutCurve: Curves.easeInCubic,
-      transitionBuilder: (child, animation) {
-        final offset = Tween<Offset>(
-          begin: const Offset(0, .025),
-          end: Offset.zero,
-        ).animate(animation);
-
-        return FadeTransition(
-          opacity: animation,
-          child: SlideTransition(position: offset, child: child),
-        );
-      },
-      child: inspections.isEmpty
-          ? const _StateMessage(
-              key: ValueKey('empty_all_inspections'),
-              icon: Icons.assignment_outlined,
-              title: 'Nenhuma vistoria atribuída',
-              message:
-                  'Não há sinistros atribuídos para esta oficina no momento.',
-            )
-          : filteredInspections.isEmpty
-          ? _StateMessage(
-              key: ValueKey('empty_filter_${_selectedFilter.name}'),
-              icon: _selectedFilter.icon,
-              title: 'Nenhum item em ${_selectedFilter.label}',
-              message:
-                  'Não há vistorias nessa categoria no momento. Toque em outra categoria para alterar o filtro.',
-            )
-          : _AnimatedInspectionList(
-              key: ValueKey('list_${_selectedFilter.name}'),
-              animationScope: _selectedFilter.name,
-              inspections: filteredInspections,
-              onOpenInspection: _openInspectionSummary,
-            ),
     );
   }
 
@@ -412,46 +399,77 @@ class InspectionSummaryPage extends StatefulWidget {
 class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
   late InspectionCase inspection;
   bool isCheckingIn = false;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _inspectionSubscription;
 
   @override
   void initState() {
     super.initState();
     inspection = widget.inspection;
+    _watchInspectionRealtime();
+
+    SinistroPresenceService.instance.startViewing(inspection.id).catchError((error) {
+      debugPrint('Start viewing sinistro error: $error');
+    });
+  }
+
+  @override
+  void dispose() {
+    _inspectionSubscription?.cancel();
+
+    SinistroPresenceService.instance.stopViewing().catchError((error) {
+      debugPrint('Stop viewing sinistro error: $error');
+    });
+    super.dispose();
+  }
+
+  void _watchInspectionRealtime() {
+    _inspectionSubscription?.cancel();
+    _inspectionSubscription = FirebaseFirestore.instance
+        .collection('sinistro')
+        .doc(inspection.id)
+        .snapshots()
+        .listen((snapshot) {
+      if (!mounted || !snapshot.exists) return;
+
+        final updatedInspection = InspectionCase.fromFirestore(
+          snapshot as QueryDocumentSnapshot<Map<String, dynamic>>);
+
+      setState(() {
+        inspection = updatedInspection;
+      });
+    }, onError: (error) {
+      debugPrint('Inspection realtime update error: $error');
+    });
   }
 
   Future<void> _registerCheckIn() async {
     if (inspection.checkInAt != null || isCheckingIn) return;
 
+    if (inspection.isAssignedToAnotherUser) {
+      _showBlockedByResponsibleSnack();
+      return;
+    }
+
     setState(() {
       isCheckingIn = true;
     });
 
-    final now = DateTime.now();
-    final nowIso = now.toIso8601String();
-
     try {
-      await FirebaseFirestore.instance
-          .collection('sinistro')
-          .doc(inspection.id)
-          .update({
-            'checkInAt': nowIso,
-            'status': 'Em andamento',
-            'statusVistoria': 'Check-in realizado',
-            'statusUpdatedAt': nowIso,
-          });
+      final updatedInspection = await SinistroPresenceService.instance
+          .claimSinistroForCurrentUser(
+        inspection: inspection,
+        action: 'check_in',
+      );
 
       if (!mounted) return;
 
       setState(() {
-        inspection = inspection.copyWith(
-          checkInAt: now,
-          status: InspectionStatus.inProgress,
-        );
+        inspection = updatedInspection;
       });
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Check-in realizado com sucesso.'),
+          content: Text('Check-in realizado e vistoria vinculada ao seu usuário.'),
           backgroundColor: Colors.green,
         ),
       );
@@ -461,9 +479,11 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Não foi possível realizar o check-in.'),
-          backgroundColor: Colors.redAccent,
+        SnackBar(
+          content: Text(
+            error.toString().replaceFirst('Exception: ', ''),
+          ),
+          backgroundColor: Colors.orange,
         ),
       );
     } finally {
@@ -475,7 +495,27 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
     }
   }
 
+  void _showBlockedByResponsibleSnack() {
+    final name = inspection.assignedToName.trim().isEmpty
+        ? 'outro profissional'
+        : inspection.assignedToName.trim();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Esta vistoria está vinculada a $name. Você pode visualizar, mas não alterar ou iniciar o chat.',
+        ),
+        backgroundColor: Colors.orange,
+      ),
+    );
+  }
+
   void _goToChat() {
+    if (!inspection.isAssignedToCurrentUser) {
+      _showBlockedByResponsibleSnack();
+      return;
+    }
+
     Navigator.of(context).pop();
     widget.onOpenChat();
   }
@@ -483,6 +523,10 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
   @override
   Widget build(BuildContext context) {
     final hasCheckIn = inspection.checkInAt != null;
+    final isAssignedToAnother = inspection.isAssignedToAnotherUser;
+    final isAssignedToMe = inspection.isAssignedToCurrentUser;
+    final canCheckIn = !isAssignedToAnother && (!hasCheckIn || !inspection.hasAssignedUser);
+    final canOpenChat = hasCheckIn && isAssignedToMe;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF3FBFF),
@@ -500,6 +544,12 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
                 children: [
                   _SummaryHeroCard(inspection: inspection),
+                  const SizedBox(height: 14),
+                  SinistroViewersBar(sinistroId: inspection.id),
+                  if (inspection.hasAssignedUser) ...[
+                    const SizedBox(height: 14),
+                    _SummaryAssignmentBanner(inspection: inspection),
+                  ],
                   const SizedBox(height: 14),
                   _LinkedVistoriaSummaryForInspection(
                     sinistroId: inspection.id,
@@ -544,6 +594,15 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
                             : 'Ainda não realizado',
                         valueColor: hasCheckIn ? Colors.green : Colors.orange,
                       ),
+                      _InfoRow(
+                        'Responsável',
+                        inspection.assignedToName.isEmpty
+                            ? 'Ainda não vinculado'
+                            : inspection.assignedToName,
+                        valueColor: inspection.hasAssignedUser
+                            ? const Color(0xFF0057C0)
+                            : Colors.orange,
+                      ),
                     ],
                   ),
                   const SizedBox(height: 14),
@@ -587,9 +646,9 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
                   SizedBox(
                     height: 54,
                     child: ElevatedButton.icon(
-                      onPressed: hasCheckIn || isCheckingIn
-                          ? null
-                          : _registerCheckIn,
+                      onPressed: canCheckIn && !isCheckingIn
+                          ? _registerCheckIn
+                          : null,
                       icon: isCheckingIn
                           ? const SizedBox(
                               width: 18,
@@ -607,17 +666,25 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
                       label: Text(
                         isCheckingIn
                             ? 'Realizando check-in...'
+                            : isAssignedToAnother
+                            ? 'Vistoria vinculada a ${inspection.assignedToName}'
+                            : hasCheckIn && !inspection.hasAssignedUser
+                            ? 'Assumir vistoria'
                             : hasCheckIn
                             ? 'Check-in realizado às ${_formatTime(inspection.checkInAt!)}'
-                            : 'Realizar check-in do veículo',
+                            : 'Realizar check-in e assumir vistoria',
                       ),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: hasCheckIn
                             ? Colors.green
+                            : isAssignedToAnother
+                            ? const Color(0xFF9CA3AF)
                             : const Color(0xFF0057C0),
                         foregroundColor: Colors.white,
                         disabledBackgroundColor: hasCheckIn
                             ? Colors.green
+                            : isAssignedToAnother
+                            ? const Color(0xFF9CA3AF)
                             : const Color(0xFF0057C0),
                         disabledForegroundColor: Colors.white,
                         shape: RoundedRectangleBorder(
@@ -630,20 +697,22 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
                   SizedBox(
                     height: 54,
                     child: OutlinedButton.icon(
-                      onPressed: hasCheckIn ? _goToChat : null,
+                      onPressed: canOpenChat ? _goToChat : null,
                       icon: Icon(
-                        hasCheckIn ? Icons.smart_toy : Icons.lock_outline,
+                        canOpenChat ? Icons.smart_toy : Icons.lock_outline,
                       ),
                       label: Text(
-                        hasCheckIn
+                        canOpenChat
                             ? 'Iniciar coleta no Chat IA'
+                            : isAssignedToAnother
+                            ? 'Chat bloqueado para outro responsável'
                             : 'Faça check-in para iniciar o Chat IA',
                       ),
                       style: OutlinedButton.styleFrom(
-                        foregroundColor: hasCheckIn
+                        foregroundColor: canOpenChat
                             ? const Color(0xFF0057C0)
                             : const Color(0xFF6B7280),
-                        backgroundColor: hasCheckIn
+                        backgroundColor: canOpenChat
                             ? const Color(0xFFE5F6FF)
                             : const Color(0xFFE5E7EB),
                         side: BorderSide(color: Colors.black.withOpacity(.05)),
@@ -681,26 +750,9 @@ class _InspectionsHeader extends StatelessWidget {
     return counts[filter] ?? 0;
   }
 
-  List<InspectionFilter> _orderedFilters() {
-    final filters = InspectionFilter.values
-        .where((filter) => filter != InspectionFilter.all)
-        .toList();
-
-    if (selectedFilter == InspectionFilter.all) {
-      return [InspectionFilter.all, ...filters];
-    }
-
-    return [
-      InspectionFilter.all,
-      selectedFilter,
-      ...filters.where((filter) => filter != selectedFilter),
-    ];
-  }
-
   @override
   Widget build(BuildContext context) {
-    final filters = _orderedFilters();
-    final filtersKey = filters.map((filter) => filter.name).join('_');
+    final filters = InspectionFilter.values;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
@@ -748,24 +800,12 @@ class _InspectionsHeader extends StatelessWidget {
                   color: const Color(0xFFE5F6FF),
                   borderRadius: BorderRadius.circular(16),
                 ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _AnimatedCountText(
-                      value: total,
-                      style: const TextStyle(
-                        color: Color(0xFF0057C0),
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    const Text(
-                      ' casos',
-                      style: TextStyle(
-                        color: Color(0xFF0057C0),
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ],
+                child: Text(
+                  '$total casos',
+                  style: const TextStyle(
+                    color: Color(0xFF0057C0),
+                    fontWeight: FontWeight.w800,
+                  ),
                 ),
               ),
             ],
@@ -773,101 +813,26 @@ class _InspectionsHeader extends StatelessWidget {
           const SizedBox(height: 12),
           SizedBox(
             height: 92,
-            child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 260),
-              switchInCurve: Curves.easeOutCubic,
-              switchOutCurve: Curves.easeInCubic,
-              layoutBuilder: (currentChild, previousChildren) {
-                return Stack(
-                  clipBehavior: Clip.none,
-                  children: [...previousChildren, ?currentChild],
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: filters.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 10),
+              itemBuilder: (context, index) {
+                final filter = filters[index];
+
+                return _InspectionFilterCard(
+                  filter: filter,
+                  count: _countFor(filter),
+                  isSelected: selectedFilter == filter,
+                  onTap: onFilterChanged == null
+                      ? null
+                      : () => onFilterChanged!(filter),
                 );
               },
-              transitionBuilder: (child, animation) {
-                final offset = Tween<Offset>(
-                  begin: const Offset(.04, 0),
-                  end: Offset.zero,
-                ).animate(animation);
-
-                return FadeTransition(
-                  opacity: animation,
-                  child: SlideTransition(position: offset, child: child),
-                );
-              },
-              child: ListView.separated(
-                key: ValueKey(filtersKey),
-                scrollDirection: Axis.horizontal,
-                itemCount: filters.length,
-                separatorBuilder: (_, _) => const SizedBox(width: 10),
-                itemBuilder: (context, index) {
-                  final filter = filters[index];
-
-                  return _InspectionFilterCard(
-                    key: ValueKey(filter.name),
-                    filter: filter,
-                    count: _countFor(filter),
-                    isSelected: selectedFilter == filter,
-                    onTap: onFilterChanged == null
-                        ? null
-                        : () => onFilterChanged!(filter),
-                  );
-                },
-              ),
             ),
           ),
         ],
       ),
-    );
-  }
-}
-
-class _AnimatedCountText extends StatefulWidget {
-  final int value;
-  final TextStyle style;
-
-  const _AnimatedCountText({required this.value, required this.style});
-
-  @override
-  State<_AnimatedCountText> createState() => _AnimatedCountTextState();
-}
-
-class _AnimatedCountTextState extends State<_AnimatedCountText> {
-  late int _beginValue;
-
-  @override
-  void initState() {
-    super.initState();
-    _beginValue = widget.value;
-  }
-
-  @override
-  void didUpdateWidget(covariant _AnimatedCountText oldWidget) {
-    super.didUpdateWidget(oldWidget);
-
-    if (oldWidget.value != widget.value) {
-      _beginValue = oldWidget.value;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return TweenAnimationBuilder<double>(
-      tween: Tween<double>(
-        begin: _beginValue.toDouble(),
-        end: widget.value.toDouble(),
-      ),
-      duration: const Duration(milliseconds: 360),
-      curve: Curves.easeOutCubic,
-      onEnd: () {
-        if (!mounted || _beginValue == widget.value) return;
-
-        setState(() {
-          _beginValue = widget.value;
-        });
-      },
-      builder: (context, value, child) {
-        return Text(value.round().toString(), style: widget.style);
-      },
     );
   }
 }
@@ -879,7 +844,6 @@ class _InspectionFilterCard extends StatelessWidget {
   final VoidCallback? onTap;
 
   const _InspectionFilterCard({
-    super.key,
     required this.filter,
     required this.count,
     required this.isSelected,
@@ -895,149 +859,75 @@ class _InspectionFilterCard extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(20),
-        child: AnimatedScale(
-          scale: isSelected ? 1 : .97,
-          duration: const Duration(milliseconds: 260),
-          curve: Curves.easeOutCubic,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 320),
-            curve: Curves.easeOutCubic,
-            width: 132,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: isSelected ? color : const Color(0xFFEFF7FD),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: isSelected ? color : Colors.black.withOpacity(.04),
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: isSelected
-                      ? color.withOpacity(.20)
-                      : Colors.black.withOpacity(0),
-                  blurRadius: isSelected ? 18 : 0,
-                  offset: Offset(0, isSelected ? 8 : 0),
-                ),
-              ],
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          width: 132,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: isSelected ? color : const Color(0xFFEFF7FD),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: isSelected ? color : Colors.black.withOpacity(.04),
             ),
-            child: AnimatedDefaultTextStyle(
-              duration: const Duration(milliseconds: 240),
-              curve: Curves.easeOutCubic,
-              style: const TextStyle(color: Color(0xFF1F2937)),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+            boxShadow: isSelected
+                ? [
+                    BoxShadow(
+                      color: color.withOpacity(.22),
+                      blurRadius: 18,
+                      offset: const Offset(0, 8),
+                    ),
+                  ]
+                : [],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
                 children: [
-                  Row(
-                    children: [
-                      AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 220),
-                        transitionBuilder: (child, animation) {
-                          return FadeTransition(
-                            opacity: animation,
-                            child: ScaleTransition(
-                              scale: animation,
-                              child: child,
-                            ),
-                          );
-                        },
-                        child: Icon(
-                          filter.icon,
-                          key: ValueKey('${filter.name}_$isSelected'),
-                          size: 19,
-                          color: isSelected ? Colors.white : color,
-                        ),
-                      ),
-                      const Spacer(),
-                      _AnimatedCountText(
-                        value: count,
-                        style: GoogleFonts.spaceGrotesk(
-                          fontSize: 21,
-                          fontWeight: FontWeight.bold,
-                          color: isSelected ? Colors.white : color,
-                        ),
-                      ),
-                    ],
+                  Icon(
+                    filter.icon,
+                    size: 19,
+                    color: isSelected ? Colors.white : color,
                   ),
                   const Spacer(),
                   Text(
-                    filter.label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: isSelected
-                          ? Colors.white
-                          : const Color(0xFF1F2937),
-                      fontSize: 12,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    filter.description,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: isSelected
-                          ? Colors.white.withOpacity(.82)
-                          : const Color(0xFF414755),
-                      fontSize: 10,
-                      fontWeight: FontWeight.w700,
+                    '$count',
+                    style: GoogleFonts.spaceGrotesk(
+                      fontSize: 21,
+                      fontWeight: FontWeight.bold,
+                      color: isSelected ? Colors.white : color,
                     ),
                   ),
                 ],
               ),
-            ),
+              const Spacer(),
+              Text(
+                filter.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: isSelected ? Colors.white : const Color(0xFF1F2937),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                filter.description,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: isSelected
+                      ? Colors.white.withOpacity(.82)
+                      : const Color(0xFF414755),
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
           ),
         ),
       ),
-    );
-  }
-}
-
-class _AnimatedInspectionList extends StatelessWidget {
-  final String animationScope;
-  final List<InspectionCase> inspections;
-  final ValueChanged<InspectionCase> onOpenInspection;
-
-  const _AnimatedInspectionList({
-    super.key,
-    required this.animationScope,
-    required this.inspections,
-    required this.onOpenInspection,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-      itemCount: inspections.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 12),
-      itemBuilder: (context, index) {
-        final inspection = inspections[index];
-        final extraDuration = index < 6 ? index * 26 : 156;
-
-        return TweenAnimationBuilder<double>(
-          key: ValueKey('${animationScope}_${inspection.id}'),
-          tween: Tween<double>(begin: 0, end: 1),
-          duration: Duration(milliseconds: 240 + extraDuration),
-          curve: Curves.easeOutCubic,
-          builder: (context, value, child) {
-            final progress = value.clamp(0, 1).toDouble();
-
-            return Opacity(
-              opacity: progress,
-              child: Transform.translate(
-                offset: Offset(0, 14 * (1 - progress)),
-                child: child,
-              ),
-            );
-          },
-          child: _InspectionCard(
-            inspection: inspection,
-            onTap: () => onOpenInspection(inspection),
-          ),
-        );
-      },
     );
   }
 }
@@ -1226,6 +1116,14 @@ class _InspectionCardContent extends StatelessWidget {
                   ],
                 ],
               ),
+              if (inspection.hasAssignedUser) ...[
+                const SizedBox(height: 10),
+                _AssignedToBadge(inspection: inspection),
+              ],
+              if (inspection.activeViewers.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                _ActiveViewersBadge(viewers: inspection.activeViewers),
+              ],
               const SizedBox(height: 12),
               Row(
                 children: [
@@ -1269,6 +1167,269 @@ class _InspectionCardContent extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+
+class SinistroViewersBar extends StatelessWidget {
+  final String sinistroId;
+
+  const SinistroViewersBar({super.key, required this.sinistroId});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<List<SinistroViewer>>(
+      stream: SinistroPresenceService.instance.watchViewers(sinistroId),
+      builder: (context, snapshot) {
+        final viewers = snapshot.data ?? [];
+
+        if (viewers.isEmpty) {
+          return const SizedBox.shrink();
+        }
+
+        return Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: const Color(0xFFEAF6FF),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: const Color(0xFF0057C0).withOpacity(.08)),
+          ),
+          child: Row(
+            children: [
+              const Icon(
+                Icons.visibility_outlined,
+                size: 20,
+                color: Color(0xFF0057C0),
+              ),
+              const SizedBox(width: 8),
+              _ViewerAvatarStack(viewers: viewers),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  viewers.length == 1
+                      ? '${viewers.first.displayName} está visualizando'
+                      : '${viewers.length} pessoas estão visualizando',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFF414755),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _SummaryAssignmentBanner extends StatelessWidget {
+  final InspectionCase inspection;
+
+  const _SummaryAssignmentBanner({required this.inspection});
+
+  @override
+  Widget build(BuildContext context) {
+    final isMine = inspection.isAssignedToCurrentUser;
+    final photoURL = inspection.assignedToPhotoURL.trim();
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: isMine ? const Color(0xFFEAF6FF) : const Color(0xFFFFF7E8),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: isMine
+              ? const Color(0xFF0057C0).withOpacity(.10)
+              : const Color(0xFFFFB020).withOpacity(.20),
+        ),
+      ),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 21,
+            backgroundColor: Colors.white,
+            backgroundImage: photoURL.isNotEmpty ? NetworkImage(photoURL) : null,
+            child: photoURL.isEmpty
+                ? Icon(
+                    Icons.person,
+                    color: isMine ? const Color(0xFF0057C0) : Colors.orange,
+                  )
+                : null,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  isMine ? 'Esta vistoria está vinculada a você' : 'Vistoria vinculada a outro profissional',
+                  style: GoogleFonts.spaceGrotesk(
+                    color: isMine ? const Color(0xFF0057C0) : const Color(0xFF8A5700),
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  inspection.assignedToName.isEmpty
+                      ? 'Responsável não informado'
+                      : inspection.assignedToName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFF414755),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Icon(
+            isMine ? Icons.verified_user_outlined : Icons.lock_outline,
+            color: isMine ? const Color(0xFF0057C0) : Colors.orange,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AssignedToBadge extends StatelessWidget {
+  final InspectionCase inspection;
+
+  const _AssignedToBadge({required this.inspection});
+
+  @override
+  Widget build(BuildContext context) {
+    final photoURL = inspection.assignedToPhotoURL.trim();
+    final isMine = inspection.isAssignedToCurrentUser;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: isMine ? const Color(0xFFF0F7FF) : const Color(0xFFFFF7E8),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 15,
+            backgroundColor: Colors.white,
+            backgroundImage: photoURL.isNotEmpty ? NetworkImage(photoURL) : null,
+            child: photoURL.isEmpty
+                ? const Icon(Icons.person, size: 16, color: Color(0xFF0057C0))
+                : null,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              isMine
+                  ? 'Vinculada a você'
+                  : 'Vinculada a ${inspection.assignedToName}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: isMine ? const Color(0xFF0057C0) : const Color(0xFF8A5700),
+                fontSize: 12,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+          Icon(
+            isMine ? Icons.verified_user_outlined : Icons.lock_outline,
+            size: 16,
+            color: isMine ? const Color(0xFF0057C0) : Colors.orange,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ActiveViewersBadge extends StatelessWidget {
+  final List<SinistroViewer> viewers;
+
+  const _ActiveViewersBadge({required this.viewers});
+
+  @override
+  Widget build(BuildContext context) {
+    if (viewers.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF7E8),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.visibility_outlined, size: 16, color: Color(0xFFB26B00)),
+          const SizedBox(width: 7),
+          _ViewerAvatarStack(viewers: viewers.take(3).toList(), small: true),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              viewers.length == 1
+                  ? '${viewers.first.displayName} está olhando'
+                  : '${viewers.length} pessoas estão olhando',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Color(0xFF7A4A00),
+                fontSize: 12,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ViewerAvatarStack extends StatelessWidget {
+  final List<SinistroViewer> viewers;
+  final bool small;
+
+  const _ViewerAvatarStack({required this.viewers, this.small = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final radius = small ? 11.0 : 16.0;
+    final step = small ? 15.0 : 22.0;
+    final width = viewers.isEmpty ? 0.0 : (radius * 2) + ((viewers.length - 1) * step);
+
+    return SizedBox(
+      height: radius * 2,
+      width: width,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          for (int i = 0; i < viewers.length; i++)
+            Positioned(
+              left: i * step,
+              child: CircleAvatar(
+                radius: radius,
+                backgroundColor: Colors.white,
+                child: CircleAvatar(
+                  radius: radius - 2,
+                  backgroundImage: viewers[i].photoURL.isNotEmpty
+                      ? NetworkImage(viewers[i].photoURL)
+                      : null,
+                  child: viewers[i].photoURL.isEmpty
+                      ? Icon(Icons.person, size: small ? 12 : 16)
+                      : null,
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -1645,11 +1806,7 @@ class _PhotoPreviewStrip extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Icon(
-                Icons.image_outlined,
-                size: 14,
-                color: Color(0xFF0057C0),
-              ),
+              const Icon(Icons.image_outlined, size: 14, color: Color(0xFF0057C0)),
               const SizedBox(width: 4),
               Text(
                 '$total foto${total == 1 ? '' : 's'}',
@@ -1701,8 +1858,9 @@ class _Base64PhotoPreview extends StatelessWidget {
           height: 46,
           fit: BoxFit.cover,
           gaplessPlayback: true,
-          errorBuilder: (_, __, ___) =>
-              const _BrokenEvidencePreview(icon: Icons.broken_image_outlined),
+          errorBuilder: (_, __, ___) => const _BrokenEvidencePreview(
+            icon: Icons.broken_image_outlined,
+          ),
         ),
       );
     } catch (_) {
@@ -1861,7 +2019,11 @@ class _VistoriaMetric extends StatelessWidget {
         mainAxisAlignment: MainAxisAlignment.center,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 18, color: const Color(0xFF0057C0)),
+          Icon(
+            icon,
+            size: 18,
+            color: const Color(0xFF0057C0),
+          ),
           const SizedBox(height: 4),
           Flexible(
             child: FittedBox(
@@ -1900,6 +2062,7 @@ class _VistoriaMetric extends StatelessWidget {
     );
   }
 }
+
 
 class _SummaryTopBar extends StatelessWidget {
   final InspectionCase inspection;
@@ -2306,7 +2469,6 @@ class _StateMessage extends StatelessWidget {
   final VoidCallback? onAction;
 
   const _StateMessage({
-    super.key,
     required this.icon,
     required this.title,
     required this.message,
@@ -2495,6 +2657,12 @@ class InspectionCase {
   final WorkshopInfo workshop;
   final String damageDescription;
   final String observations;
+  final String assignedToUid;
+  final String assignedToName;
+  final String assignedToEmail;
+  final String assignedToPhotoURL;
+  final DateTime? assignedAt;
+  final List<SinistroViewer> activeViewers;
 
   const InspectionCase({
     required this.id,
@@ -2510,6 +2678,12 @@ class InspectionCase {
     required this.workshop,
     required this.damageDescription,
     required this.observations,
+    this.assignedToUid = '',
+    this.assignedToName = '',
+    this.assignedToEmail = '',
+    this.assignedToPhotoURL = '',
+    this.assignedAt,
+    this.activeViewers = const [],
   });
 
   factory InspectionCase.fromFirestore(
@@ -2544,7 +2718,28 @@ class InspectionCase {
       workshop: WorkshopInfo.fromSnapshot(credenciadoSnapshot, data),
       damageDescription: _stringValue(data['damageDescription']),
       observations: _stringValue(data['observations']),
+      assignedToUid: _stringValue(data['assignedToUid']),
+      assignedToName: _stringValue(data['assignedToName']),
+      assignedToEmail: _stringValue(data['assignedToEmail']),
+      assignedToPhotoURL: _stringValue(data['assignedToPhotoURL']),
+      assignedAt: _parseDateTime(data['assignedAt']),
+      activeViewers: _parseSinistroViewers(data['activeViewers']),
     );
+  }
+
+  bool get hasAssignedUser => assignedToUid.trim().isNotEmpty;
+
+  bool get isAssignedToCurrentUser {
+    final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+    return currentUid.isNotEmpty && assignedToUid.trim() == currentUid;
+  }
+
+  bool get isAssignedToAnotherUser {
+    final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final assignedUid = assignedToUid.trim();
+
+    return assignedUid.isNotEmpty && assignedUid != currentUid;
   }
 
   bool get isCompletedCategory {
@@ -2570,7 +2765,16 @@ class InspectionCase {
         status != InspectionStatus.cancelled;
   }
 
-  InspectionCase copyWith({InspectionStatus? status, DateTime? checkInAt}) {
+  InspectionCase copyWith({
+    InspectionStatus? status,
+    DateTime? checkInAt,
+    String? assignedToUid,
+    String? assignedToName,
+    String? assignedToEmail,
+    String? assignedToPhotoURL,
+    DateTime? assignedAt,
+    List<SinistroViewer>? activeViewers,
+  }) {
     return InspectionCase(
       id: id,
       protocol: protocol,
@@ -2585,6 +2789,12 @@ class InspectionCase {
       workshop: workshop,
       damageDescription: damageDescription,
       observations: observations,
+      assignedToUid: assignedToUid ?? this.assignedToUid,
+      assignedToName: assignedToName ?? this.assignedToName,
+      assignedToEmail: assignedToEmail ?? this.assignedToEmail,
+      assignedToPhotoURL: assignedToPhotoURL ?? this.assignedToPhotoURL,
+      assignedAt: assignedAt ?? this.assignedAt,
+      activeViewers: activeViewers ?? this.activeViewers,
     );
   }
 }
@@ -2740,8 +2950,7 @@ class LinkedVistoriaInfo {
           : 0,
       imageCount: images.length,
       audioCount: audios.length,
-      hasLaudo:
-          _stringValue(data['laudo']).isNotEmpty ||
+      hasLaudo: _stringValue(data['laudo']).isNotEmpty ||
           _stringValue(data['pdfLaudoUrl']).isNotEmpty,
       imageBase64Previews: _extractImageBase64Previews(images),
       audioPreviews: _extractAudioPreviews(audios),
@@ -2832,6 +3041,322 @@ String _formatFileSize(int bytes) {
 
   final mb = kb / 1024;
   return '${mb.toStringAsFixed(1)} MB';
+}
+
+
+class SinistroPresenceService {
+  SinistroPresenceService._();
+
+  static final SinistroPresenceService instance = SinistroPresenceService._();
+
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+
+  Timer? _heartbeatTimer;
+  String? _currentSinistroId;
+
+  CollectionReference<Map<String, dynamic>> get _sinistros =>
+      _db.collection('sinistro');
+
+  Future<void> startViewing(String sinistroId) async {
+    final user = _auth.currentUser;
+
+    if (user == null) return;
+
+    final cleanSinistroId = sinistroId.trim();
+
+    if (cleanSinistroId.isEmpty) return;
+
+    if (_currentSinistroId == cleanSinistroId && _heartbeatTimer != null) {
+      return;
+    }
+
+    await stopViewing();
+
+    _currentSinistroId = cleanSinistroId;
+
+    await _writeViewer(cleanSinistroId);
+
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 25), (_) {
+      _writeViewer(cleanSinistroId).catchError((error) {
+        debugPrint('Presence heartbeat error: $error');
+      });
+    });
+  }
+
+  Future<void> stopViewing() async {
+    final user = _auth.currentUser;
+    final sinistroId = _currentSinistroId;
+
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _currentSinistroId = null;
+
+    if (user == null || sinistroId == null || sinistroId.isEmpty) {
+      return;
+    }
+
+    await _sinistros
+        .doc(sinistroId)
+        .collection('viewers')
+        .doc(user.uid)
+        .delete()
+        .catchError((_) {});
+
+    await _refreshActiveViewersSummary(sinistroId);
+  }
+
+  Stream<List<SinistroViewer>> watchViewers(String sinistroId) {
+    final cutoffMillis = DateTime.now()
+        .subtract(const Duration(seconds: 70))
+        .millisecondsSinceEpoch;
+
+    return _sinistros
+        .doc(sinistroId)
+        .collection('viewers')
+        .where('lastSeenAtMillis', isGreaterThan: cutoffMillis)
+        .snapshots()
+        .map((snapshot) {
+      final viewers = snapshot.docs
+          .map((doc) => SinistroViewer.fromMap(doc.id, doc.data()))
+          .toList();
+
+      viewers.sort((a, b) => b.lastSeenAtMillis.compareTo(a.lastSeenAtMillis));
+
+      return viewers;
+    });
+  }
+
+  Future<InspectionCase> claimSinistroForCurrentUser({
+    required InspectionCase inspection,
+    String action = 'check_in',
+  }) async {
+    final user = _auth.currentUser;
+
+    if (user == null) {
+      throw Exception('Usuário não autenticado.');
+    }
+
+    final profile = await _loadUserProfile(user);
+    final sinistroRef = _sinistros.doc(inspection.id);
+    final now = DateTime.now();
+    final effectiveCheckInAt = inspection.checkInAt ?? now;
+    final checkInAtIso = effectiveCheckInAt.toIso8601String();
+    final nowIso = now.toIso8601String();
+
+    await _db.runTransaction((transaction) async {
+      final snap = await transaction.get(sinistroRef);
+
+      if (!snap.exists) {
+        throw Exception('Sinistro não encontrado.');
+      }
+
+      final data = snap.data() ?? {};
+      final assignedToUid = data['assignedToUid']?.toString().trim() ?? '';
+
+      if (assignedToUid.isNotEmpty && assignedToUid != user.uid) {
+        final assignedToName =
+            data['assignedToName']?.toString().trim() ?? 'outro profissional';
+
+        throw Exception('Esta vistoria já está vinculada a $assignedToName.');
+      }
+
+      transaction.set(
+        sinistroRef,
+        {
+          'assignedToUid': user.uid,
+          'assignedToName': profile.name,
+          'assignedToEmail': profile.email,
+          'assignedToPhotoURL': profile.photoURL,
+          'assignedAt': FieldValue.serverTimestamp(),
+          'assignedByAction': action,
+          'isAssigned': true,
+          'checkInAt': checkInAtIso,
+          'status': 'EM_ANDAMENTO',
+          'chatEnabled': true,
+          'chatStatus': 'Aberto',
+          'statusUpdatedAt': nowIso,
+        },
+        SetOptions(merge: true),
+      );
+    });
+
+    return inspection.copyWith(
+      checkInAt: effectiveCheckInAt,
+      status: InspectionStatus.inProgress,
+      assignedToUid: user.uid,
+      assignedToName: profile.name,
+      assignedToEmail: profile.email,
+      assignedToPhotoURL: profile.photoURL,
+      assignedAt: now,
+    );
+  }
+
+  Future<void> _writeViewer(String sinistroId) async {
+    final user = _auth.currentUser;
+
+    if (user == null) return;
+
+    final profile = await _loadUserProfile(user);
+    final nowMillis = DateTime.now().millisecondsSinceEpoch;
+
+    await _sinistros
+        .doc(sinistroId)
+        .collection('viewers')
+        .doc(user.uid)
+        .set(
+      {
+        'uid': user.uid,
+        'name': profile.name,
+        'email': profile.email,
+        'photoURL': profile.photoURL,
+        'openedAt': FieldValue.serverTimestamp(),
+        'lastSeenAt': FieldValue.serverTimestamp(),
+        'lastSeenAtMillis': nowMillis,
+      },
+      SetOptions(merge: true),
+    );
+
+    await _refreshActiveViewersSummary(sinistroId);
+  }
+
+  Future<void> _refreshActiveViewersSummary(String sinistroId) async {
+    final cutoffMillis = DateTime.now()
+        .subtract(const Duration(seconds: 70))
+        .millisecondsSinceEpoch;
+
+    final viewersSnap = await _sinistros
+        .doc(sinistroId)
+        .collection('viewers')
+        .where('lastSeenAtMillis', isGreaterThan: cutoffMillis)
+        .limit(5)
+        .get();
+
+    final viewers = viewersSnap.docs.map((doc) {
+      final data = doc.data();
+
+      return {
+        'uid': data['uid']?.toString() ?? doc.id,
+        'name': data['name']?.toString() ?? '',
+        'email': data['email']?.toString() ?? '',
+        'photoURL': data['photoURL']?.toString() ?? '',
+        'lastSeenAtMillis': data['lastSeenAtMillis'] ?? 0,
+      };
+    }).toList();
+
+    await _sinistros.doc(sinistroId).set(
+      {
+        'activeViewers': viewers,
+        'activeViewersCount': viewers.length,
+        'activeViewersUpdatedAt': FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
+  }
+
+  Future<_UserPresenceProfile> _loadUserProfile(User user) async {
+    final email = user.email?.trim().toLowerCase() ?? '';
+    Map<String, dynamic> data = {};
+
+    final byUid = await _db.collection('users').doc(user.uid).get();
+    data = byUid.data() ?? {};
+
+    if (data.isEmpty && email.isNotEmpty) {
+      final byEmail = await _db.collection('users').doc(email).get();
+      data = byEmail.data() ?? {};
+    }
+
+    if (data.isEmpty) {
+      final query = await _db
+          .collection('users')
+          .where('uid', isEqualTo: user.uid)
+          .limit(1)
+          .get();
+
+      if (query.docs.isNotEmpty) {
+        data = query.docs.first.data();
+      }
+    }
+
+    final name = data['displayName']?.toString().trim().isNotEmpty == true
+        ? data['displayName'].toString().trim()
+        : data['nome']?.toString().trim().isNotEmpty == true
+            ? data['nome'].toString().trim()
+            : user.displayName?.trim().isNotEmpty == true
+                ? user.displayName!.trim()
+                : email;
+
+    final photoURL = data['photoURL']?.toString().trim().isNotEmpty == true
+        ? data['photoURL'].toString().trim()
+        : data['foto']?.toString().trim().isNotEmpty == true
+            ? data['foto'].toString().trim()
+            : user.photoURL ?? '';
+
+    return _UserPresenceProfile(
+      uid: user.uid,
+      name: name,
+      email: email,
+      photoURL: photoURL,
+    );
+  }
+}
+
+class SinistroViewer {
+  final String uid;
+  final String name;
+  final String email;
+  final String photoURL;
+  final int lastSeenAtMillis;
+
+  const SinistroViewer({
+    required this.uid,
+    required this.name,
+    required this.email,
+    required this.photoURL,
+    required this.lastSeenAtMillis,
+  });
+
+  String get displayName {
+    if (name.trim().isNotEmpty) return name.trim();
+    if (email.trim().isNotEmpty) return email.trim();
+    return 'Usuário';
+  }
+
+  factory SinistroViewer.fromMap(String id, Map<String, dynamic> data) {
+    final rawMillis = data['lastSeenAtMillis'];
+
+    return SinistroViewer(
+      uid: data['uid']?.toString() ?? id,
+      name: data['name']?.toString() ?? '',
+      email: data['email']?.toString() ?? '',
+      photoURL: data['photoURL']?.toString() ?? '',
+      lastSeenAtMillis: rawMillis is int ? rawMillis : int.tryParse('$rawMillis') ?? 0,
+    );
+  }
+}
+
+class _UserPresenceProfile {
+  final String uid;
+  final String name;
+  final String email;
+  final String photoURL;
+
+  const _UserPresenceProfile({
+    required this.uid,
+    required this.name,
+    required this.email,
+    required this.photoURL,
+  });
+}
+
+List<SinistroViewer> _parseSinistroViewers(dynamic value) {
+  if (value is! List) return const [];
+
+  return value
+      .whereType<Map>()
+      .map((item) => item.map((key, value) => MapEntry(key.toString(), value)))
+      .map((item) => SinistroViewer.fromMap(item['uid']?.toString() ?? '', item))
+      .toList();
 }
 
 class _CredenciadoContext {

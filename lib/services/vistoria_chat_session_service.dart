@@ -1,6 +1,8 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
@@ -61,7 +63,12 @@ class VistoriaChatSessionService {
         .get();
 
     final list = snap.docs
-        .where((doc) => _hasCheckIn(doc.data()['checkInAt']))
+        .where((doc) {
+          final data = doc.data();
+          final assignedToUid = _str(data['assignedToUid']);
+
+          return _hasCheckIn(data['checkInAt']) && assignedToUid == ctx.uid;
+        })
         .map(SinistroVistoriaOption.fromFirestore)
         .toList();
 
@@ -93,6 +100,24 @@ class VistoriaChatSessionService {
 
     if (!_hasCheckIn(sinistro['checkInAt'])) {
       throw Exception('Este sinistro ainda não possui check-in.');
+    }
+
+    final assignedToUid = _str(sinistro['assignedToUid']);
+    final assignedToName = _str(
+      sinistro['assignedToName'],
+      fallback: 'outro profissional',
+    );
+
+    if (assignedToUid.isEmpty) {
+      throw Exception(
+        'Faça o check-in e assuma a vistoria antes de iniciar o Chat IA.',
+      );
+    }
+
+    if (assignedToUid != ctx.uid) {
+      throw Exception(
+        'Esta vistoria está vinculada a $assignedToName. Você pode visualizar, mas não continuar o Chat IA.',
+      );
     }
 
     final idvistoria = await _createVistoriaId();
@@ -194,6 +219,8 @@ class VistoriaChatSessionService {
     required String vistoriaDocId,
     bool hardDelete = true,
   }) async {
+    await _assertVistoriaOwnedByCurrentUser(vistoriaDocId);
+
     final ref = _vistorias.doc(vistoriaDocId);
 
     if (hardDelete) {
@@ -229,6 +256,8 @@ class VistoriaChatSessionService {
   }) async {
     final cleanText = text.trim();
     if (cleanText.isEmpty) return;
+
+    await _assertVistoriaOwnedByCurrentUser(vistoriaDocId);
 
     await _vistorias.doc(vistoriaDocId).set({
       'chatmessages': FieldValue.arrayUnion([
@@ -274,6 +303,8 @@ class VistoriaChatSessionService {
     required String filePath,
     required String contentType,
   }) async {
+    await _assertVistoriaOwnedByCurrentUser(vistoriaDocId);
+
     final file = File(filePath);
 
     if (!await file.exists()) {
@@ -331,6 +362,8 @@ class VistoriaChatSessionService {
     String? laudo,
     String? observacoes,
   }) async {
+    await _assertVistoriaOwnedByCurrentUser(vistoriaDocId);
+
     await _vistorias.doc(vistoriaDocId).set({
       'status': finishedStatus,
       if (laudo != null) 'laudo': laudo,
@@ -338,6 +371,44 @@ class VistoriaChatSessionService {
       'finishedAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
+  }
+
+  Future<void> _assertVistoriaOwnedByCurrentUser(String vistoriaDocId) async {
+    final user = _auth.currentUser;
+
+    if (user == null) {
+      throw Exception('Usuário não autenticado.');
+    }
+
+    final snap = await _vistorias.doc(vistoriaDocId).get();
+
+    if (!snap.exists) {
+      throw Exception('Vistoria não encontrada: $vistoriaDocId');
+    }
+
+    final data = snap.data() ?? {};
+    final inspectorId = _str(data['inspectorId']);
+
+    if (inspectorId.isNotEmpty && inspectorId != user.uid) {
+      throw Exception('Esta vistoria pertence a outro profissional.');
+    }
+
+    final sinistroId = _str(data['sinistroId']);
+
+    if (sinistroId.isEmpty) return;
+
+    final sinistroSnap = await _sinistros.doc(sinistroId).get();
+    final sinistro = sinistroSnap.data() ?? {};
+    final assignedToUid = _str(sinistro['assignedToUid']);
+
+    if (assignedToUid.isNotEmpty && assignedToUid != user.uid) {
+      final assignedToName = _str(
+        sinistro['assignedToName'],
+        fallback: 'outro profissional',
+      );
+
+      throw Exception('Esta vistoria está vinculada a $assignedToName.');
+    }
   }
 
   Future<_CurrentContext> _currentContext() async {
@@ -386,34 +457,10 @@ class VistoriaChatSessionService {
     );
   }
 
-  Future<String> _createVistoriaId() async {
-    final year = DateTime.now().year;
-    final counterRef = _db.collection('counters').doc('vistorias_$year');
-
-    final nextNumber = await _db.runTransaction<int>((transaction) async {
-      final snapshot = await transaction.get(counterRef);
-      final data = snapshot.data();
-
-      final current = snapshot.exists && data != null
-          ? (data['lastNumber'] as int? ?? 0)
-          : 0;
-
-      final next = current + 1;
-
-      transaction.set(
-        counterRef,
-        {
-          'lastNumber': next,
-          'year': year,
-          'updatedAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
-
-      return next;
-    });
-
-    return 'VIS-$year-${nextNumber.toString().padLeft(4, '0')}';
+  String _createVistoriaId() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final random = Random().nextInt(999999).toString().padLeft(6, '0');
+    return 'vistoria_${now}_$random';
   }
 
   static bool _hasCheckIn(dynamic value) {
