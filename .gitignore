@@ -1,5 +1,6 @@
 # Flutter / Dart
 .dart_tool/
+.dart-appdata/
 .flutter-plugins
 .flutter-plugins-dependencies
 .packages
@@ -12,6 +13,7 @@ coverage/
 .gradle/
 .gradle_user_home/
 android/.gradle/
+android/.kotlin/
 android/app/build/
 android/build/
 **/build/
@@ -120,7 +122,10 @@ Thumbs.db
 skills/
 skills-lock.json
 
-lib/
-firebase_options.dart
-
-functions/
+# Non-Android Flutter targets
+# This project is currently maintained only for Android.
+ios/
+linux/
+macos/
+web/
+windows/

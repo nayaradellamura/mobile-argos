@@ -243,36 +243,54 @@ class _InspectionsPageState extends State<InspectionsPage> {
             },
           ),
           Expanded(
-            child: inspections.isEmpty
-                ? const _StateMessage(
-                    icon: Icons.assignment_outlined,
-                    title: 'Nenhuma vistoria atribuída',
-                    message:
-                        'Não há sinistros atribuídos para esta oficina no momento.',
-                  )
-                : filteredInspections.isEmpty
-                ? _StateMessage(
-                    icon: _selectedFilter.icon,
-                    title: 'Nenhum item em ${_selectedFilter.label}',
-                    message:
-                        'Não há vistorias nessa categoria no momento. Toque em outra categoria para alterar o filtro.',
-                  )
-                : ListView.separated(
-                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-                    itemCount: filteredInspections.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 12),
-                    itemBuilder: (context, index) {
-                      final inspection = filteredInspections[index];
-
-                      return _InspectionCard(
-                        inspection: inspection,
-                        onTap: () => _openInspectionSummary(inspection),
-                      );
-                    },
-                  ),
+            child: _buildInspectionsContent(inspections, filteredInspections),
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildInspectionsContent(
+    List<InspectionCase> inspections,
+    List<InspectionCase> filteredInspections,
+  ) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 280),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) {
+        final offset = Tween<Offset>(
+          begin: const Offset(0, .025),
+          end: Offset.zero,
+        ).animate(animation);
+
+        return FadeTransition(
+          opacity: animation,
+          child: SlideTransition(position: offset, child: child),
+        );
+      },
+      child: inspections.isEmpty
+          ? const _StateMessage(
+              key: ValueKey('empty_all_inspections'),
+              icon: Icons.assignment_outlined,
+              title: 'Nenhuma vistoria atribuída',
+              message:
+                  'Não há sinistros atribuídos para esta oficina no momento.',
+            )
+          : filteredInspections.isEmpty
+          ? _StateMessage(
+              key: ValueKey('empty_filter_${_selectedFilter.name}'),
+              icon: _selectedFilter.icon,
+              title: 'Nenhum item em ${_selectedFilter.label}',
+              message:
+                  'Não há vistorias nessa categoria no momento. Toque em outra categoria para alterar o filtro.',
+            )
+          : _AnimatedInspectionList(
+              key: ValueKey('list_${_selectedFilter.name}'),
+              animationScope: _selectedFilter.name,
+              inspections: filteredInspections,
+              onOpenInspection: _openInspectionSummary,
+            ),
     );
   }
 
@@ -663,9 +681,26 @@ class _InspectionsHeader extends StatelessWidget {
     return counts[filter] ?? 0;
   }
 
+  List<InspectionFilter> _orderedFilters() {
+    final filters = InspectionFilter.values
+        .where((filter) => filter != InspectionFilter.all)
+        .toList();
+
+    if (selectedFilter == InspectionFilter.all) {
+      return [InspectionFilter.all, ...filters];
+    }
+
+    return [
+      InspectionFilter.all,
+      selectedFilter,
+      ...filters.where((filter) => filter != selectedFilter),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
-    final filters = InspectionFilter.values;
+    final filters = _orderedFilters();
+    final filtersKey = filters.map((filter) => filter.name).join('_');
 
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
@@ -713,12 +748,24 @@ class _InspectionsHeader extends StatelessWidget {
                   color: const Color(0xFFE5F6FF),
                   borderRadius: BorderRadius.circular(16),
                 ),
-                child: Text(
-                  '$total casos',
-                  style: const TextStyle(
-                    color: Color(0xFF0057C0),
-                    fontWeight: FontWeight.w800,
-                  ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _AnimatedCountText(
+                      value: total,
+                      style: const TextStyle(
+                        color: Color(0xFF0057C0),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const Text(
+                      ' casos',
+                      style: TextStyle(
+                        color: Color(0xFF0057C0),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -726,26 +773,101 @@ class _InspectionsHeader extends StatelessWidget {
           const SizedBox(height: 12),
           SizedBox(
             height: 92,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: filters.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 10),
-              itemBuilder: (context, index) {
-                final filter = filters[index];
-
-                return _InspectionFilterCard(
-                  filter: filter,
-                  count: _countFor(filter),
-                  isSelected: selectedFilter == filter,
-                  onTap: onFilterChanged == null
-                      ? null
-                      : () => onFilterChanged!(filter),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 260),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              layoutBuilder: (currentChild, previousChildren) {
+                return Stack(
+                  clipBehavior: Clip.none,
+                  children: [...previousChildren, ?currentChild],
                 );
               },
+              transitionBuilder: (child, animation) {
+                final offset = Tween<Offset>(
+                  begin: const Offset(.04, 0),
+                  end: Offset.zero,
+                ).animate(animation);
+
+                return FadeTransition(
+                  opacity: animation,
+                  child: SlideTransition(position: offset, child: child),
+                );
+              },
+              child: ListView.separated(
+                key: ValueKey(filtersKey),
+                scrollDirection: Axis.horizontal,
+                itemCount: filters.length,
+                separatorBuilder: (_, _) => const SizedBox(width: 10),
+                itemBuilder: (context, index) {
+                  final filter = filters[index];
+
+                  return _InspectionFilterCard(
+                    key: ValueKey(filter.name),
+                    filter: filter,
+                    count: _countFor(filter),
+                    isSelected: selectedFilter == filter,
+                    onTap: onFilterChanged == null
+                        ? null
+                        : () => onFilterChanged!(filter),
+                  );
+                },
+              ),
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+class _AnimatedCountText extends StatefulWidget {
+  final int value;
+  final TextStyle style;
+
+  const _AnimatedCountText({required this.value, required this.style});
+
+  @override
+  State<_AnimatedCountText> createState() => _AnimatedCountTextState();
+}
+
+class _AnimatedCountTextState extends State<_AnimatedCountText> {
+  late int _beginValue;
+
+  @override
+  void initState() {
+    super.initState();
+    _beginValue = widget.value;
+  }
+
+  @override
+  void didUpdateWidget(covariant _AnimatedCountText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (oldWidget.value != widget.value) {
+      _beginValue = oldWidget.value;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(
+        begin: _beginValue.toDouble(),
+        end: widget.value.toDouble(),
+      ),
+      duration: const Duration(milliseconds: 360),
+      curve: Curves.easeOutCubic,
+      onEnd: () {
+        if (!mounted || _beginValue == widget.value) return;
+
+        setState(() {
+          _beginValue = widget.value;
+        });
+      },
+      builder: (context, value, child) {
+        return Text(value.round().toString(), style: widget.style);
+      },
     );
   }
 }
@@ -757,6 +879,7 @@ class _InspectionFilterCard extends StatelessWidget {
   final VoidCallback? onTap;
 
   const _InspectionFilterCard({
+    super.key,
     required this.filter,
     required this.count,
     required this.isSelected,
@@ -772,75 +895,149 @@ class _InspectionFilterCard extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(20),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          width: 132,
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: isSelected ? color : const Color(0xFFEFF7FD),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(
-              color: isSelected ? color : Colors.black.withOpacity(.04),
+        child: AnimatedScale(
+          scale: isSelected ? 1 : .97,
+          duration: const Duration(milliseconds: 260),
+          curve: Curves.easeOutCubic,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 320),
+            curve: Curves.easeOutCubic,
+            width: 132,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: isSelected ? color : const Color(0xFFEFF7FD),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: isSelected ? color : Colors.black.withOpacity(.04),
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: isSelected
+                      ? color.withOpacity(.20)
+                      : Colors.black.withOpacity(0),
+                  blurRadius: isSelected ? 18 : 0,
+                  offset: Offset(0, isSelected ? 8 : 0),
+                ),
+              ],
             ),
-            boxShadow: isSelected
-                ? [
-                    BoxShadow(
-                      color: color.withOpacity(.22),
-                      blurRadius: 18,
-                      offset: const Offset(0, 8),
-                    ),
-                  ]
-                : [],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
+            child: AnimatedDefaultTextStyle(
+              duration: const Duration(milliseconds: 240),
+              curve: Curves.easeOutCubic,
+              style: const TextStyle(color: Color(0xFF1F2937)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(
-                    filter.icon,
-                    size: 19,
-                    color: isSelected ? Colors.white : color,
+                  Row(
+                    children: [
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 220),
+                        transitionBuilder: (child, animation) {
+                          return FadeTransition(
+                            opacity: animation,
+                            child: ScaleTransition(
+                              scale: animation,
+                              child: child,
+                            ),
+                          );
+                        },
+                        child: Icon(
+                          filter.icon,
+                          key: ValueKey('${filter.name}_$isSelected'),
+                          size: 19,
+                          color: isSelected ? Colors.white : color,
+                        ),
+                      ),
+                      const Spacer(),
+                      _AnimatedCountText(
+                        value: count,
+                        style: GoogleFonts.spaceGrotesk(
+                          fontSize: 21,
+                          fontWeight: FontWeight.bold,
+                          color: isSelected ? Colors.white : color,
+                        ),
+                      ),
+                    ],
                   ),
                   const Spacer(),
                   Text(
-                    '$count',
-                    style: GoogleFonts.spaceGrotesk(
-                      fontSize: 21,
-                      fontWeight: FontWeight.bold,
-                      color: isSelected ? Colors.white : color,
+                    filter.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: isSelected
+                          ? Colors.white
+                          : const Color(0xFF1F2937),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    filter.description,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: isSelected
+                          ? Colors.white.withOpacity(.82)
+                          : const Color(0xFF414755),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
                 ],
               ),
-              const Spacer(),
-              Text(
-                filter.label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: isSelected ? Colors.white : const Color(0xFF1F2937),
-                  fontSize: 12,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                filter.description,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: isSelected
-                      ? Colors.white.withOpacity(.82)
-                      : const Color(0xFF414755),
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
+            ),
           ),
         ),
       ),
+    );
+  }
+}
+
+class _AnimatedInspectionList extends StatelessWidget {
+  final String animationScope;
+  final List<InspectionCase> inspections;
+  final ValueChanged<InspectionCase> onOpenInspection;
+
+  const _AnimatedInspectionList({
+    super.key,
+    required this.animationScope,
+    required this.inspections,
+    required this.onOpenInspection,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+      itemCount: inspections.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 12),
+      itemBuilder: (context, index) {
+        final inspection = inspections[index];
+        final extraDuration = index < 6 ? index * 26 : 156;
+
+        return TweenAnimationBuilder<double>(
+          key: ValueKey('${animationScope}_${inspection.id}'),
+          tween: Tween<double>(begin: 0, end: 1),
+          duration: Duration(milliseconds: 240 + extraDuration),
+          curve: Curves.easeOutCubic,
+          builder: (context, value, child) {
+            final progress = value.clamp(0, 1).toDouble();
+
+            return Opacity(
+              opacity: progress,
+              child: Transform.translate(
+                offset: Offset(0, 14 * (1 - progress)),
+                child: child,
+              ),
+            );
+          },
+          child: _InspectionCard(
+            inspection: inspection,
+            onTap: () => onOpenInspection(inspection),
+          ),
+        );
+      },
     );
   }
 }
@@ -2109,6 +2306,7 @@ class _StateMessage extends StatelessWidget {
   final VoidCallback? onAction;
 
   const _StateMessage({
+    super.key,
     required this.icon,
     required this.title,
     required this.message,
