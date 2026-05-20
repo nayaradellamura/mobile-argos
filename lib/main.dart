@@ -1,5 +1,6 @@
 // lib/main.dart
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -17,7 +18,9 @@ import 'package:argos_app/features/network/argos_network_gate.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  await Firebase.initializeApp();
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
 
   FirebaseMessaging.onBackgroundMessage(
     argosFirebaseMessagingBackgroundHandler,
@@ -54,6 +57,14 @@ class ArgosApp extends StatelessWidget {
   }
 }
 
+/// Gate único de inicialização.
+///
+/// Ele mantém a SplashPage visível enquanto:
+/// - a animação da splash termina;
+/// - o Firebase Auth resolve o usuário;
+/// - se estiver logado, o status de cadastro do perfil é carregado.
+///
+/// Assim não existe segunda SplashPage nem tela intermediária com roda girando.
 class StartupGate extends StatefulWidget {
   const StartupGate({super.key});
 
@@ -62,55 +73,118 @@ class StartupGate extends StatefulWidget {
 }
 
 class _StartupGateState extends State<StartupGate> {
-  bool showSplash = true;
+  User? _user;
+  bool _splashCompleted = false;
+  bool _bootstrapCompleted = false;
+  bool _profileCompletionRequired = false;
 
-  void finishSplash() {
+  @override
+  void initState() {
+    super.initState();
+    _bootstrap();
+  }
+
+  Future<void> _bootstrap() async {
+    final authUser = FirebaseAuth.instance.currentUser ??
+        await FirebaseAuth.instance.authStateChanges().first;
+
+    bool profileRequired = false;
+
+    if (authUser != null) {
+      profileRequired = await _loadProfileCompletionRequired(authUser);
+    }
+
+    if (!mounted) return;
+
     setState(() {
-      showSplash = false;
+      _user = authUser;
+      _profileCompletionRequired = profileRequired;
+      _bootstrapCompleted = true;
+    });
+  }
+
+  Future<bool> _loadProfileCompletionRequired(User user) async {
+    final email = (user.email ?? '').trim().toLowerCase();
+
+    if (email.isEmpty) {
+      return true;
+    }
+
+    try {
+      final db = FirebaseFirestore.instance;
+
+      final byEmail = await db.collection('users').doc(email).get();
+
+      if (byEmail.exists) {
+        final data = byEmail.data() ?? {};
+        return data['cadastroCompleto'] != true;
+      }
+
+      final byUid = await db.collection('users').doc(user.uid).get();
+
+      if (byUid.exists) {
+        final data = byUid.data() ?? {};
+        return data['cadastroCompleto'] != true;
+      }
+
+      final query = await db
+          .collection('users')
+          .where('uid', isEqualTo: user.uid)
+          .limit(1)
+          .get();
+
+      if (query.docs.isNotEmpty) {
+        final data = query.docs.first.data();
+        return data['cadastroCompleto'] != true;
+      }
+
+      return true;
+    } catch (error) {
+      debugPrint('Startup profile completion check error: $error');
+      return true;
+    }
+  }
+
+  void _finishSplash() {
+    if (!mounted || _splashCompleted) return;
+
+    setState(() {
+      _splashCompleted = true;
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 450),
-      child: showSplash
-          ? SplashPage(key: const ValueKey('splash'), onComplete: finishSplash)
-          : const AuthGate(key: ValueKey('auth-gate')),
-    );
-  }
-}
+    final canLeaveSplash = _splashCompleted && _bootstrapCompleted;
 
-class AuthGate extends StatelessWidget {
-  const AuthGate({super.key});
+    if (!canLeaveSplash) {
+      return SplashPage(
+        key: const ValueKey('startup-splash'),
+        onComplete: _finishSplash,
+      );
+    }
 
-  @override
-  Widget build(BuildContext context) {
-    return StreamBuilder<User?>(
-      stream: FirebaseAuth.instance.authStateChanges(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const _ArgosLoadingScreen();
-        }
+    final user = _user;
 
-        final user = snapshot.data;
-
-        return Scaffold(
-          body: Stack(
-            children: [
-              const _ArgosBackground(),
-              AnimatedSwitcher(
-                duration: const Duration(milliseconds: 400),
-                switchInCurve: Curves.easeOut,
-                switchOutCurve: Curves.easeIn,
-                child: user == null
-                    ? const LoginPage(key: ValueKey('login-page'))
-                    : MainShell(key: const ValueKey('main-shell'), user: user),
-              ),
-            ],
+    return Scaffold(
+      body: Stack(
+        children: [
+          const _ArgosBackground(),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 400),
+            switchInCurve: Curves.easeOut,
+            switchOutCurve: Curves.easeIn,
+            child: user == null
+                ? const LoginPage(key: ValueKey('login-page'))
+                : MainShell(
+                    key: const ValueKey('main-shell'),
+                    user: user,
+                    initialProfileCompletionRequired:
+                        _profileCompletionRequired,
+                  ),
           ),
-        );
-      },
+        ],
+      ),
     );
   }
 }
@@ -127,22 +201,6 @@ class _ArgosBackground extends StatelessWidget {
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
-      ),
-    );
-  }
-}
-
-class _ArgosLoadingScreen extends StatelessWidget {
-  const _ArgosLoadingScreen();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Scaffold(
-      body: Stack(
-        children: [
-          _ArgosBackground(),
-          Center(child: CircularProgressIndicator(color: Color(0xFF0057C0))),
-        ],
       ),
     );
   }

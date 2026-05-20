@@ -9,7 +9,15 @@ import '../features/profile/profile_page.dart';
 class MainShell extends StatefulWidget {
   final User user;
 
-  const MainShell({super.key, required this.user});
+  /// Quando informado pelo StartupGate, evita que o MainShell mostre outra
+  /// splash/loading para validar o perfil de novo.
+  final bool? initialProfileCompletionRequired;
+
+  const MainShell({
+    super.key,
+    required this.user,
+    this.initialProfileCompletionRequired,
+  });
 
   @override
   State<MainShell> createState() => _MainShellState();
@@ -30,6 +38,17 @@ class _MainShellState extends State<MainShell> {
   @override
   void initState() {
     super.initState();
+
+    final initialProfileCompletionRequired =
+        widget.initialProfileCompletionRequired;
+
+    if (initialProfileCompletionRequired != null) {
+      profileCompletionRequired = initialProfileCompletionRequired;
+      selectedIndex = initialProfileCompletionRequired ? 2 : 0;
+      isLoadingProfile = false;
+      return;
+    }
+
     _loadProfileCompletionStatus();
   }
 
@@ -37,6 +56,8 @@ class _MainShellState extends State<MainShell> {
     final email = _emailKey;
 
     if (email.isEmpty) {
+      if (!mounted) return;
+
       setState(() {
         isLoadingProfile = false;
         profileCompletionRequired = true;
@@ -168,12 +189,10 @@ class _MainShellState extends State<MainShell> {
   @override
   Widget build(BuildContext context) {
     if (isLoadingProfile) {
-      return const Scaffold(
-        backgroundColor: Color(0xFFF3FBFF),
-        body: Center(
-          child: CircularProgressIndicator(color: Color(0xFF0057C0)),
-        ),
-      );
+      // Fallback de segurança para quando MainShell for aberto sem StartupGate.
+      // No fluxo normal atual, isso não aparece, porque o StartupGate já entrega
+      // initialProfileCompletionRequired carregado.
+      return const SizedBox.expand();
     }
 
     return Scaffold(

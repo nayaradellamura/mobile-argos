@@ -108,6 +108,7 @@ class _ArgosNetworkGateState extends State<ArgosNetworkGate> {
   }
 }
 
+// ignore: unused_element
 class _ArgosCheckingScreen extends StatelessWidget {
   const _ArgosCheckingScreen();
 
