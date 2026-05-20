@@ -429,6 +429,51 @@ class _ProfilePageState extends State<ProfilePage> {
     return ref.getDownloadURL();
   }
 
+  Future<void> _syncAssignedProfileToSinistros({
+  required String uid,
+  required String name,
+  required String email,
+  required String photoURL,
+}) async {
+  final db = FirebaseFirestore.instance;
+
+  final snap = await db
+      .collection('sinistro')
+      .where('assignedToUid', isEqualTo: uid)
+      .get();
+
+  if (snap.docs.isEmpty) return;
+
+  WriteBatch batch = db.batch();
+  int operationCount = 0;
+
+  for (final doc in snap.docs) {
+    batch.set(
+      doc.reference,
+      {
+        'assignedToName': name,
+        'assignedToEmail': email,
+        'assignedToPhotoURL': photoURL,
+        'assignedProfileUpdatedAt': FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
+
+    operationCount++;
+
+    if (operationCount == 450) {
+      await batch.commit();
+      batch = db.batch();
+      operationCount = 0;
+    }
+  }
+
+  if (operationCount > 0) {
+    await batch.commit();
+  }
+}
+
+
   bool _hasProfilePhoto() {
     if (selectedPhoto != null) return true;
 
@@ -607,10 +652,17 @@ class _ProfilePageState extends State<ProfilePage> {
       }
 
       if (uploadedPhotoURL != null &&
-          uploadedPhotoURL.isNotEmpty &&
-          widget.user.photoURL != uploadedPhotoURL) {
-        await widget.user.updatePhotoURL(uploadedPhotoURL);
-      }
+    uploadedPhotoURL.isNotEmpty &&
+    widget.user.photoURL != uploadedPhotoURL) {
+  await widget.user.updatePhotoURL(uploadedPhotoURL);
+}
+
+      await _syncAssignedProfileToSinistros(
+        uid: widget.user.uid,
+        name: nome,
+        email: emailKey,
+        photoURL: uploadedPhotoURL ?? '',
+      );
 
       await widget.user.reload();
 
@@ -665,6 +717,7 @@ class _ProfilePageState extends State<ProfilePage> {
       await FirebaseAuth.instance.signOut();
     }
   }
+
 
   InputDecoration _fieldDecoration({
     required String label,

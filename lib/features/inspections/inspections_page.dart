@@ -121,6 +121,37 @@ class _InspectionsPageState extends State<InspectionsPage> {
 
   Stream<List<InspectionCase>>? _cachedInspectionStream;
   String? _cachedInspectionCredenciadoId;
+  final Set<String> _precachedAvatarUrls = <String>{};
+
+  void _precachePeoplePhotos(List<InspectionCase> inspections) {
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (!mounted) return;
+
+    final urls = <String>{};
+
+    for (final inspection in inspections) {
+      final assignedPhoto = inspection.assignedToPhotoURL.trim();
+
+      if (assignedPhoto.isNotEmpty) {
+        urls.add(assignedPhoto);
+      }
+
+      for (final viewer in inspection.activeViewers) {
+        final viewerPhoto = viewer.photoURL.trim();
+
+        if (viewerPhoto.isNotEmpty) {
+          urls.add(viewerPhoto);
+        }
+      }
+    }
+
+    for (final url in urls) {
+      if (_precachedAvatarUrls.add(url)) {
+        precacheImage(NetworkImage(url), context).catchError((_) {});
+      }
+    }
+  });
+}
 
   @override
   void dispose() {
@@ -329,10 +360,12 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
   }
 
   Widget _buildBodyForInspections(List<InspectionCase> inspections) {
-    final counts = {
-      for (final filter in InspectionFilter.values)
-        filter: inspections.where(filter.matches).length,
-    };
+  _precachePeoplePhotos(inspections);
+
+  final counts = {
+    for (final filter in InspectionFilter.values)
+      filter: inspections.where(filter.matches).length,
+  };
 
     final filteredInspections = inspections.where(_selectedFilter.matches).toList();
 
@@ -2778,16 +2811,10 @@ class _SummaryAssignmentBanner extends StatelessWidget {
       ),
       child: Row(
         children: [
-          CircleAvatar(
+          _FastPersonAvatar(
+            photoURL: photoURL,
             radius: 21,
-            backgroundColor: Colors.white,
-            backgroundImage: photoURL.isNotEmpty ? NetworkImage(photoURL) : null,
-            child: photoURL.isEmpty
-                ? Icon(
-                    Icons.person,
-                    color: isMine ? const Color(0xFF0057C0) : Colors.orange,
-                  )
-                : null,
+            iconColor: isMine ? const Color(0xFF0057C0) : Colors.orange,
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -2846,14 +2873,11 @@ class _AssignedToBadge extends StatelessWidget {
       ),
       child: Row(
         children: [
-          CircleAvatar(
-            radius: 15,
-            backgroundColor: Colors.white,
-            backgroundImage: photoURL.isNotEmpty ? NetworkImage(photoURL) : null,
-            child: photoURL.isEmpty
-                ? const Icon(Icons.person, size: 16, color: Color(0xFF0057C0))
-                : null,
-          ),
+          _FastPersonAvatar(
+                photoURL: photoURL,
+                radius: 15,
+                iconColor: isMine ? const Color(0xFF0057C0) : Colors.orange,
+              ),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -5333,4 +5357,51 @@ String _formatTime(DateTime dateTime) {
   final minute = dateTime.minute.toString().padLeft(2, '0');
 
   return '$hour:$minute';
+}
+
+class _FastPersonAvatar extends StatelessWidget {
+  final String photoURL;
+  final double radius;
+  final IconData icon;
+  final Color iconColor;
+
+  const _FastPersonAvatar({
+    required this.photoURL,
+    required this.radius,
+    this.icon = Icons.person,
+    this.iconColor = const Color(0xFF0057C0),
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cleanUrl = photoURL.trim();
+    final size = radius * 2;
+
+    return Container(
+      width: size,
+      height: size,
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        shape: BoxShape.circle,
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: cleanUrl.isEmpty
+          ? Icon(icon, size: radius, color: iconColor)
+          : Image.network(
+              cleanUrl,
+              width: size,
+              height: size,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              errorBuilder: (_, __, ___) {
+                return Icon(icon, size: radius, color: iconColor);
+              },
+              loadingBuilder: (context, child, loadingProgress) {
+                if (loadingProgress == null) return child;
+
+                return Icon(icon, size: radius, color: iconColor);
+              },
+            ),
+    );
+  }
 }

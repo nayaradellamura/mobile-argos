@@ -11,8 +11,12 @@ class SinistroPresenceService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
 
+  static const Duration _viewerTtl = Duration(seconds: 70);
+  static const Duration _heartbeatInterval = Duration(seconds: 25);
+
   Timer? _heartbeatTimer;
   String? _currentSinistroId;
+  int _viewingGeneration = 0;
   _UserPresenceProfile? _cachedProfile;
 
   CollectionReference<Map<String, dynamic>> get _sinistros =>
@@ -37,11 +41,13 @@ class SinistroPresenceService {
 
     _currentSinistroId = cleanSinistroId;
 
-    await _writeViewer(cleanSinistroId);
+    final generation = ++_viewingGeneration;
+
+    await _writeViewer(cleanSinistroId, generation);
 
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 25), (_) {
-      _writeViewer(cleanSinistroId).catchError((_) {});
+    _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
+      _writeViewer(cleanSinistroId, generation).catchError((_) {});
     });
   }
 
@@ -52,6 +58,9 @@ class SinistroPresenceService {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _currentSinistroId = null;
+
+    // Invalida qualquer escrita em background que tenha começado antes do stop.
+    _viewingGeneration++;
 
     if (user == null || sinistroId == null || sinistroId.isEmpty) {
       return;
@@ -64,13 +73,29 @@ class SinistroPresenceService {
 
     await viewerRef.delete().catchError((_) {});
 
-    await _refreshActiveViewersSummary(sinistroId).catchError((_) {});
+    // Remove imediatamente do resumo do documento principal.
+    // Isso evita o "rastro fantasma" no card/lista de outros usuários.
+    await _removeViewerFromSummary(
+      sinistroId: sinistroId,
+      uid: user.uid,
+    ).catchError((_) {});
+
+    // Recalcula o resumo pela subcoleção, excluindo o usuário atual por segurança.
+    await _refreshActiveViewersSummary(
+      sinistroId,
+      excludeUid: user.uid,
+    ).catchError((_) {});
   }
 
-  Future<void> _writeViewer(String sinistroId) async {
+  bool _isViewingActive(String sinistroId, int generation) {
+    return _currentSinistroId == sinistroId &&
+        _viewingGeneration == generation;
+  }
+
+  Future<void> _writeViewer(String sinistroId, int generation) async {
     final user = _auth.currentUser;
 
-    if (user == null) return;
+    if (user == null || !_isViewingActive(sinistroId, generation)) return;
 
     final fallbackProfile = _cachedProfile ??
         _UserPresenceProfile(
@@ -85,19 +110,26 @@ class SinistroPresenceService {
     await _writeViewerData(
       sinistroId: sinistroId,
       profile: fallbackProfile,
+      generation: generation,
     );
 
     // Atualiza com dados completos do Firestore em background.
-    // Assim o card recebe presença rápido, e a foto/nome definitivo chega logo depois.
+    // O generation impede que essa escrita recrie o viewer depois que a tela fechou.
     unawaited(() async {
       try {
         final fullProfile = await _loadUserProfile(user);
+
+        if (!_isViewingActive(sinistroId, generation)) return;
+
         _cachedProfile = fullProfile;
 
         await _writeViewerData(
           sinistroId: sinistroId,
           profile: fullProfile,
+          generation: generation,
         );
+
+        if (!_isViewingActive(sinistroId, generation)) return;
 
         await _refreshActiveViewersSummary(sinistroId);
       } catch (_) {
@@ -109,10 +141,15 @@ class SinistroPresenceService {
   Future<void> _writeViewerData({
     required String sinistroId,
     required _UserPresenceProfile profile,
+    int? generation,
   }) async {
     final user = _auth.currentUser;
 
     if (user == null) return;
+
+    if (generation != null && !_isViewingActive(sinistroId, generation)) {
+      return;
+    }
 
     final now = Timestamp.now();
     final nowMillis = DateTime.now().millisecondsSinceEpoch;
@@ -139,10 +176,14 @@ class SinistroPresenceService {
     };
 
     final cutoffMillis = DateTime.now()
-        .subtract(const Duration(seconds: 70))
+        .subtract(_viewerTtl)
         .millisecondsSinceEpoch;
 
     await _db.runTransaction((transaction) async {
+      if (generation != null && !_isViewingActive(sinistroId, generation)) {
+        return;
+      }
+
       final sinistroSnap = await transaction.get(sinistroRef);
       final sinistroData = sinistroSnap.data() ?? {};
 
@@ -184,11 +225,13 @@ class SinistroPresenceService {
         SetOptions(merge: true),
       );
 
+      final limitedViewers = updatedViewers.take(5).toList();
+
       transaction.set(
         sinistroRef,
         {
-          'activeViewers': updatedViewers.take(5).toList(),
-          'activeViewersCount': updatedViewers.take(5).length,
+          'activeViewers': limitedViewers,
+          'activeViewersCount': limitedViewers.length,
           'activeViewersUpdatedAt': FieldValue.serverTimestamp(),
         },
         SetOptions(merge: true),
@@ -196,9 +239,47 @@ class SinistroPresenceService {
     });
   }
 
-  Future<void> _refreshActiveViewersSummary(String sinistroId) async {
+  Future<void> _removeViewerFromSummary({
+    required String sinistroId,
+    required String uid,
+  }) async {
+    final sinistroRef = _sinistros.doc(sinistroId);
+
+    await _db.runTransaction((transaction) async {
+      final snap = await transaction.get(sinistroRef);
+      final data = snap.data() ?? {};
+      final rawViewers = data['activeViewers'];
+
+      final updatedViewers = rawViewers is List
+          ? rawViewers
+              .whereType<Map>()
+              .map(
+                (item) => item.map(
+                  (key, value) => MapEntry(key.toString(), value),
+                ),
+              )
+              .where((item) => item['uid']?.toString() != uid)
+              .toList()
+          : <Map<String, dynamic>>[];
+
+      transaction.set(
+        sinistroRef,
+        {
+          'activeViewers': updatedViewers,
+          'activeViewersCount': updatedViewers.length,
+          'activeViewersUpdatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+    });
+  }
+
+  Future<void> _refreshActiveViewersSummary(
+    String sinistroId, {
+    String? excludeUid,
+  }) async {
     final cutoffMillis = DateTime.now()
-        .subtract(const Duration(seconds: 70))
+        .subtract(_viewerTtl)
         .millisecondsSinceEpoch;
 
     final viewersSnap = await _sinistros
@@ -208,7 +289,9 @@ class SinistroPresenceService {
         .limit(10)
         .get();
 
-    final viewers = viewersSnap.docs.map((doc) {
+    final viewers = viewersSnap.docs
+        .where((doc) => excludeUid == null || doc.id != excludeUid)
+        .map((doc) {
       final data = doc.data();
 
       return {
@@ -241,18 +324,18 @@ class SinistroPresenceService {
   }
 
   Stream<List<SinistroViewer>> watchViewers(String sinistroId) {
-    final cutoffMillis = DateTime.now()
-        .subtract(const Duration(seconds: 70))
-        .millisecondsSinceEpoch;
-
     return _sinistros
         .doc(sinistroId)
         .collection('viewers')
-        .where('lastSeenAtMillis', isGreaterThan: cutoffMillis)
         .snapshots()
         .map((snapshot) {
+      final cutoffMillis = DateTime.now()
+          .subtract(_viewerTtl)
+          .millisecondsSinceEpoch;
+
       final list = snapshot.docs
           .map((doc) => SinistroViewer.fromMap(doc.id, doc.data()))
+          .where((viewer) => viewer.lastSeenAtMillis > cutoffMillis)
           .toList();
 
       list.sort((a, b) => b.lastSeenAtMillis.compareTo(a.lastSeenAtMillis));
@@ -282,7 +365,8 @@ class SinistroPresenceService {
       throw Exception('Usuário não autenticado.');
     }
 
-    final cleanSinistroId = (sinistroId ?? _extractInspectionId(inspection)).trim();
+    final cleanSinistroId =
+        (sinistroId ?? _extractInspectionId(inspection)).trim();
 
     if (cleanSinistroId.isEmpty) {
       throw Exception('sinistroId vazio.');
@@ -332,9 +416,13 @@ class SinistroPresenceService {
       );
     });
 
+    final currentSinistroId = _currentSinistroId;
+    final generation = _viewingGeneration;
+
     await _writeViewerData(
       sinistroId: cleanSinistroId,
       profile: profile,
+      generation: currentSinistroId == cleanSinistroId ? generation : null,
     );
 
     return inspection;
