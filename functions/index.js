@@ -18,6 +18,7 @@ if (!admin.apps.length) {
 const DIALOGFLOW_PROJECT_ID = "upheld-magpie-404322";
 const LOCATION = "us-central1";
 const AGENT_ID = "8ece03b0-a71c-4860-818f-422d9c61ddac";
+const AGENT_SESSION_TTL_SECONDS = 86399;
 const LANGUAGE_CODE = "pt-BR";
 
 const DIALOGFLOW_CLIENT_EMAIL = defineSecret("DIALOGFLOW_CLIENT_EMAIL");
@@ -105,6 +106,7 @@ exports.sendArgosMessage = onCall(
     region: "us-central1",
     secrets: [DIALOGFLOW_CLIENT_EMAIL, DIALOGFLOW_PRIVATE_KEY],
   },
+
   async (request) => {
     if (!request.auth) {
       throw new HttpsError("unauthenticated", "Usuário precisa estar autenticado.");
@@ -132,16 +134,37 @@ exports.sendArgosMessage = onCall(
         extra: request.data.parameters || {},
       });
 
-      console.log("Parâmetros enviados ao agente Argos:", sessionParameters);
+      const savedAgentParameters = context.vistoria?.agentParameters || {};
 
-      const reply = await sendTextToArgosAgent({
+      const sessionParametersMerged = mergeSessionParameters(
+        savedAgentParameters,
+        sessionParameters
+      );
+
+      console.log("Parâmetros enviados ao agente Argos:", sessionParametersMerged);
+
+      const agentResult = await sendTextToArgosAgent({
         uid,
         inspectionId,
         text,
-        sessionParameters,
+        sessionParameters: sessionParametersMerged,
+        currentPage: context.vistoria?.agentCurrentPage || "",
       });
 
-      return { reply, inspectionId, sessionParameters };
+      await saveAgentStateToVistoria({
+        idvistoria: inspectionId,
+        currentPage: agentResult.currentPage,
+        parameters:
+          agentResult.parameters && Object.keys(agentResult.parameters).length > 0
+            ? agentResult.parameters
+            : sessionParametersMerged,
+      });
+
+      return {
+        reply: agentResult.reply,
+        inspectionId,
+        sessionParameters: sessionParametersMerged,
+      };
     } catch (error) {
       console.error("Erro no Dialogflow CX:", error);
       console.error("code:", error.code);
@@ -345,22 +368,41 @@ exports.sendArgosAudioMessage = onCall(
         revisedChars: revisedTranscript.length,
       });
 
-      const sessionParameters = buildArgosSessionParameters({
-        inspectionId: idvistoria,
-        sinistroId,
-        vistoria,
-        sinistro,
-        extra: data.parameters || {},
-      });
+      const freshSessionParameters = buildArgosSessionParameters({
+  inspectionId: idvistoria,
+  sinistroId,
+  vistoria,
+  sinistro,
+  extra: data.parameters || {},
+});
 
-      console.log("Parâmetros enviados ao agente Argos no áudio:", sessionParameters);
+const savedAgentParameters = vistoria?.agentParameters || {};
 
-      const reply = await sendTextToArgosAgent({
-        uid,
-        inspectionId: idvistoria,
-        text: revisedTranscript,
-        sessionParameters,
-      });
+const sessionParameters = mergeSessionParameters(
+  savedAgentParameters,
+  freshSessionParameters
+);
+
+console.log("Parâmetros enviados ao agente Argos no áudio:", sessionParameters);
+
+    const agentResult = await sendTextToArgosAgent({
+      uid,
+      inspectionId: idvistoria,
+      text: revisedTranscript,
+      sessionParameters,
+      currentPage: vistoria?.agentCurrentPage || "",
+    });
+
+    const reply = agentResult.reply;
+
+    await saveAgentStateToVistoria({
+      idvistoria,
+      currentPage: agentResult.currentPage,
+      parameters:
+        agentResult.parameters && Object.keys(agentResult.parameters).length > 0
+          ? agentResult.parameters
+          : sessionParameters,
+    });
 
       const now = admin.firestore.Timestamp.now();
 
@@ -1067,8 +1109,15 @@ function toProtoValue(value) {
   return { stringValue: String(value) };
 }
 
-async function sendTextToArgosAgent({ uid, inspectionId, text, sessionParameters = {} }) {
+async function sendTextToArgosAgent({
+  uid,
+  inspectionId,
+  text,
+  sessionParameters = {},
+  currentPage = "",
+}) {
   const client = getDialogflowClient();
+
   const sessionId = createSessionId(uid, inspectionId);
 
   const sessionPath = client.projectLocationAgentSessionPath(
@@ -1078,22 +1127,40 @@ async function sendTextToArgosAgent({ uid, inspectionId, text, sessionParameters
     sessionId
   );
 
-  const request = {
-    session: sessionPath,
-    queryInput: {
-      text: { text },
-      languageCode: LANGUAGE_CODE,
+  const queryParams = {
+    sessionTtl: {
+      seconds: AGENT_SESSION_TTL_SECONDS,
     },
   };
 
   if (sessionParameters && Object.keys(sessionParameters).length > 0) {
-    request.queryParams = {
-      parameters: toProtoStruct(sessionParameters),
-    };
+    queryParams.parameters = toProtoStruct(sessionParameters);
   }
 
+  if (isValidCurrentPage(currentPage)) {
+    queryParams.currentPage = currentPage;
+  }
+
+  const request = {
+    session: sessionPath,
+    queryInput: {
+      text: {
+        text,
+      },
+      languageCode: LANGUAGE_CODE,
+    },
+    queryParams,
+  };
+
   const [response] = await client.detectIntent(request);
-  return extractDialogflowReply(response);
+
+  const agentState = extractAgentStateFromResponse(response);
+
+  return {
+    reply: extractDialogflowReply(response),
+    currentPage: agentState.currentPage,
+    parameters: agentState.parameters,
+  };
 }
 
 function maskToken(token) {
@@ -1105,4 +1172,138 @@ function chunkArray(items, size) {
   const chunks = [];
   for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
   return chunks;
+}
+
+function addBusinessHours(startDate, hours) {
+  if (!hours || hours <= 0) return startDate;
+
+  let current = normalizeBusinessStart(startDate);
+  let remaining = hours;
+
+  while (remaining > 0) {
+    const nextHour = new Date(current.getTime() + 60 * 60 * 1000);
+
+    if (isBusinessDay(nextHour)) {
+      remaining -= 1;
+    }
+
+    current = normalizeBusinessStart(nextHour);
+  }
+
+  return current;
+}
+
+function normalizeBusinessStart(date) {
+  let current = new Date(date);
+
+  while (!isBusinessDay(current)) {
+    current = new Date(current.getTime() + 24 * 60 * 60 * 1000);
+  }
+
+  return current;
+}
+
+function isBusinessDay(date) {
+  const day = date.getDay();
+
+
+  return day >= 1 && day <= 5;
+}
+
+function protoValueToJs(value) {
+  if (!value) return null;
+
+  if (Object.prototype.hasOwnProperty.call(value, "stringValue")) {
+    return value.stringValue;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(value, "numberValue")) {
+    return value.numberValue;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(value, "boolValue")) {
+    return value.boolValue;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(value, "nullValue")) {
+    return null;
+  }
+
+  if (value.listValue?.values) {
+    return value.listValue.values.map((item) => protoValueToJs(item));
+  }
+
+  if (value.structValue?.fields) {
+    return protoStructToJs(value.structValue);
+  }
+
+  return null;
+}
+
+function protoStructToJs(struct) {
+  const fields = struct?.fields || {};
+  const obj = {};
+
+  for (const [key, value] of Object.entries(fields)) {
+    obj[key] = protoValueToJs(value);
+  }
+
+  return obj;
+}
+
+function mergeSessionParameters(savedParameters, freshParameters) {
+  return removeEmptyValues({
+    ...(savedParameters || {}),
+    ...(freshParameters || {}),
+  });
+}
+
+async function saveAgentStateToVistoria({
+  idvistoria,
+  currentPage,
+  parameters,
+}) {
+  const cleanId = String(idvistoria || "").trim();
+
+  if (!cleanId) return;
+
+  const now = new Date();
+  const expiresAt = addBusinessHours(now, 24);
+
+  await admin.firestore().collection("vistorias").doc(cleanId).set(
+    {
+      agentCurrentPage: String(currentPage || ""),
+      agentParameters: removeEmptyValues(parameters || {}),
+      agentLastTurnAt: admin.firestore.Timestamp.fromDate(now),
+      agentBusinessExpiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
+      agentSessionTtlSeconds: AGENT_SESSION_TTL_SECONDS,
+      agentSessionPolicy: {
+        ttlBusinessHours: 24,
+        workdays: [1, 2, 3, 4, 5],
+        description: "24 horas úteis, segunda a sexta.",
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+function extractAgentStateFromResponse(response) {
+  const queryResult = response?.queryResult || {};
+  const currentPage = queryResult.currentPage || "";
+
+  const responseParameters = queryResult.parameters
+    ? protoStructToJs(queryResult.parameters)
+    : {};
+
+  return {
+    currentPage,
+    parameters: responseParameters,
+  };
+}
+
+function isValidCurrentPage(value) {
+  const text = String(value || "").trim();
+
+  return text.startsWith("projects/") && text.includes("/pages/");
 }

@@ -1,4 +1,3 @@
-
 import 'dart:convert';
 import 'dart:io';
 
@@ -14,10 +13,14 @@ class VistoriaChatSessionService {
 
   static const activeStatus = 'em_andamento';
   static const abandonedStatus = 'abandonada';
+  static const expiredStatus = 'expirada';
   static const finishedStatus = 'finalizada';
 
+  static const agentTtlBusinessHours = 24;
+  static const agentWorkdays = [1, 2, 3, 4, 5]; // segunda a sexta
+
   /// Trava de segurança: base64 dentro de Firestore estoura fácil o limite do documento.
-  /// Para fotos/áudios grandes, prefira Storage + URL.
+  /// Para fotos grandes, prefira Storage + URL.
   static const maxBase64CharsPerEvidence = 650000;
 
   CollectionReference<Map<String, dynamic>> get _vistorias =>
@@ -35,7 +38,7 @@ class VistoriaChatSessionService {
     Query<Map<String, dynamic>> query = _vistorias
         .where('inspectorId', isEqualTo: ctx.uid)
         .where('status', isEqualTo: activeStatus)
-        .limit(5);
+        .limit(10);
 
     if ((sinistroId ?? '').trim().isNotEmpty) {
       query = query.where('sinistroId', isEqualTo: sinistroId!.trim());
@@ -46,13 +49,31 @@ class VistoriaChatSessionService {
     if (snap.docs.isEmpty) return null;
 
     final docs = snap.docs.toList()
-      ..sort((a, b) => _dateValue(b.data()['updatedAt'])
-          .compareTo(_dateValue(a.data()['updatedAt'])));
+      ..sort(
+        (a, b) => _dateValue(
+          b.data()['updatedAt'],
+        ).compareTo(_dateValue(a.data()['updatedAt'])),
+      );
 
-    return VistoriaSession.fromFirestore(docs.first);
+    for (final doc in docs) {
+      final data = doc.data();
+
+      if (_isAgentSessionExpired(data)) {
+        await _markVistoriaExpired(
+          doc.id,
+          reason: 'Sessão conversacional expirada após 24 horas úteis.',
+        );
+        continue;
+      }
+
+      return VistoriaSession.fromFirestore(doc);
+    }
+
+    return null;
   }
 
-  Future<List<SinistroVistoriaOption>> listCheckedInSinistrosForCurrentUser() async {
+  Future<List<SinistroVistoriaOption>>
+      listCheckedInSinistrosForCurrentUser() async {
     final ctx = await _currentContext();
 
     if (ctx.credenciadoId.isEmpty) return [];
@@ -61,15 +82,12 @@ class VistoriaChatSessionService {
         .where('credenciadoId', isEqualTo: ctx.credenciadoId)
         .get();
 
-    final list = snap.docs
-        .where((doc) {
-          final data = doc.data();
-          final assignedToUid = _str(data['assignedToUid']);
+    final list = snap.docs.where((doc) {
+      final data = doc.data();
+      final assignedToUid = _str(data['assignedToUid']);
 
-          return _hasCheckIn(data['checkInAt']) && assignedToUid == ctx.uid;
-        })
-        .map(SinistroVistoriaOption.fromFirestore)
-        .toList();
+      return _hasCheckIn(data['checkInAt']) && assignedToUid == ctx.uid;
+    }).map(SinistroVistoriaOption.fromFirestore).toList();
 
     list.sort((a, b) => a.placa.compareTo(b.placa));
     return list;
@@ -121,6 +139,7 @@ class VistoriaChatSessionService {
 
     final idvistoria = await _createVistoriaId();
     final now = DateTime.now();
+    final agentExpiresAt = _addBusinessHours(now, agentTtlBusinessHours);
 
     final clienteSnapshot = _asMap(sinistro['clienteSnapshot']);
     final veiculoSnapshot = _asMap(sinistro['veiculoSnapshot']);
@@ -152,6 +171,16 @@ class VistoriaChatSessionService {
       ),
     );
 
+    final descricaoArtigos = _str(
+      sinistro['damageDescription'],
+      fallback: _str(sinistro['descricaoArtigos']),
+    );
+
+    final observacoes = _str(
+      sinistro['observations'],
+      fallback: _str(sinistro['observacoes']),
+    );
+
     final chatMessages = <Map<String, dynamic>>[];
 
     if (addInitialOiInHistory) {
@@ -168,6 +197,21 @@ class VistoriaChatSessionService {
       });
     }
 
+    final agentParameters = _removeEmptyValues({
+      'placa_veiculo': placa,
+      'modelo_veiculo': veiculo,
+      'relato_cliente_simulado': descricaoArtigos.isNotEmpty
+          ? descricaoArtigos
+          : observacoes,
+      'id_vistoria': idvistoria,
+      'sinistro_id': cleanSinistroId,
+      'cliente_nome': cliente,
+      'oficina_nome': credenciado,
+      'prioridade_sinistro': _str(sinistro['priority']),
+      'tipo_sinistro': _str(sinistro['claimType']),
+      'status_sinistro': _str(sinistro['status']),
+    });
+
     final data = {
       'audios': <Map<String, dynamic>>[],
       'chatmessages': chatMessages,
@@ -175,26 +219,35 @@ class VistoriaChatSessionService {
       'cliente': cliente,
       'credenciado': credenciado,
       'data': _formatDate(now),
-      'descricaoArtigos': _str(
-        sinistro['damageDescription'],
-        fallback: _str(sinistro['descricaoArtigos']),
-      ),
+      'descricaoArtigos': descricaoArtigos,
       'hora': _formatTime(now),
       'idvistoria': idvistoria,
       'images': <Map<String, dynamic>>[],
       'inspectorId': ctx.uid,
       'inspectorEmail': ctx.email,
       'laudo': '',
-      'local': _str(credenciadoSnapshot['address'], fallback: _str(sinistro['local'])),
-      'observacoes': _str(
-        sinistro['observations'],
-        fallback: _str(sinistro['observacoes']),
+      'local': _str(
+        credenciadoSnapshot['address'],
+        fallback: _str(sinistro['local']),
       ),
+      'observacoes': observacoes,
       'pdfLaudoUrl': '',
       'placa': placa,
       'sinistroId': cleanSinistroId,
       'status': activeStatus,
       'veiculo': veiculo,
+      'lastAudioNumber': 0,
+      'agentLastTurnAt': Timestamp.fromDate(now),
+      'agentBusinessExpiresAt': Timestamp.fromDate(agentExpiresAt),
+      'agentSessionTtlSeconds': 86400,
+      'agentSessionPolicy': {
+        'ttlBusinessHours': agentTtlBusinessHours,
+        'workdays': agentWorkdays,
+        'description': '24 horas úteis, segunda a sexta.',
+      },
+      'agentCurrentPage': '',
+      'agentParameters': agentParameters,
+      'agentExpiredReason': '',
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
     };
@@ -211,6 +264,7 @@ class VistoriaChatSessionService {
       credenciado: credenciado,
       status: activeStatus,
       chatMessages: chatMessages,
+      agentBusinessExpiresAt: agentExpiresAt,
     );
   }
 
@@ -238,14 +292,22 @@ class VistoriaChatSessionService {
     required String vistoriaDocId,
     required String text,
   }) {
-    return appendChatMessage(vistoriaDocId: vistoriaDocId, role: 'user', text: text);
+    return appendChatMessage(
+      vistoriaDocId: vistoriaDocId,
+      role: 'user',
+      text: text,
+    );
   }
 
   Future<void> appendAiMessage({
     required String vistoriaDocId,
     required String text,
   }) {
-    return appendChatMessage(vistoriaDocId: vistoriaDocId, role: 'ai', text: text);
+    return appendChatMessage(
+      vistoriaDocId: vistoriaDocId,
+      role: 'ai',
+      text: text,
+    );
   }
 
   Future<void> appendChatMessage({
@@ -258,14 +320,25 @@ class VistoriaChatSessionService {
 
     await _assertVistoriaOwnedByCurrentUser(vistoriaDocId);
 
+    final now = DateTime.now();
+    final expiresAt = _addBusinessHours(now, agentTtlBusinessHours);
+
     await _vistorias.doc(vistoriaDocId).set({
       'chatmessages': FieldValue.arrayUnion([
         {
           'role': role,
           'text': cleanText,
-          'createdAt': Timestamp.now(),
+          'createdAt': Timestamp.fromDate(now),
         }
       ]),
+      'agentLastTurnAt': Timestamp.fromDate(now),
+      'agentBusinessExpiresAt': Timestamp.fromDate(expiresAt),
+      'agentSessionTtlSeconds': 86400,
+      'agentSessionPolicy': {
+        'ttlBusinessHours': agentTtlBusinessHours,
+        'workdays': agentWorkdays,
+        'description': '24 horas úteis, segunda a sexta.',
+      },
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
   }
@@ -283,16 +356,19 @@ class VistoriaChatSessionService {
     );
   }
 
+  /// Mantido por compatibilidade, mas não deve ser usado no novo fluxo.
+  /// O áudio agora deve ser salvo no Storage:
+  /// vistorias/{idvistoria}/audio/{audioId}.mp3
+  ///
+  /// A subcoleção vistorias/{idvistoria}/audios/{audioId} guarda somente
+  /// storagePath/gcsUri/transcrições/status.
   Future<String> appendAudioBase64FromFile({
     required String vistoriaDocId,
     required String audioPath,
     String contentType = 'audio/mpeg',
   }) {
-    return _appendBase64Evidence(
-      vistoriaDocId: vistoriaDocId,
-      fieldName: 'audios',
-      filePath: audioPath,
-      contentType: contentType,
+    throw UnsupportedError(
+      'O envio de áudio em base64 foi desativado. Use Storage + subcoleção audios.',
     );
   }
 
@@ -337,7 +413,9 @@ class VistoriaChatSessionService {
 
       final evidence = {
         key: base64Value,
-        'fileName': file.uri.pathSegments.isEmpty ? key : file.uri.pathSegments.last,
+        'fileName': file.uri.pathSegments.isEmpty
+            ? key
+            : file.uri.pathSegments.last,
         'contentType': contentType,
         'sizeBytes': bytes.length,
         'createdAt': Timestamp.now(),
@@ -386,6 +464,24 @@ class VistoriaChatSessionService {
     }
 
     final data = snap.data() ?? {};
+    final status = _str(data['status']);
+
+    if (status == expiredStatus) {
+      throw Exception(
+        'Esta vistoria expirou. Inicie uma nova sessão técnica.',
+      );
+    }
+
+    if (_isAgentSessionExpired(data)) {
+      await _markVistoriaExpired(
+        vistoriaDocId,
+        reason: 'Sessão conversacional expirada após 24 horas úteis.',
+      );
+      throw Exception(
+        'Esta vistoria expirou após 24 horas úteis. Inicie uma nova sessão técnica.',
+      );
+    }
+
     final inspectorId = _str(data['inspectorId']);
 
     if (inspectorId.isNotEmpty && inspectorId != user.uid) {
@@ -408,6 +504,41 @@ class VistoriaChatSessionService {
 
       throw Exception('Esta vistoria está vinculada a $assignedToName.');
     }
+  }
+
+  Future<void> _markVistoriaExpired(
+    String vistoriaDocId, {
+    required String reason,
+  }) async {
+    await _vistorias.doc(vistoriaDocId).set({
+      'status': expiredStatus,
+      'agentExpiredAt': FieldValue.serverTimestamp(),
+      'agentExpiredReason': reason,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  bool _isAgentSessionExpired(Map<String, dynamic> data) {
+    final status = _str(data['status']);
+    if (status != activeStatus) return false;
+
+    final expiresAt = _dateValue(data['agentBusinessExpiresAt']);
+
+    if (expiresAt.millisecondsSinceEpoch > 0) {
+      return DateTime.now().isAfter(expiresAt);
+    }
+
+    final baseDate = _dateValue(data['agentLastTurnAt']).millisecondsSinceEpoch > 0
+        ? _dateValue(data['agentLastTurnAt'])
+        : _dateValue(data['updatedAt']).millisecondsSinceEpoch > 0
+            ? _dateValue(data['updatedAt'])
+            : _dateValue(data['createdAt']);
+
+    if (baseDate.millisecondsSinceEpoch <= 0) return false;
+
+    return DateTime.now().isAfter(
+      _addBusinessHours(baseDate, agentTtlBusinessHours),
+    );
   }
 
   Future<_CurrentContext> _currentContext() async {
@@ -456,35 +587,84 @@ class VistoriaChatSessionService {
     );
   }
 
- Future<String> _createVistoriaId() async {
-  final year = DateTime.now().year;
-  final counterRef = _db.collection('counters').doc('vistorias_$year');
+  Future<String> _createVistoriaId() async {
+    final year = DateTime.now().year;
+    final counterRef = _db.collection('counters').doc('vistorias_$year');
 
-  final nextNumber = await _db.runTransaction<int>((transaction) async {
-    final snapshot = await transaction.get(counterRef);
-    final data = snapshot.data();
+    final nextNumber = await _db.runTransaction<int>((transaction) async {
+      final snapshot = await transaction.get(counterRef);
+      final data = snapshot.data();
 
-    final current = snapshot.exists && data != null
-        ? (data['lastNumber'] as int? ?? 0)
-        : 0;
+      final current = snapshot.exists && data != null
+          ? (data['lastNumber'] as int? ?? 0)
+          : 0;
 
-    final next = current + 1;
+      final next = current + 1;
 
-    transaction.set(
-      counterRef,
-      {
-        'lastNumber': next,
-        'year': year,
-        'updatedAt': FieldValue.serverTimestamp(),
-      },
-      SetOptions(merge: true),
-    );
+      transaction.set(
+        counterRef,
+        {
+          'lastNumber': next,
+          'year': year,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
 
-    return next;
-  });
+      return next;
+    });
 
-  return 'VIS-$year-${nextNumber.toString().padLeft(4, '0')}';
-}
+    return 'VIS-$year-${nextNumber.toString().padLeft(4, '0')}';
+  }
+
+  DateTime _addBusinessHours(DateTime start, int hours) {
+    if (hours <= 0) return start;
+
+    var current = _normalizeBusinessStart(start);
+    var remaining = hours;
+
+    while (remaining > 0) {
+      final nextHour = current.add(const Duration(hours: 1));
+
+      if (_isBusinessDay(nextHour)) {
+        remaining--;
+      }
+
+      current = _normalizeBusinessStart(nextHour);
+    }
+
+    return current;
+  }
+
+  DateTime _normalizeBusinessStart(DateTime value) {
+    if (_isBusinessDay(value)) return value;
+
+    var current = value;
+
+    while (!_isBusinessDay(current)) {
+      current = current.add(const Duration(days: 1));
+    }
+
+    return current;
+  }
+
+  bool _isBusinessDay(DateTime value) {
+    return value.weekday >= DateTime.monday &&
+        value.weekday <= DateTime.friday;
+  }
+
+  Map<String, String> _removeEmptyValues(Map<String, dynamic> data) {
+    final clean = <String, String>{};
+
+    for (final entry in data.entries) {
+      final value = _str(entry.value);
+      if (value.isNotEmpty) {
+        clean[entry.key] = value;
+      }
+    }
+
+    return clean;
+  }
 
   static bool _hasCheckIn(dynamic value) {
     final text = _str(value).toLowerCase();
@@ -510,6 +690,10 @@ class VistoriaChatSessionService {
   static DateTime _dateValue(dynamic value) {
     if (value is Timestamp) return value.toDate();
     if (value is DateTime) return value;
+    if (value is String) {
+      return DateTime.tryParse(value) ??
+          DateTime.fromMillisecondsSinceEpoch(0);
+    }
     return DateTime.fromMillisecondsSinceEpoch(0);
   }
 
@@ -552,6 +736,7 @@ class VistoriaSession {
   final String credenciado;
   final String status;
   final List<Map<String, dynamic>> chatMessages;
+  final DateTime? agentBusinessExpiresAt;
 
   const VistoriaSession({
     required this.docId,
@@ -563,6 +748,7 @@ class VistoriaSession {
     required this.credenciado,
     required this.status,
     required this.chatMessages,
+    this.agentBusinessExpiresAt,
   });
 
   factory VistoriaSession.fromFirestore(
@@ -574,13 +760,20 @@ class VistoriaSession {
     final messages = rawMessages is List
         ? rawMessages
             .whereType<Map>()
-            .map((item) => item.map((key, value) => MapEntry(key.toString(), value)))
+            .map(
+              (item) => item.map(
+                (key, value) => MapEntry(key.toString(), value),
+              ),
+            )
             .toList()
         : <Map<String, dynamic>>[];
 
     return VistoriaSession(
       docId: doc.id,
-      idvistoria: VistoriaChatSessionService._str(data['idvistoria'], fallback: doc.id),
+      idvistoria: VistoriaChatSessionService._str(
+        data['idvistoria'],
+        fallback: doc.id,
+      ),
       sinistroId: VistoriaChatSessionService._str(data['sinistroId']),
       placa: VistoriaChatSessionService._str(data['placa']),
       veiculo: VistoriaChatSessionService._str(data['veiculo']),
@@ -588,6 +781,12 @@ class VistoriaSession {
       credenciado: VistoriaChatSessionService._str(data['credenciado']),
       status: VistoriaChatSessionService._str(data['status']),
       chatMessages: messages,
+      agentBusinessExpiresAt: VistoriaChatSessionService._dateValue(
+                data['agentBusinessExpiresAt'],
+              ).millisecondsSinceEpoch >
+              0
+          ? VistoriaChatSessionService._dateValue(data['agentBusinessExpiresAt'])
+          : null,
     );
   }
 }
@@ -613,8 +812,10 @@ class SinistroVistoriaOption {
     QueryDocumentSnapshot<Map<String, dynamic>> doc,
   ) {
     final data = doc.data();
-    final clienteSnapshot = VistoriaChatSessionService._asMap(data['clienteSnapshot']);
-    final veiculoSnapshot = VistoriaChatSessionService._asMap(data['veiculoSnapshot']);
+    final clienteSnapshot =
+        VistoriaChatSessionService._asMap(data['clienteSnapshot']);
+    final veiculoSnapshot =
+        VistoriaChatSessionService._asMap(data['veiculoSnapshot']);
 
     final placa = VistoriaChatSessionService._str(
       veiculoSnapshot['placa'],
