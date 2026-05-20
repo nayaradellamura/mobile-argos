@@ -24,7 +24,7 @@ extension InspectionFilterX on InspectionFilter {
       case InspectionFilter.inProgress:
         return 'Andamento';
       case InspectionFilter.aiAnalysis:
-        return 'Análise IA';
+        return 'Análise';
       case InspectionFilter.completed:
         return 'Concluídas';
     }
@@ -39,9 +39,9 @@ extension InspectionFilterX on InspectionFilter {
       case InspectionFilter.inProgress:
         return 'Aguardando vistoria';
       case InspectionFilter.aiAnalysis:
-        return 'Aguardando IA';
+        return 'Em Análise';
       case InspectionFilter.completed:
-        return 'Aprovadas/negadas';
+        return 'Aprovadas';
     }
   }
 
@@ -114,6 +114,65 @@ class InspectionsPage extends StatefulWidget {
 class _InspectionsPageState extends State<InspectionsPage> {
   late Future<_CredenciadoContext> _credenciadoFuture;
   InspectionFilter _selectedFilter = InspectionFilter.all;
+  final ScrollController _filterScrollController = ScrollController();
+
+  Stream<List<InspectionCase>>? _cachedInspectionStream;
+  String? _cachedInspectionCredenciadoId;
+
+  @override
+  void dispose() {
+    _filterScrollController.dispose();
+    super.dispose();
+  }
+  Stream<List<InspectionCase>> _getInspectionStream(String credenciadoId) {
+  if (_cachedInspectionStream == null ||
+      _cachedInspectionCredenciadoId != credenciadoId) {
+    _cachedInspectionCredenciadoId = credenciadoId;
+    _cachedInspectionStream = _inspectionStream(credenciadoId).asBroadcastStream();
+  }
+
+  return _cachedInspectionStream!;
+}
+
+void _changeFilter(InspectionFilter filter) {
+  if (_selectedFilter == filter) {
+    _scrollFilterCarouselTo(filter);
+    return;
+  }
+
+  setState(() {
+    _selectedFilter = filter;
+  });
+
+  _scrollFilterCarouselTo(filter);
+}
+
+void _scrollFilterCarouselTo(InspectionFilter filter) {
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (!_filterScrollController.hasClients) return;
+
+    const cardWidth = 132.0;
+    const gap = 10.0;
+
+    final index = InspectionFilter.values.indexOf(filter);
+    final position = _filterScrollController.position;
+    final viewportWidth = position.viewportDimension;
+
+    final itemStart = index * (cardWidth + gap);
+    final target = itemStart - ((viewportWidth - cardWidth) / 2);
+
+    final safeTarget = target.clamp(
+      position.minScrollExtent,
+      position.maxScrollExtent,
+    );
+
+    _filterScrollController.animateTo(
+      safeTarget.toDouble(),
+      duration: const Duration(milliseconds: 360),
+      curve: Curves.easeOutCubic,
+    );
+  });
+}
 
   @override
   void initState() {
@@ -192,23 +251,63 @@ class _InspectionsPageState extends State<InspectionsPage> {
     );
   }
 
-  Stream<List<InspectionCase>> _inspectionStream(String credenciadoId) {
-    return FirebaseFirestore.instance
-        .collection('sinistro')
-        .where('credenciadoId', isEqualTo: credenciadoId)
-        .snapshots()
-        .map((snapshot) {
-          final inspections = snapshot.docs
-              .map((doc) => InspectionCase.fromFirestore(doc))
-              .toList();
+Stream<List<InspectionCase>> _inspectionStream(String credenciadoId) {
+  late final StreamController<List<InspectionCase>> controller;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? subscription;
+  Timer? debounceTimer;
 
-          inspections.sort(
-            (a, b) => a.scheduledDate.compareTo(b.scheduledDate),
+  bool hasEmittedFirstList = false;
+  List<InspectionCase>? latestInspections;
+
+  controller = StreamController<List<InspectionCase>>(
+    onListen: () {
+      subscription = FirebaseFirestore.instance
+          .collection('sinistro')
+          .where('credenciadoId', isEqualTo: credenciadoId)
+          .snapshots()
+          .listen(
+        (snapshot) {
+          latestInspections = _buildInspectionListFromSnapshot(snapshot);
+
+          debounceTimer?.cancel();
+
+          debounceTimer = Timer(
+            Duration(milliseconds: hasEmittedFirstList ? 90 : 360),
+            () {
+              final value = latestInspections;
+
+              if (value == null || controller.isClosed) return;
+
+              controller.add(value);
+              hasEmittedFirstList = true;
+            },
           );
+        },
+        onError: controller.addError,
+      );
+    },
+    onCancel: () async {
+      debounceTimer?.cancel();
+      await subscription?.cancel();
+    },
+  );
 
-          return inspections;
-        });
-  }
+  return controller.stream;
+}
+
+List<InspectionCase> _buildInspectionListFromSnapshot(
+  QuerySnapshot<Map<String, dynamic>> snapshot,
+) {
+  final inspections = snapshot.docs
+      .map((doc) => InspectionCase.fromFirestore(doc))
+      .toList();
+
+  inspections.sort(
+    (a, b) => a.scheduledDate.compareTo(b.scheduledDate),
+  );
+
+  return inspections;
+}
 
   void _openInspectionSummary(InspectionCase inspection) {
     Navigator.of(context).push(
@@ -238,15 +337,12 @@ class _InspectionsPageState extends State<InspectionsPage> {
       child: Column(
         children: [
           _InspectionsHeader(
-            total: inspections.length,
-            counts: counts,
-            selectedFilter: _selectedFilter,
-            onFilterChanged: (filter) {
-              setState(() {
-                _selectedFilter = filter;
-              });
-            },
-          ),
+              total: inspections.length,
+              counts: counts,
+              selectedFilter: _selectedFilter,
+              filterController: _filterScrollController,
+              onFilterChanged: _changeFilter,
+            ),
           Expanded(
             child: inspections.isEmpty
                 ? const _StateMessage(
@@ -346,7 +442,7 @@ class _InspectionsPageState extends State<InspectionsPage> {
         }
 
         return StreamBuilder<List<InspectionCase>>(
-          stream: _inspectionStream(contextData.credenciadoId),
+          stream: _getInspectionStream(contextData.credenciadoId),
           builder: (context, inspectionSnapshot) {
             if (inspectionSnapshot.connectionState == ConnectionState.waiting) {
               return const _InspectionsSkeleton();
@@ -737,9 +833,11 @@ class _InspectionsHeader extends StatelessWidget {
   final Map<InspectionFilter, int> counts;
   final InspectionFilter selectedFilter;
   final ValueChanged<InspectionFilter>? onFilterChanged;
+  final ScrollController? filterController;
 
   const _InspectionsHeader({
     required this.total,
+    this.filterController,
     this.counts = const {},
     this.selectedFilter = InspectionFilter.all,
     this.onFilterChanged,
@@ -814,6 +912,7 @@ class _InspectionsHeader extends StatelessWidget {
           SizedBox(
             height: 92,
             child: ListView.separated(
+              controller: filterController,
               scrollDirection: Axis.horizontal,
               itemCount: filters.length,
               separatorBuilder: (_, __) => const SizedBox(width: 10),
@@ -891,13 +990,14 @@ class _InspectionFilterCard extends StatelessWidget {
                   ),
                   const Spacer(),
                   Text(
-                    '$count',
-                    style: GoogleFonts.spaceGrotesk(
-                      fontSize: 21,
-                      fontWeight: FontWeight.bold,
-                      color: isSelected ? Colors.white : color,
-                    ),
+                  '$count',
+                  key: ValueKey('filter_count_${filter.name}_$count'),
+                  style: GoogleFonts.spaceGrotesk(
+                    fontSize: 21,
+                    fontWeight: FontWeight.bold,
+                    color: isSelected ? Colors.white : color,
                   ),
+                ),
                 ],
               ),
               const Spacer(),
@@ -2689,7 +2789,7 @@ class InspectionCase {
   factory InspectionCase.fromFirestore(
     QueryDocumentSnapshot<Map<String, dynamic>> doc,
   ) {
-    final data = doc.data();
+    final data = doc.data() ?? <String, dynamic>{};
 
     final clienteSnapshot = _asStringMap(data['clienteSnapshot']);
     final veiculoSnapshot = _asStringMap(data['veiculoSnapshot']);
