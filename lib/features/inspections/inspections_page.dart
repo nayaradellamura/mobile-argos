@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shimmer/shimmer.dart';
@@ -41,7 +44,7 @@ extension InspectionFilterX on InspectionFilter {
       case InspectionFilter.aiAnalysis:
         return 'Em Análise';
       case InspectionFilter.completed:
-        return 'Aprovadas';
+        return 'Aprovadas/negadas';
     }
   }
 
@@ -495,6 +498,7 @@ class InspectionSummaryPage extends StatefulWidget {
 class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
   late InspectionCase inspection;
   bool isCheckingIn = false;
+  bool _hasShownAssignmentChangeNotice = false;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _inspectionSubscription;
 
   @override
@@ -520,6 +524,7 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
 
   void _watchInspectionRealtime() {
     _inspectionSubscription?.cancel();
+
     _inspectionSubscription = FirebaseFirestore.instance
         .collection('sinistro')
         .doc(inspection.id)
@@ -527,15 +532,72 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
         .listen((snapshot) {
       if (!mounted || !snapshot.exists) return;
 
-        final updatedInspection = InspectionCase.fromFirestore(
-          snapshot as QueryDocumentSnapshot<Map<String, dynamic>>);
+      final previousInspection = inspection;
+      final updatedInspection = InspectionCase.fromFirestore(snapshot);
+
+      final previousAssignedUid = previousInspection.assignedToUid.trim();
+      final newAssignedUid = updatedInspection.assignedToUid.trim();
+      final assignmentChanged = previousAssignedUid != newAssignedUid;
+      final wasUnassigned = previousAssignedUid.isEmpty;
+      final isNowAssigned = newAssignedUid.isNotEmpty;
 
       setState(() {
         inspection = updatedInspection;
       });
+
+      if (assignmentChanged && wasUnassigned && isNowAssigned) {
+        _showRealtimeAssignmentNotice(updatedInspection);
+        return;
+      }
+
+      if (assignmentChanged && isNowAssigned) {
+        _showRealtimeAssignmentNotice(updatedInspection);
+      }
     }, onError: (error) {
       debugPrint('Inspection realtime update error: $error');
     });
+  }
+
+  void _showRealtimeAssignmentNotice(InspectionCase updatedInspection) {
+    if (!mounted || _hasShownAssignmentChangeNotice) return;
+
+    final isMine = updatedInspection.isAssignedToCurrentUser;
+    final responsibleName = updatedInspection.assignedToName.trim().isEmpty
+        ? 'outro profissional'
+        : updatedInspection.assignedToName.trim();
+
+    _hasShownAssignmentChangeNotice = true;
+
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: isMine ? Colors.green : Colors.orange,
+        duration: const Duration(seconds: 4),
+        content: Row(
+          children: [
+            Icon(
+              isMine
+                  ? Icons.verified_user_outlined
+                  : Icons.lock_outline_rounded,
+              color: Colors.white,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                isMine
+                    ? 'Esta vistoria foi vinculada ao seu usuário.'
+                    : 'Esta vistoria foi vinculada a $responsibleName. Agora você está em modo visualização.',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _registerCheckIn() async {
@@ -551,21 +613,18 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
     });
 
     try {
-      final updatedInspection = await SinistroPresenceService.instance
-          .claimSinistroForCurrentUser(
+      await SinistroPresenceService.instance.claimSinistroForCurrentUser(
         inspection: inspection,
         action: 'check_in',
       );
 
       if (!mounted) return;
 
-      setState(() {
-        inspection = updatedInspection;
-      });
-
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Check-in realizado e vistoria vinculada ao seu usuário.'),
+          content: Text(
+            'Check-in realizado e vistoria vinculada ao seu usuário.',
+          ),
           backgroundColor: Colors.green,
         ),
       );
@@ -621,7 +680,8 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
     final hasCheckIn = inspection.checkInAt != null;
     final isAssignedToAnother = inspection.isAssignedToAnotherUser;
     final isAssignedToMe = inspection.isAssignedToCurrentUser;
-    final canCheckIn = !isAssignedToAnother && (!hasCheckIn || !inspection.hasAssignedUser);
+    final canCheckIn =
+        !isAssignedToAnother && (!hasCheckIn || !inspection.hasAssignedUser);
     final canOpenChat = hasCheckIn && isAssignedToMe;
 
     return Scaffold(
@@ -636,194 +696,1561 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
               },
             ),
             Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
-                children: [
-                  _SummaryHeroCard(inspection: inspection),
-                  const SizedBox(height: 14),
-                  SinistroViewersBar(sinistroId: inspection.id),
-                  if (inspection.hasAssignedUser) ...[
-                    const SizedBox(height: 14),
-                    _SummaryAssignmentBanner(inspection: inspection),
-                  ],
-                  const SizedBox(height: 14),
-                  _LinkedVistoriaSummaryForInspection(
-                    sinistroId: inspection.id,
-                  ),
-                  const SizedBox(height: 14),
-                  _SectionCard(
-                    title: 'Dados do veículo',
-                    icon: Icons.directions_car,
-                    children: [
-                      _InfoRow('Placa', inspection.vehicle.plate),
-                      _InfoRow('Marca', inspection.vehicle.brand),
-                      _InfoRow('Modelo', inspection.vehicle.model),
-                      _InfoRow('Ano', inspection.vehicle.year),
-                      _InfoRow('Cor', inspection.vehicle.color),
-                      _InfoRow('Chassi', inspection.vehicle.chassis),
-                      _InfoRow('Renavam', inspection.vehicle.renavam),
-                      _InfoRow('Combustível', inspection.vehicle.fuel),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  _SectionCard(
-                    title: 'Dados do sinistro',
-                    icon: Icons.car_crash,
-                    children: [
-                      _InfoRow('Protocolo', inspection.protocol),
-                      _InfoRow('Seguradora', inspection.insurer),
-                      _InfoRow('Tipo', inspection.claimType),
-                      _InfoRow(
-                        'Prioridade',
-                        inspection.priority.label,
-                        valueColor: inspection.priority.color,
-                      ),
-                      _InfoRow('Status', inspection.status.label),
-                      _InfoRow(
-                        'Agendamento',
-                        _formatDateTime(inspection.scheduledDate),
-                      ),
-                      _InfoRow(
-                        'Check-in',
-                        hasCheckIn
-                            ? _formatDateTime(inspection.checkInAt!)
-                            : 'Ainda não realizado',
-                        valueColor: hasCheckIn ? Colors.green : Colors.orange,
-                      ),
-                      _InfoRow(
-                        'Responsável',
-                        inspection.assignedToName.isEmpty
-                            ? 'Ainda não vinculado'
-                            : inspection.assignedToName,
-                        valueColor: inspection.hasAssignedUser
-                            ? const Color(0xFF0057C0)
-                            : Colors.orange,
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  _SectionCard(
-                    title: 'Cliente',
-                    icon: Icons.person,
-                    children: [
-                      _InfoRow('Nome', inspection.owner.name),
-                      _InfoRow('Documento', inspection.owner.document),
-                      _InfoRow('Telefone', inspection.owner.phone),
-                      _InfoRow('E-mail', inspection.owner.email),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  _SectionCard(
-                    title: 'Oficina credenciada',
-                    icon: Icons.build,
-                    children: [
-                      _InfoRow('Oficina', inspection.workshop.name),
-                      _InfoRow('Endereço', inspection.workshop.address),
-                      _InfoRow('Telefone', inspection.workshop.phone),
-                      if (inspection.workshop.email.isNotEmpty)
-                        _InfoRow('E-mail', inspection.workshop.email),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  _TextSectionCard(
-                    title: 'Descrição inicial do dano',
-                    icon: Icons.description,
-                    text: inspection.damageDescription,
-                  ),
-                  const SizedBox(height: 14),
-                  _TextSectionCard(
-                    title: 'Orientações para a vistoria',
-                    icon: Icons.checklist,
-                    text: inspection.observations,
-                  ),
-                  const SizedBox(height: 14),
-                  const _ChecklistCard(),
-                  const SizedBox(height: 20),
-                  SizedBox(
-                    height: 54,
-                    child: ElevatedButton.icon(
-                      onPressed: canCheckIn && !isCheckingIn
-                          ? _registerCheckIn
-                          : null,
-                      icon: isCheckingIn
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
+              child: DefaultTabController(
+                length: 2,
+                child: Column(
+                  children: [
+                    const _SummaryTabHeader(),
+                    Expanded(
+                      child: TabBarView(
+                        children: [
+                          ListView(
+                            padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+                            children: [
+                              _SummaryHeroCard(inspection: inspection),
+                              const SizedBox(height: 14),
+                              SinistroViewersBar(sinistroId: inspection.id),
+                              if (inspection.hasAssignedUser) ...[
+                                const SizedBox(height: 14),
+                                _SummaryAssignmentBanner(inspection: inspection),
+                              ],
+                              const SizedBox(height: 14),
+                              _SectionCard(
+                                title: 'Dados do veículo',
+                                icon: Icons.directions_car,
+                                children: [
+                                  _InfoRow('Placa', inspection.vehicle.plate),
+                                  _InfoRow('Marca', inspection.vehicle.brand),
+                                  _InfoRow('Modelo', inspection.vehicle.model),
+                                  _InfoRow('Ano', inspection.vehicle.year),
+                                  _InfoRow('Cor', inspection.vehicle.color),
+                                  _InfoRow('Chassi', inspection.vehicle.chassis),
+                                  _InfoRow('Renavam', inspection.vehicle.renavam),
+                                  _InfoRow('Combustível', inspection.vehicle.fuel),
+                                ],
                               ),
-                            )
-                          : Icon(
-                              hasCheckIn
-                                  ? Icons.check_circle
-                                  : Icons.login_rounded,
-                            ),
-                      label: Text(
-                        isCheckingIn
-                            ? 'Realizando check-in...'
-                            : isAssignedToAnother
-                            ? 'Vistoria vinculada a ${inspection.assignedToName}'
-                            : hasCheckIn && !inspection.hasAssignedUser
-                            ? 'Assumir vistoria'
-                            : hasCheckIn
-                            ? 'Check-in realizado às ${_formatTime(inspection.checkInAt!)}'
-                            : 'Realizar check-in e assumir vistoria',
-                      ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: hasCheckIn
-                            ? Colors.green
-                            : isAssignedToAnother
-                            ? const Color(0xFF9CA3AF)
-                            : const Color(0xFF0057C0),
-                        foregroundColor: Colors.white,
-                        disabledBackgroundColor: hasCheckIn
-                            ? Colors.green
-                            : isAssignedToAnother
-                            ? const Color(0xFF9CA3AF)
-                            : const Color(0xFF0057C0),
-                        disabledForegroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(18),
-                        ),
+                              const SizedBox(height: 14),
+                              _SectionCard(
+                                title: 'Dados do sinistro',
+                                icon: Icons.car_crash,
+                                children: [
+                                  _InfoRow('Protocolo', inspection.protocol),
+                                  _InfoRow('Seguradora', inspection.insurer),
+                                  _InfoRow('Tipo', inspection.claimType),
+                                  _InfoRow(
+                                    'Prioridade',
+                                    inspection.priority.label,
+                                    valueColor: inspection.priority.color,
+                                  ),
+                                  _InfoRow('Status', inspection.status.label),
+                                  _InfoRow(
+                                    'Agendamento',
+                                    _formatDateTime(inspection.scheduledDate),
+                                  ),
+                                  _InfoRow(
+                                    'Check-in',
+                                    hasCheckIn
+                                        ? _formatDateTime(inspection.checkInAt!)
+                                        : 'Ainda não realizado',
+                                    valueColor:
+                                        hasCheckIn ? Colors.green : Colors.orange,
+                                  ),
+                                  _InfoRow(
+                                    'Responsável',
+                                    inspection.assignedToName.isEmpty
+                                        ? 'Ainda não vinculado'
+                                        : inspection.assignedToName,
+                                    valueColor: inspection.hasAssignedUser
+                                        ? const Color(0xFF0057C0)
+                                        : Colors.orange,
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 14),
+                              _SectionCard(
+                                title: 'Cliente',
+                                icon: Icons.person,
+                                children: [
+                                  _InfoRow('Nome', inspection.owner.name),
+                                  _InfoRow('Documento', inspection.owner.document),
+                                  _InfoRow('Telefone', inspection.owner.phone),
+                                  _InfoRow('E-mail', inspection.owner.email),
+                                ],
+                              ),
+                              const SizedBox(height: 14),
+                              _SectionCard(
+                                title: 'Oficina credenciada',
+                                icon: Icons.build,
+                                children: [
+                                  _InfoRow('Oficina', inspection.workshop.name),
+                                  _InfoRow('Endereço', inspection.workshop.address),
+                                  _InfoRow('Telefone', inspection.workshop.phone),
+                                  if (inspection.workshop.email.isNotEmpty)
+                                    _InfoRow('E-mail', inspection.workshop.email),
+                                ],
+                              ),
+                              const SizedBox(height: 14),
+                              _TextSectionCard(
+                                title: 'Descrição inicial do dano',
+                                icon: Icons.description,
+                                text: inspection.damageDescription,
+                              ),
+                              const SizedBox(height: 14),
+                              _TextSectionCard(
+                                title: 'Orientações para a vistoria',
+                                icon: Icons.checklist,
+                                text: inspection.observations,
+                              ),
+                              const SizedBox(height: 14),
+                              const _ChecklistCard(),
+                              const SizedBox(height: 20),
+                              SizedBox(
+                                height: 54,
+                                child: ElevatedButton.icon(
+                                  onPressed: canCheckIn && !isCheckingIn
+                                      ? _registerCheckIn
+                                      : null,
+                                  icon: isCheckingIn
+                                      ? const SizedBox(
+                                          width: 18,
+                                          height: 18,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Colors.white,
+                                          ),
+                                        )
+                                      : Icon(
+                                          hasCheckIn
+                                              ? Icons.check_circle
+                                              : Icons.login_rounded,
+                                        ),
+                                  label: Text(
+                                    isCheckingIn
+                                        ? 'Realizando check-in...'
+                                        : isAssignedToAnother
+                                            ? 'Vistoria vinculada a ${inspection.assignedToName}'
+                                            : hasCheckIn &&
+                                                    !inspection.hasAssignedUser
+                                                ? 'Assumir vistoria'
+                                                : hasCheckIn
+                                                    ? 'Check-in realizado às ${_formatTime(inspection.checkInAt!)}'
+                                                    : 'Realizar check-in e assumir vistoria',
+                                  ),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: hasCheckIn
+                                        ? Colors.green
+                                        : isAssignedToAnother
+                                            ? const Color(0xFF9CA3AF)
+                                            : const Color(0xFF0057C0),
+                                    foregroundColor: Colors.white,
+                                    disabledBackgroundColor: hasCheckIn
+                                        ? Colors.green
+                                        : isAssignedToAnother
+                                            ? const Color(0xFF9CA3AF)
+                                            : const Color(0xFF0057C0),
+                                    disabledForegroundColor: Colors.white,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(18),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              SizedBox(
+                                height: 54,
+                                child: OutlinedButton.icon(
+                                  onPressed: canOpenChat ? _goToChat : null,
+                                  icon: Icon(
+                                    canOpenChat
+                                        ? Icons.smart_toy
+                                        : Icons.lock_outline,
+                                  ),
+                                  label: Text(
+                                    canOpenChat
+                                        ? 'Iniciar coleta no Chat IA'
+                                        : isAssignedToAnother
+                                            ? 'Chat bloqueado para outro responsável'
+                                            : 'Faça check-in para iniciar o Chat IA',
+                                  ),
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: canOpenChat
+                                        ? const Color(0xFF0057C0)
+                                        : const Color(0xFF6B7280),
+                                    backgroundColor: canOpenChat
+                                        ? const Color(0xFFE5F6FF)
+                                        : const Color(0xFFE5E7EB),
+                                    side: BorderSide(
+                                      color: Colors.black.withOpacity(.05),
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(18),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          _InspectionHistoryTab(inspection: inspection),
+                        ],
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 10),
-                  SizedBox(
-                    height: 54,
-                    child: OutlinedButton.icon(
-                      onPressed: canOpenChat ? _goToChat : null,
-                      icon: Icon(
-                        canOpenChat ? Icons.smart_toy : Icons.lock_outline,
-                      ),
-                      label: Text(
-                        canOpenChat
-                            ? 'Iniciar coleta no Chat IA'
-                            : isAssignedToAnother
-                            ? 'Chat bloqueado para outro responsável'
-                            : 'Faça check-in para iniciar o Chat IA',
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: canOpenChat
-                            ? const Color(0xFF0057C0)
-                            : const Color(0xFF6B7280),
-                        backgroundColor: canOpenChat
-                            ? const Color(0xFFE5F6FF)
-                            : const Color(0xFFE5E7EB),
-                        side: BorderSide(color: Colors.black.withOpacity(.05)),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(18),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+
+
+class _SummaryTabHeader extends StatelessWidget {
+  const _SummaryTabHeader();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      padding: const EdgeInsets.all(5),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.black.withOpacity(.05)),
+      ),
+      child: TabBar(
+        indicator: BoxDecoration(
+          color: const Color(0xFF0057C0),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        indicatorSize: TabBarIndicatorSize.tab,
+        dividerColor: Colors.transparent,
+        labelColor: Colors.white,
+        unselectedLabelColor: const Color(0xFF414755),
+        labelStyle: const TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w900,
+        ),
+        unselectedLabelStyle: const TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w800,
+        ),
+        tabs: const [
+          Tab(
+            height: 42,
+            iconMargin: EdgeInsets.only(bottom: 2),
+            icon: Icon(Icons.article_outlined, size: 18),
+            text: 'Resumo',
+          ),
+          Tab(
+            height: 42,
+            iconMargin: EdgeInsets.only(bottom: 2),
+            icon: Icon(Icons.history_rounded, size: 18),
+            text: 'Vistorias',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InspectionHistoryTab extends StatefulWidget {
+  final InspectionCase inspection;
+
+  const _InspectionHistoryTab({required this.inspection});
+
+  @override
+  State<_InspectionHistoryTab> createState() => _InspectionHistoryTabState();
+}
+
+class _InspectionHistoryTabState extends State<_InspectionHistoryTab> {
+  String? _selectedDocId;
+
+  Stream<QuerySnapshot<Map<String, dynamic>>> _historyStream() {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+    if (uid.isEmpty) {
+      return Stream<QuerySnapshot<Map<String, dynamic>>>.empty();
+    }
+
+    return FirebaseFirestore.instance
+        .collection('vistorias')
+        .where('sinistroId', isEqualTo: widget.inspection.id)
+        .where('inspectorId', isEqualTo: uid)
+        .snapshots();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: _historyStream(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting &&
+            !snapshot.hasData) {
+          return const _HistorySkeleton();
+        }
+
+        if (snapshot.hasError) {
+          return const _StateMessage(
+            icon: Icons.error_outline,
+            title: 'Erro ao carregar histórico',
+            message:
+                'Não foi possível carregar as vistorias vinculadas a este sinistro.',
+          );
+        }
+
+        final vistorias = (snapshot.data?.docs ?? [])
+            .map((doc) => LinkedVistoriaInfo.fromFirestore(doc))
+            .toList();
+
+        vistorias.sort((a, b) {
+          final bDate = b.updatedAt ?? b.createdAt ?? DateTime(1970);
+          final aDate = a.updatedAt ?? a.createdAt ?? DateTime(1970);
+          return bDate.compareTo(aDate);
+        });
+
+        if (vistorias.isEmpty) {
+          return const _StateMessage(
+            icon: Icons.assignment_outlined,
+            title: 'Nenhuma vistoria sua vinculada',
+            message:
+                'Quando você iniciar uma vistoria para este sinistro, o histórico técnico aparecerá aqui.',
+          );
+        }
+
+        final selected = _selectedDocId == null
+            ? null
+            : vistorias.where((item) => item.docId == _selectedDocId).firstOrNull;
+
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+          children: [
+            _HistoryHeaderCard(
+              total: vistorias.length,
+              selected: selected,
+            ),
+            const SizedBox(height: 14),
+            ...vistorias.map(
+              (vistoria) {
+                final isSelected = vistoria.docId == _selectedDocId;
+
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Column(
+                    children: [
+                      _HistoryVistoriaCard(
+                        vistoria: vistoria,
+                        isSelected: isSelected,
+                        onTap: () {
+                          setState(() {
+                            _selectedDocId = isSelected ? null : vistoria.docId;
+                          });
+                        },
+                      ),
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 220),
+                        switchInCurve: Curves.easeOutCubic,
+                        switchOutCurve: Curves.easeInCubic,
+                        child: isSelected
+                            ? Padding(
+                                key: ValueKey('preview_${vistoria.docId}'),
+                                padding: const EdgeInsets.only(top: 10),
+                                child: _HistoryVistoriaPreview(
+                                  vistoria: vistoria,
+                                ),
+                              )
+                            : const SizedBox.shrink(),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+extension _FirstOrNullExtension<T> on Iterable<T> {
+  T? get firstOrNull {
+    final iterator = this.iterator;
+    if (iterator.moveNext()) return iterator.current;
+    return null;
+  }
+}
+
+class _HistoryHeaderCard extends StatelessWidget {
+  final int total;
+  final LinkedVistoriaInfo? selected;
+
+  const _HistoryHeaderCard({
+    required this.total,
+    required this.selected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final selectedDate = selected?.updatedAt ?? selected?.createdAt;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEAF6FF),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: const Color(0xFF0057C0).withOpacity(.08)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              color: const Color(0xFF0057C0),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: const Icon(
+              Icons.history_rounded,
+              color: Colors.white,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Histórico técnico',
+                  style: GoogleFonts.spaceGrotesk(
+                    color: const Color(0xFF0057C0),
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '$total vistoria${total == 1 ? '' : 's'} vinculada${total == 1 ? '' : 's'} por você',
+                  style: const TextStyle(
+                    color: Color(0xFF414755),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  selected == null
+                      ? 'Toque em uma vistoria para abrir o preview.'
+                      : selectedDate == null
+                          ? 'Selecionada: ${selected!.idvistoria}'
+                          : 'Selecionada: ${selected!.idvistoria} • ${_formatDateTime(selectedDate)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFF6B7280),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HistoryVistoriaCard extends StatelessWidget {
+  final LinkedVistoriaInfo vistoria;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _HistoryVistoriaCard({
+    required this.vistoria,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final date = vistoria.updatedAt ?? vistoria.createdAt;
+
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(22),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(22),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(
+              color: isSelected
+                  ? const Color(0xFF0057C0).withOpacity(.38)
+                  : Colors.black.withOpacity(.05),
+              width: isSelected ? 1.4 : 1,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: isSelected
+                    ? const Color(0xFF0057C0).withOpacity(.08)
+                    : Colors.black.withOpacity(.03),
+                blurRadius: 18,
+                offset: const Offset(0, 8),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 46,
+                height: 46,
+                decoration: BoxDecoration(
+                  color: vistoria.statusColor.withOpacity(.12),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Icon(
+                  vistoria.statusIcon,
+                  color: vistoria.statusColor,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      vistoria.idvistoria,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.spaceGrotesk(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: const Color(0xFF1F2937),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      date == null
+                          ? vistoria.statusLabel
+                          : '${vistoria.statusLabel} • ${_formatDateTime(date)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xFF414755),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        _TinyMetric(
+                          icon: Icons.chat_bubble_outline,
+                          value: '${vistoria.chatCount}',
+                        ),
+                        const SizedBox(width: 8),
+                        _TinyMetric(
+                          icon: Icons.image_outlined,
+                          value: '${vistoria.imageCount}',
+                        ),
+                        const SizedBox(width: 8),
+                        _TinyMetric(
+                          icon: Icons.mic_none,
+                          value: '${vistoria.audioCount}',
+                        ),
+                        const SizedBox(width: 8),
+                        _TinyMetric(
+                          icon: vistoria.hasLaudo
+                              ? Icons.description_outlined
+                              : Icons.pending_actions_outlined,
+                          value: vistoria.hasLaudo ? 'Laudo' : 'Sem laudo',
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              Icon(
+                isSelected ? Icons.expand_less : Icons.chevron_right,
+                color: const Color(0xFF0057C0),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TinyMetric extends StatelessWidget {
+  final IconData icon;
+  final String value;
+
+  const _TinyMetric({
+    required this.icon,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Flexible(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+        decoration: BoxDecoration(
+          color: const Color(0xFFEFF7FD),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 12, color: const Color(0xFF0057C0)),
+            const SizedBox(width: 4),
+            Flexible(
+              child: Text(
+                value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Color(0xFF0057C0),
+                  fontSize: 10,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+enum _HistoryPreviewSection { chat, photos, audios }
+
+class _HistoryVistoriaPreview extends StatefulWidget {
+  final LinkedVistoriaInfo vistoria;
+
+  const _HistoryVistoriaPreview({required this.vistoria});
+
+  @override
+  State<_HistoryVistoriaPreview> createState() => _HistoryVistoriaPreviewState();
+}
+
+class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
+  _HistoryPreviewSection _selectedSection = _HistoryPreviewSection.chat;
+
+  LinkedVistoriaInfo get vistoria => widget.vistoria;
+
+  @override
+  Widget build(BuildContext context) {
+    final laudoText = vistoria.laudo.trim();
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: const Color(0xFF0057C0).withOpacity(.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _SectionTitle(
+            title: 'Preview da vistoria',
+            icon: Icons.visibility_outlined,
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: _PreviewSelectorTile(
+                  icon: Icons.chat_bubble_outline,
+                  label: 'Chat',
+                  value: '${vistoria.chatCount}',
+                  isSelected: _selectedSection == _HistoryPreviewSection.chat,
+                  onTap: () {
+                    setState(() => _selectedSection = _HistoryPreviewSection.chat);
+                  },
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _PreviewSelectorTile(
+                  icon: Icons.image_outlined,
+                  label: 'Fotos',
+                  value: '${vistoria.imageCount}',
+                  isSelected: _selectedSection == _HistoryPreviewSection.photos,
+                  onTap: () {
+                    setState(() => _selectedSection = _HistoryPreviewSection.photos);
+                  },
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _PreviewSelectorTile(
+                  icon: Icons.mic_none,
+                  label: 'Áudios',
+                  value: '${vistoria.audioCount}',
+                  isSelected: _selectedSection == _HistoryPreviewSection.audios,
+                  onTap: () {
+                    setState(() => _selectedSection = _HistoryPreviewSection.audios);
+                  },
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 180),
+            child: _selectedPreviewBlock(),
+          ),
+          const SizedBox(height: 12),
+          _PreviewBlock(
+            title: 'Laudo técnico',
+            icon: vistoria.hasLaudo
+                ? Icons.description_outlined
+                : Icons.pending_actions_outlined,
+            child: Text(
+              laudoText.isEmpty
+                  ? 'Laudo ainda não registrado para esta vistoria.'
+                  : laudoText,
+              maxLines: 5,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Color(0xFF414755),
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                height: 1.35,
+              ),
+            ),
+          ),
+          if (vistoria.observacoes.trim().isNotEmpty) ...[
+            const SizedBox(height: 12),
+            _PreviewBlock(
+              title: 'Observações',
+              icon: Icons.notes_outlined,
+              child: Text(
+                vistoria.observacoes,
+                maxLines: 4,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Color(0xFF414755),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  height: 1.35,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _selectedPreviewBlock() {
+    switch (_selectedSection) {
+      case _HistoryPreviewSection.chat:
+        return _PreviewBlock(
+          key: const ValueKey('chat_preview'),
+          title: 'Mensagens do Chat IA',
+          icon: Icons.forum_outlined,
+          child: vistoria.chatPreviews.isEmpty
+              ? const _EmptyPreviewText(
+                  text: 'Nenhuma mensagem registrada nesta vistoria.',
+                )
+              : Column(
+                  children: vistoria.chatPreviews.map((message) {
+                    return _ChatPreviewMessage(message: message);
+                  }).toList(),
+                ),
+        );
+      case _HistoryPreviewSection.photos:
+        return _PreviewBlock(
+          key: const ValueKey('photos_preview'),
+          title: 'Fotos enviadas',
+          icon: Icons.image_outlined,
+          child: _HistoryPhotoPreviewGrid(vistoria: vistoria),
+        );
+      case _HistoryPreviewSection.audios:
+        return _PreviewBlock(
+          key: const ValueKey('audios_preview'),
+          title: 'Áudios enviados',
+          icon: Icons.mic_none,
+          child: _HistoryAudioPreviewList(vistoria: vistoria),
+        );
+    }
+  }
+}
+
+class _PreviewSelectorTile extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _PreviewSelectorTile({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          height: 82,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+          decoration: BoxDecoration(
+            color: isSelected ? const Color(0xFF0057C0) : const Color(0xFFEFF7FD),
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: isSelected
+                ? [
+                    BoxShadow(
+                      color: const Color(0xFF0057C0).withOpacity(.16),
+                      blurRadius: 14,
+                      offset: const Offset(0, 7),
+                    ),
+                  ]
+                : [],
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                icon,
+                size: 18,
+                color: isSelected ? Colors.white : const Color(0xFF0057C0),
+              ),
+              const SizedBox(height: 4),
+              Flexible(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    value,
+                    maxLines: 1,
+                    style: GoogleFonts.spaceGrotesk(
+                      color: isSelected ? Colors.white : const Color(0xFF0057C0),
+                      fontWeight: FontWeight.bold,
+                      fontSize: 19,
+                      height: 1.0,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 3),
+              Flexible(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: isSelected ? Colors.white.withOpacity(.88) : const Color(0xFF414755),
+                      fontWeight: FontWeight.w800,
+                      fontSize: 11,
+                      height: 1.0,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _HistoryPhotoPreviewGrid extends StatelessWidget {
+  final LinkedVistoriaInfo vistoria;
+
+  const _HistoryPhotoPreviewGrid({required this.vistoria});
+
+  @override
+  Widget build(BuildContext context) {
+    final photos = vistoria.imageBase64Previews;
+
+    if (photos.isEmpty) {
+      return const _EmptyPreviewText(
+        text: 'Nenhuma foto registrada nesta vistoria.',
+      );
+    }
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: List.generate(photos.length, (index) {
+        return _HistoryPhotoThumb(
+          base64Value: photos[index],
+          allPhotos: photos,
+          initialIndex: index,
+        );
+      }),
+    );
+  }
+}
+
+class _HistoryPhotoThumb extends StatelessWidget {
+  final String base64Value;
+  final List<String> allPhotos;
+  final int initialIndex;
+
+  const _HistoryPhotoThumb({
+    required this.base64Value,
+    required this.allPhotos,
+    required this.initialIndex,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    try {
+      final bytes = _decodeBase64Image(base64Value);
+
+      return Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () {
+            showDialog<void>(
+              context: context,
+              builder: (_) => _PhotoGalleryDialog(
+                photos: allPhotos,
+                initialIndex: initialIndex,
+              ),
+            );
+          },
+          borderRadius: BorderRadius.circular(14),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(14),
+            child: Stack(
+              children: [
+                Image.memory(
+                  Uint8List.fromList(bytes),
+                  width: 82,
+                  height: 82,
+                  fit: BoxFit.cover,
+                  gaplessPlayback: true,
+                  errorBuilder: (_, __, ___) => const _HistoryBrokenPreview(
+                    icon: Icons.broken_image_outlined,
+                  ),
+                ),
+                Positioned(
+                  right: 6,
+                  bottom: 6,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(.45),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: const Icon(
+                      Icons.open_in_full,
+                      size: 12,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    } catch (_) {
+      return const _HistoryBrokenPreview(icon: Icons.broken_image_outlined);
+    }
+  }
+}
+
+class _PhotoGalleryDialog extends StatefulWidget {
+  final List<String> photos;
+  final int initialIndex;
+
+  const _PhotoGalleryDialog({
+    required this.photos,
+    required this.initialIndex,
+  });
+
+  @override
+  State<_PhotoGalleryDialog> createState() => _PhotoGalleryDialogState();
+}
+
+class _PhotoGalleryDialogState extends State<_PhotoGalleryDialog> {
+  late final PageController _controller;
+  late int _currentIndex;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentIndex = widget.initialIndex;
+    _controller = PageController(initialPage: widget.initialIndex);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog.fullscreen(
+      backgroundColor: Colors.black,
+      child: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              child: Row(
+                children: [
+                  IconButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close, color: Colors.white),
+                  ),
+                  Expanded(
+                    child: Text(
+                      'Foto ${_currentIndex + 1} de ${widget.photos.length}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 48),
+                ],
+              ),
+            ),
+            Expanded(
+              child: PageView.builder(
+                controller: _controller,
+                itemCount: widget.photos.length,
+                onPageChanged: (index) {
+                  setState(() => _currentIndex = index);
+                },
+                itemBuilder: (context, index) {
+                  try {
+                    final bytes = _decodeBase64Image(widget.photos[index]);
+                    return InteractiveViewer(
+                      minScale: 0.8,
+                      maxScale: 4,
+                      child: Center(
+                        child: Image.memory(
+                          Uint8List.fromList(bytes),
+                          fit: BoxFit.contain,
+                          gaplessPlayback: true,
+                        ),
+                      ),
+                    );
+                  } catch (_) {
+                    return const Center(
+                      child: Icon(
+                        Icons.broken_image_outlined,
+                        color: Colors.white,
+                        size: 48,
+                      ),
+                    );
+                  }
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+List<int> _decodeBase64Image(String base64Value) {
+  final cleanValue = base64Value.contains(',')
+      ? base64Value.split(',').last
+      : base64Value;
+
+  return base64Decode(cleanValue);
+}
+
+class _HistoryAudioPreviewList extends StatelessWidget {
+  final LinkedVistoriaInfo vistoria;
+
+  const _HistoryAudioPreviewList({required this.vistoria});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance
+          .collection('vistorias')
+          .doc(vistoria.docId)
+          .collection('audios')
+          .snapshots(),
+      builder: (context, snapshot) {
+        final docs = snapshot.data?.docs ?? [];
+
+        if (docs.isNotEmpty) {
+          final audios = docs.map((doc) {
+            final data = doc.data();
+            final audioId = _stringValue(data['audioId'], fallback: doc.id);
+            final status = _stringValue(data['transcriptionStatus']);
+            final storagePath = _stringValue(data['storagePath']);
+            final downloadUrl = _stringValue(
+              data['mp3DownloadUrl'],
+              fallback: _stringValue(
+                data['downloadUrl'],
+                fallback: _stringValue(
+                  data['audioUrl'],
+                  fallback: _stringValue(data['url']),
+                ),
+              ),
+            );
+            final label = audioId.isNotEmpty
+                ? audioId
+                : storagePath.isNotEmpty
+                    ? storagePath.split('/').last.replaceAll('.mp3', '')
+                    : doc.id;
+
+            return _HistoryAudioTile(
+              label: label,
+              subtitle: 'Toque para ouvir',
+              storagePath: storagePath,
+              downloadUrl: downloadUrl,
+            );
+          }).toList();
+
+          return Column(children: audios);
+        }
+
+        if (snapshot.connectionState == ConnectionState.waiting &&
+            vistoria.audioPreviews.isEmpty) {
+          return const _EmptyPreviewText(text: 'Carregando áudios...');
+        }
+
+        if (vistoria.audioPreviews.isEmpty) {
+          return const _EmptyPreviewText(
+            text: 'Nenhum áudio registrado nesta vistoria.',
+          );
+        }
+
+        return Column(
+          children: vistoria.audioPreviews.map((preview) {
+            return _HistoryAudioTile(
+              label: preview.label,
+              subtitle: preview.canPlay
+                  ? 'Toque para ouvir'
+                  : 'Áudio registrado sem caminho reproduzível',
+              storagePath: preview.storagePath,
+              downloadUrl: preview.downloadUrl,
+            );
+          }).toList(),
+        );
+      },
+    );
+  }
+}
+
+class _HistoryAudioTile extends StatefulWidget {
+  final String label;
+  final String subtitle;
+  final String storagePath;
+  final String downloadUrl;
+
+  const _HistoryAudioTile({
+    required this.label,
+    required this.subtitle,
+    this.storagePath = '',
+    this.downloadUrl = '',
+  });
+
+  @override
+  State<_HistoryAudioTile> createState() => _HistoryAudioTileState();
+}
+
+class _HistoryAudioTileState extends State<_HistoryAudioTile> {
+  late final AudioPlayer _player;
+  StreamSubscription<PlayerState>? _stateSubscription;
+  StreamSubscription<void>? _completeSubscription;
+  bool _isLoading = false;
+  bool _isPlaying = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _player = AudioPlayer();
+
+    _stateSubscription = _player.onPlayerStateChanged.listen((state) {
+      if (!mounted) return;
+      setState(() {
+        _isPlaying = state == PlayerState.playing;
+        if (state == PlayerState.playing || state == PlayerState.paused) {
+          _isLoading = false;
+        }
+      });
+    });
+
+    _completeSubscription = _player.onPlayerComplete.listen((_) {
+      if (!mounted) return;
+      setState(() {
+        _isPlaying = false;
+        _isLoading = false;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _stateSubscription?.cancel();
+    _completeSubscription?.cancel();
+    _player.dispose();
+    super.dispose();
+  }
+
+  Future<void> _toggleAudio() async {
+    if (_isLoading) return;
+
+    if (_isPlaying) {
+      await _player.pause();
+      return;
+    }
+
+    final url = await _resolveAudioUrl();
+
+    if (url.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Não encontrei o caminho do áudio para reprodução.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      await _player.stop();
+      await _player.play(UrlSource(url));
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _isPlaying = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Não foi possível tocar o áudio: $error'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+    }
+  }
+
+  Future<String> _resolveAudioUrl() async {
+    final directUrl = widget.downloadUrl.trim();
+
+    if (directUrl.isNotEmpty) {
+      return directUrl;
+    }
+
+    final storagePath = widget.storagePath.trim();
+
+    if (storagePath.isEmpty) {
+      return '';
+    }
+
+    return FirebaseStorage.instance.ref(storagePath).getDownloadURL();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final canPlay = widget.downloadUrl.trim().isNotEmpty ||
+        widget.storagePath.trim().isNotEmpty;
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: canPlay ? _toggleAudio : null,
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          width: double.infinity,
+          margin: const EdgeInsets.only(bottom: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.black.withOpacity(.04)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEAF6FF),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: _isLoading
+                    ? const Padding(
+                        padding: EdgeInsets.all(10),
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Icon(
+                        _isPlaying
+                            ? Icons.pause_rounded
+                            : Icons.play_arrow_rounded,
+                        size: 22,
+                        color: const Color(0xFF0057C0),
+                      ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      widget.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xFF414755),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      canPlay ? widget.subtitle : 'Sem arquivo reproduzível',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xFF6B7280),
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (canPlay)
+                Icon(
+                  _isPlaying ? Icons.volume_up : Icons.graphic_eq,
+                  size: 18,
+                  color: const Color(0xFF0057C0),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _HistoryBrokenPreview extends StatelessWidget {
+  final IconData icon;
+
+  const _HistoryBrokenPreview({required this.icon});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 82,
+      height: 82,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.black.withOpacity(.04)),
+      ),
+      child: Icon(icon, size: 24, color: const Color(0xFF6B7280)),
+    );
+  }
+}
+
+class _EmptyPreviewText extends StatelessWidget {
+  final String text;
+
+  const _EmptyPreviewText({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text,
+      style: const TextStyle(
+        color: Color(0xFF6B7280),
+        fontSize: 12,
+        fontWeight: FontWeight.w700,
+      ),
+    );
+  }
+}
+
+class _PreviewBlock extends StatelessWidget {
+  final String title;
+  final IconData icon;
+  final Widget child;
+
+  const _PreviewBlock({
+    super.key,
+    required this.title,
+    required this.icon,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEFF7FD),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 15, color: const Color(0xFF0057C0)),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    color: Color(0xFF0057C0),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 9),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+class _ChatPreviewMessage extends StatelessWidget {
+  final ChatPreviewInfo message;
+
+  const _ChatPreviewMessage({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    final isAi = message.role.toLowerCase().contains('ai') ||
+        message.role.toLowerCase().contains('assistant');
+
+    final isAudio = message.kind == ChatPreviewKind.audio;
+    final isImage = message.kind == ChatPreviewKind.image;
+    final isMedia = isAudio || isImage;
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 7),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: isAi ? Colors.white : const Color(0xFFEAF6FF),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.black.withOpacity(.04)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            isAi ? 'IA Argos' : 'Mecânico',
+            style: TextStyle(
+              color: isAi ? Colors.purple : const Color(0xFF0057C0),
+              fontSize: 10,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 4),
+          if (isMedia)
+            Row(
+              children: [
+                Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(.85),
+                    borderRadius: BorderRadius.circular(11),
+                  ),
+                  child: Icon(
+                    isAudio ? Icons.mic_none : Icons.image_outlined,
+                    size: 17,
+                    color: const Color(0xFF0057C0),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    isAudio ? 'Áudio enviado' : 'Foto enviada',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xFF414755),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                      height: 1.3,
+                    ),
+                  ),
+                ),
+              ],
+            )
+          else
+            Text(
+              message.text,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Color(0xFF414755),
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                height: 1.3,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HistorySkeleton extends StatelessWidget {
+  const _HistorySkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+      itemCount: 4,
+      separatorBuilder: (_, __) => const SizedBox(height: 12),
+      itemBuilder: (context, index) {
+        return Shimmer.fromColors(
+          baseColor: Colors.white,
+          highlightColor: const Color(0xFFE5F6FF),
+          child: Container(
+            height: index == 0 ? 92 : 120,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(22),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -1953,7 +3380,7 @@ class _Base64PhotoPreview extends StatelessWidget {
       return ClipRRect(
         borderRadius: BorderRadius.circular(12),
         child: Image.memory(
-          bytes,
+          Uint8List.fromList(bytes),
           width: 46,
           height: 46,
           fit: BoxFit.cover,
@@ -2787,7 +4214,7 @@ class InspectionCase {
   });
 
   factory InspectionCase.fromFirestore(
-    QueryDocumentSnapshot<Map<String, dynamic>> doc,
+    DocumentSnapshot<Map<String, dynamic>> doc,
   ) {
     final data = doc.data() ?? <String, dynamic>{};
 
@@ -3021,6 +4448,15 @@ class LinkedVistoriaInfo {
   final bool hasLaudo;
   final List<String> imageBase64Previews;
   final List<AudioPreviewInfo> audioPreviews;
+  final List<ChatPreviewInfo> chatPreviews;
+  final String laudo;
+  final String observacoes;
+  final String placa;
+  final String veiculo;
+  final String cliente;
+  final String credenciado;
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
 
   const LinkedVistoriaInfo({
     required this.docId,
@@ -3032,28 +4468,64 @@ class LinkedVistoriaInfo {
     required this.hasLaudo,
     required this.imageBase64Previews,
     required this.audioPreviews,
+    required this.chatPreviews,
+    required this.laudo,
+    required this.observacoes,
+    required this.placa,
+    required this.veiculo,
+    required this.cliente,
+    required this.credenciado,
+    required this.createdAt,
+    required this.updatedAt,
   });
 
   factory LinkedVistoriaInfo.fromFirestore(
     QueryDocumentSnapshot<Map<String, dynamic>> doc,
   ) {
     final data = doc.data();
+
     final images = data['images'] is List ? data['images'] as List : const [];
     final audios = data['audios'] is List ? data['audios'] as List : const [];
+    final chatmessages =
+        data['chatmessages'] is List ? data['chatmessages'] as List : const [];
+
+    final lastAudioNumber = data['lastAudioNumber'] is int
+        ? data['lastAudioNumber'] as int
+        : int.tryParse('${data['lastAudioNumber']}') ?? 0;
+
+    final extractedAudioPreviewList = _extractAudioPreviews(audios);
+    final audioPreviewList = extractedAudioPreviewList.isNotEmpty
+        ? extractedAudioPreviewList
+        : List<AudioPreviewInfo>.generate(
+            lastAudioNumber > 6 ? 6 : lastAudioNumber,
+            (index) => AudioPreviewInfo(label: 'Áudio ${index + 1}'),
+          );
+    final resolvedAudioCount = audios.length > lastAudioNumber
+        ? audios.length
+        : lastAudioNumber;
+
+    final laudo = _stringValue(data['laudo']);
+    final pdfLaudoUrl = _stringValue(data['pdfLaudoUrl']);
 
     return LinkedVistoriaInfo(
       docId: doc.id,
       idvistoria: _stringValue(data['idvistoria'], fallback: doc.id),
       status: _stringValue(data['status'], fallback: 'em_andamento'),
-      chatCount: data['chatmessages'] is List
-          ? (data['chatmessages'] as List).length
-          : 0,
+      chatCount: chatmessages.length,
       imageCount: images.length,
-      audioCount: audios.length,
-      hasLaudo: _stringValue(data['laudo']).isNotEmpty ||
-          _stringValue(data['pdfLaudoUrl']).isNotEmpty,
+      audioCount: resolvedAudioCount,
+      hasLaudo: laudo.isNotEmpty || pdfLaudoUrl.isNotEmpty,
       imageBase64Previews: _extractImageBase64Previews(images),
-      audioPreviews: _extractAudioPreviews(audios),
+      audioPreviews: audioPreviewList,
+      chatPreviews: _extractChatPreviews(chatmessages),
+      laudo: laudo,
+      observacoes: _stringValue(data['observacoes']),
+      placa: _stringValue(data['placa']),
+      veiculo: _stringValue(data['veiculo']),
+      cliente: _stringValue(data['cliente']),
+      credenciado: _stringValue(data['credenciado']),
+      createdAt: _parseDateTime(data['createdAt']),
+      updatedAt: _parseDateTime(data['updatedAt']),
     );
   }
 
@@ -3061,7 +4533,10 @@ class LinkedVistoriaInfo {
     final normalized = _normalizeStatus(status);
 
     if (normalized.contains('abandonada')) return 'Abandonada';
+    if (normalized.contains('expirada')) return 'Expirada';
     if (normalized.contains('finalizada')) return 'Finalizada';
+    if (normalized.contains('cancelada')) return 'Cancelada';
+
     return 'Em andamento';
   }
 
@@ -3069,23 +4544,57 @@ class LinkedVistoriaInfo {
     final normalized = _normalizeStatus(status);
 
     if (normalized.contains('abandonada')) return Colors.grey;
+    if (normalized.contains('expirada')) return Colors.deepOrange;
     if (normalized.contains('finalizada')) return Colors.green;
+    if (normalized.contains('cancelada')) return Colors.redAccent;
+
     return const Color(0xFF0057C0);
+  }
+
+  IconData get statusIcon {
+    final normalized = _normalizeStatus(status);
+
+    if (normalized.contains('abandonada')) return Icons.block_outlined;
+    if (normalized.contains('expirada')) return Icons.timer_off_outlined;
+    if (normalized.contains('finalizada')) return Icons.verified_outlined;
+    if (normalized.contains('cancelada')) return Icons.cancel_outlined;
+
+    return Icons.pending_actions_outlined;
   }
 }
 
 class AudioPreviewInfo {
   final String label;
+  final String storagePath;
+  final String downloadUrl;
 
-  const AudioPreviewInfo({required this.label});
+  const AudioPreviewInfo({
+    required this.label,
+    this.storagePath = '',
+    this.downloadUrl = '',
+  });
+
+  bool get canPlay => storagePath.trim().isNotEmpty || downloadUrl.trim().isNotEmpty;
+}
+
+enum ChatPreviewKind { text, image, audio }
+
+class ChatPreviewInfo {
+  final String role;
+  final String text;
+  final ChatPreviewKind kind;
+
+  const ChatPreviewInfo({
+    required this.role,
+    required this.text,
+    this.kind = ChatPreviewKind.text,
+  });
 }
 
 List<String> _extractImageBase64Previews(List<dynamic> images) {
   final previews = <String>[];
 
   for (final item in images) {
-    if (previews.length >= 3) break;
-
     if (item is String && item.trim().isNotEmpty) {
       previews.add(item.trim());
       continue;
@@ -3112,22 +4621,122 @@ List<String> _extractImageBase64Previews(List<dynamic> images) {
 List<AudioPreviewInfo> _extractAudioPreviews(List<dynamic> audios) {
   final previews = <AudioPreviewInfo>[];
 
-  for (var index = 0; index < audios.length && previews.length < 2; index++) {
+  for (var index = 0; index < audios.length; index++) {
     final item = audios[index];
     String label = 'Áudio ${index + 1}';
+    String storagePath = '';
+    String downloadUrl = '';
 
     if (item is Map) {
+      final audioId = _stringValue(item['audioId']);
       final fileName = _stringValue(item['fileName']);
+      storagePath = _stringValue(item['storagePath']);
+      downloadUrl = _stringValue(
+        item['mp3DownloadUrl'],
+        fallback: _stringValue(
+          item['downloadUrl'],
+          fallback: _stringValue(
+            item['audioUrl'],
+            fallback: _stringValue(item['url']),
+          ),
+        ),
+      );
       final sizeBytes = item['sizeBytes'];
 
-      if (fileName.isNotEmpty) {
+      if (audioId.isNotEmpty) {
+        label = audioId;
+      } else if (fileName.isNotEmpty) {
         label = fileName;
+      } else if (storagePath.isNotEmpty) {
+        label = storagePath.split('/').last.replaceAll('.mp3', '');
       } else if (sizeBytes is num && sizeBytes > 0) {
         label = 'Áudio ${index + 1} • ${_formatFileSize(sizeBytes.toInt())}';
       }
     }
 
-    previews.add(AudioPreviewInfo(label: label));
+    previews.add(
+      AudioPreviewInfo(
+        label: label,
+        storagePath: storagePath,
+        downloadUrl: downloadUrl,
+      ),
+    );
+  }
+
+  return previews;
+}
+
+List<ChatPreviewInfo> _extractChatPreviews(List<dynamic> messages) {
+  final previews = <ChatPreviewInfo>[];
+  final source = messages.length > 1 ? messages.skip(1) : messages;
+
+  for (final item in source) {
+    if (item is String && item.trim().isNotEmpty) {
+      previews.add(
+        ChatPreviewInfo(
+          role: 'user',
+          text: item.trim(),
+        ),
+      );
+      continue;
+    }
+
+    if (item is Map) {
+      final role = _stringValue(
+        item['role'],
+        fallback: _stringValue(item['sender'], fallback: 'user'),
+      );
+
+      final rawType = _stringValue(item['type']).toLowerCase();
+      final hasAudio = rawType.contains('audio') ||
+          _stringValue(item['audioPath']).isNotEmpty ||
+          _stringValue(item['audioId']).isNotEmpty ||
+          _stringValue(item['mp3DownloadUrl']).isNotEmpty ||
+          _stringValue(item['storagePath']).toLowerCase().contains('/audio/');
+      final hasImage = rawType.contains('image') ||
+          rawType.contains('foto') ||
+          _stringValue(item['imagePath']).isNotEmpty ||
+          _stringValue(item['imageUrl']).isNotEmpty;
+
+      if (hasAudio) {
+        previews.add(
+          ChatPreviewInfo(
+            role: role,
+            text: 'Áudio enviado',
+            kind: ChatPreviewKind.audio,
+          ),
+        );
+        continue;
+      }
+
+      if (hasImage) {
+        previews.add(
+          ChatPreviewInfo(
+            role: role,
+            text: 'Foto enviada',
+            kind: ChatPreviewKind.image,
+          ),
+        );
+        continue;
+      }
+
+      final text = _stringValue(
+        item['text'],
+        fallback: _stringValue(
+          item['message'],
+          fallback: _stringValue(item['originalText']),
+        ),
+      );
+
+      if (text.trim().isEmpty) continue;
+
+      previews.add(
+        ChatPreviewInfo(
+          role: role,
+          text: text.trim(),
+        ),
+      );
+    }
   }
 
   return previews;
