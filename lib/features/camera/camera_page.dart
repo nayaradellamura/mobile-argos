@@ -1,8 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:image_picker/image_picker.dart' as image_picker;
+import 'package:permission_handler/permission_handler.dart';
 
 class CameraPage extends StatefulWidget {
   const CameraPage({super.key});
@@ -22,12 +25,20 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
   bool _isInitializing = true;
   bool _isTakingPicture = false;
   bool _isFlashOn = false;
+  bool _isClosing = false;
+  bool _isPickingFromGallery = false;
+  bool _disposeScheduled = false;
+
+  int _initializeToken = 0;
+  int _hiddenGalleryTapCount = 0;
+  Timer? _hiddenGalleryTapResetTimer;
 
   double _minZoom = 1.0;
   double _maxZoom = 1.0;
   double _currentZoom = 1.0;
 
   final List<XFile> _photos = [];
+  final image_picker.ImagePicker _imagePicker = image_picker.ImagePicker();
 
   List<int> get _backCameraIndexes {
     final indexes = <int>[];
@@ -93,26 +104,33 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initializeCamera();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _initializeCamera();
+    });
   }
 
   @override
   void dispose() {
+    _isClosing = true;
+    _initializeToken++;
+    _hiddenGalleryTapResetTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
-    _disposeCamera();
+    _scheduleDisposeCameraAfterClose();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (!mounted) return;
+    if (!mounted || _isClosing) return;
 
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused) {
-      _disposeCamera();
+      unawaited(_disposeCamera());
     }
 
-    if (state == AppLifecycleState.resumed) {
+    if (state == AppLifecycleState.resumed && !_isPickingFromGallery) {
       _initializeCamera(_selectedCameraIndex);
     }
   }
@@ -123,23 +141,59 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     return value;
   }
 
-  Future<void> _disposeCamera() async {
+  void _scheduleDisposeCameraAfterClose() {
+    if (_disposeScheduled) return;
+
+    _disposeScheduled = true;
+
+    unawaited(
+      _disposeCamera(delay: const Duration(seconds: 2)),
+    );
+  }
+
+  Future<void> _disposeCamera({Duration delay = Duration.zero}) async {
     final controller = _controller;
     _controller = null;
 
-    if (controller != null) {
-      try {
-        if (controller.value.isInitialized) {
-          await controller.setFlashMode(FlashMode.off);
-        }
-      } catch (_) {}
+    if (controller == null) return;
 
-      await controller.dispose();
+    if (delay > Duration.zero) {
+      await Future<void>.delayed(delay);
     }
+
+    try {
+      if (controller.value.isInitialized) {
+        await controller.setFlashMode(FlashMode.off);
+      }
+    } catch (_) {}
+
+    try {
+      await controller.dispose();
+    } catch (_) {}
+  }
+
+  Future<void> _ensureCameraPermission() async {
+    final currentStatus = await Permission.camera.status;
+
+    if (currentStatus.isGranted || currentStatus.isLimited) return;
+
+    final requestedStatus = await Permission.camera.request();
+
+    if (requestedStatus.isGranted || requestedStatus.isLimited) return;
+
+    if (requestedStatus.isPermanentlyDenied) {
+      throw Exception(
+        'Permissão de câmera negada permanentemente. Libere o acesso nas configurações do aplicativo.',
+      );
+    }
+
+    throw Exception('Permissão de câmera necessária para capturar evidências.');
   }
 
   Future<void> _initializeCamera([int? cameraIndex]) async {
-    if (!mounted) return;
+    if (!mounted || _isClosing || _isPickingFromGallery) return;
+
+    final token = ++_initializeToken;
 
     setState(() {
       _isInitializing = true;
@@ -148,6 +202,14 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     });
 
     try {
+      await _ensureCameraPermission();
+
+      // Pequena folga evita falha comum na primeira abertura logo após a
+      // permissão ser concedida no Android.
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+
+      if (!mounted || _isClosing || token != _initializeToken) return;
+
       _cameras = await availableCameras();
 
       final backIndexes = _backCameraIndexes;
@@ -166,6 +228,8 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
 
       await _disposeCamera();
 
+      if (!mounted || _isClosing || token != _initializeToken) return;
+
       final controller = CameraController(
         _cameras[_selectedCameraIndex],
         ResolutionPreset.high,
@@ -173,34 +237,68 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
         imageFormatGroup: ImageFormatGroup.jpeg,
       );
 
-      _controller = controller;
+      try {
+        await controller.initialize();
+      } catch (_) {
+        // Segunda tentativa curta para corrigir erro da primeira abertura.
+        try {
+          await controller.dispose();
+        } catch (_) {}
 
-      await controller.initialize();
+        await Future<void>.delayed(const Duration(milliseconds: 320));
+
+        if (!mounted || _isClosing || token != _initializeToken) return;
+
+        final retryController = CameraController(
+          _cameras[_selectedCameraIndex],
+          ResolutionPreset.high,
+          enableAudio: false,
+          imageFormatGroup: ImageFormatGroup.jpeg,
+        );
+
+        await retryController.initialize();
+        _controller = retryController;
+      }
+
+      _controller ??= controller;
+
+      final activeController = _controller;
+
+      if (activeController == null) {
+        throw Exception('Não foi possível preparar a câmera.');
+      }
+
+      if (!mounted || _isClosing || token != _initializeToken) {
+        await activeController.dispose();
+        return;
+      }
 
       try {
-        await controller.setFlashMode(FlashMode.off);
+        await activeController.setFlashMode(FlashMode.off);
       } catch (_) {}
 
       try {
-        _minZoom = await controller.getMinZoomLevel();
-        _maxZoom = await controller.getMaxZoomLevel();
+        _minZoom = await activeController.getMinZoomLevel();
+        _maxZoom = await activeController.getMaxZoomLevel();
 
         _currentZoom = _clampZoom(1.0);
 
-        await controller.setZoomLevel(_currentZoom);
+        await activeController.setZoomLevel(_currentZoom);
       } catch (_) {
         _minZoom = 1.0;
         _maxZoom = 1.0;
         _currentZoom = 1.0;
       }
 
-      if (!mounted) return;
+      if (!mounted || _isClosing || token != _initializeToken) return;
 
       setState(() {
         _isInitializing = false;
       });
     } catch (e) {
-      if (!mounted) return;
+      await _disposeCamera();
+
+      if (!mounted || _isClosing || token != _initializeToken) return;
 
       setState(() {
         _isInitializing = false;
@@ -292,7 +390,8 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
 
     if (controller == null ||
         !controller.value.isInitialized ||
-        _isTakingPicture) {
+        _isTakingPicture ||
+        _isClosing) {
       return;
     }
 
@@ -335,7 +434,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
   }
 
   Future<void> _switchBackLens() async {
-    if (!_hasMultipleBackCameras || _isInitializing) return;
+    if (!_hasMultipleBackCameras || _isInitializing || _isClosing) return;
 
     final backIndexes = _backCameraIndexes;
     final currentPosition = backIndexes.indexOf(_selectedCameraIndex);
@@ -352,25 +451,134 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
   }
 
   Future<void> _closePage() async {
-    await _disposeCamera();
+    if (_isClosing) return;
 
-    if (!mounted) return;
+    _isClosing = true;
+    _initializeToken++;
 
-    Navigator.of(context).pop<List<XFile>?>(null);
+    if (mounted) {
+      Navigator.of(context).pop<List<XFile>?>(null);
+    }
+
+    _scheduleDisposeCameraAfterClose();
   }
 
-  void _finishCapture() {
+  Future<void> _finishCapture() async {
     if (_photos.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Capture pelo menos 1 foto para continuar.'),
-          backgroundColor: Colors.orange,
-        ),
-      );
+      await _handleFinishButtonPressed();
       return;
     }
 
-    Navigator.of(context).pop<List<XFile>>(List<XFile>.from(_photos));
+    if (_isClosing) return;
+
+    _isClosing = true;
+    _initializeToken++;
+
+    if (mounted) {
+      Navigator.of(context).pop<List<XFile>>(List<XFile>.from(_photos));
+    }
+
+    _scheduleDisposeCameraAfterClose();
+  }
+
+  Future<void> _handleFinishButtonPressed() async {
+    if (_photos.isNotEmpty) {
+      await _finishCapture();
+      return;
+    }
+
+    _hiddenGalleryTapCount++;
+
+    _hiddenGalleryTapResetTimer?.cancel();
+    _hiddenGalleryTapResetTimer = Timer(const Duration(seconds: 3), () {
+      _hiddenGalleryTapCount = 0;
+    });
+
+    if (_hiddenGalleryTapCount >= 5) {
+      _hiddenGalleryTapCount = 0;
+      _hiddenGalleryTapResetTimer?.cancel();
+
+      await _openHiddenGalleryPicker();
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Capture pelo menos 1 foto para continuar.'),
+        backgroundColor: Colors.orange,
+        duration: Duration(milliseconds: 850),
+      ),
+    );
+  }
+
+  Future<void> _openHiddenGalleryPicker() async {
+    if (_isPickingFromGallery || _photos.length >= maxPhotos) return;
+
+    setState(() {
+      _isPickingFromGallery = true;
+      _isInitializing = true;
+    });
+
+    _initializeToken++;
+    await _disposeCamera();
+
+    try {
+      final remaining = maxPhotos - _photos.length;
+
+      final selected = await _imagePicker.pickMultiImage(
+        imageQuality: 82,
+        limit: remaining,
+      );
+
+      if (!mounted) return;
+
+      if (selected.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Nenhuma foto selecionada.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
+
+      final photosToAdd = selected.take(remaining).toList();
+
+      setState(() {
+        _photos.addAll(photosToAdd);
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${photosToAdd.length} foto${photosToAdd.length > 1 ? 's' : ''} importada${photosToAdd.length > 1 ? 's' : ''} da galeria.',
+          ),
+          backgroundColor: Colors.green,
+        ),
+      );
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _openPhotosManager();
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Erro ao abrir galeria: $e'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isPickingFromGallery = false;
+        });
+
+        await _initializeCamera(_selectedCameraIndex);
+      }
+    }
   }
 
   void _openPhotosManager() {
@@ -757,15 +965,19 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
                     width: double.infinity,
                     height: 56,
                     child: ElevatedButton.icon(
-                      onPressed: canFinish ? _finishCapture : null,
-                      icon: const Icon(Icons.check_circle),
+                      onPressed: _isPickingFromGallery
+                          ? null
+                          : _handleFinishButtonPressed,
+                      icon: Icon(canFinish ? Icons.check_circle : Icons.lock_outline),
                       label: Text(
                         canFinish
                             ? 'Usar $photoCount foto${photoCount > 1 ? 's' : ''} na vistoria'
                             : 'Capture pelo menos 1 foto',
                       ),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF0057C0),
+                        backgroundColor: canFinish
+                            ? const Color(0xFF0057C0)
+                            : Colors.white.withOpacity(.18),
                         foregroundColor: Colors.white,
                         disabledBackgroundColor: Colors.white.withOpacity(.18),
                         disabledForegroundColor: Colors.white54,

@@ -546,6 +546,19 @@ class _AiChatPageState extends State<AiChatPage> {
     await _startVistoriaFromSinistro(option.sinistroId);
   }
 
+  Future<void> _closeCurrentChatAndBackToSelection() async {
+    if (isRecording) {
+      await _cancelRecording();
+    }
+
+    FocusScope.of(context).unfocus();
+
+    await _loadAvailableSinistros(
+      message:
+          'Selecione uma placa com check-in realizado para iniciar ou continuar a vistoria.',
+    );
+  }
+
   Future<void> _sendTextMessage() async {
     final session = currentSession;
     final text = messageController.text.trim();
@@ -922,13 +935,22 @@ class _AiChatPageState extends State<AiChatPage> {
 
     try {
       final uploadedAudio = await UserAudioStorageService.instance
-     .uploadOriginalAudioForMp3Conversion(
+    .uploadOriginalAudioForMp3Conversion(
       localAudioPath: path,
       idvistoria: session.idvistoria,
       sinistroId: session.sinistroId,
       duration: Duration(seconds: duration),
     );
 
+      try {
+        await VistoriaChatSessionService.instance.appendAudioBase64FromFile(
+          vistoriaDocId: session.docId,
+          audioPath: path,
+          contentType: 'audio/mp4',
+        );
+      } catch (e) {
+        debugPrint('Erro ao salvar áudio em base64 na vistoria: $e');
+      }
 
       if (!mounted) return;
 
@@ -1106,75 +1128,92 @@ class _AiChatPageState extends State<AiChatPage> {
       return const SafeArea(child: _ChatSessionLoading());
     }
 
-    if (currentSession == null) {
-      return SafeArea(
-        child: _SinistroSelectionView(
-          options: availableSinistros,
-          onSelect: _handleSinistroSelected,
-        ),
-      );
-    }
-
     return SafeArea(
-      child: Column(
-        children: [
-          const _ChatHeader(),
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 320),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeInCubic,
+        transitionBuilder: (child, animation) {
+          final offsetAnimation = Tween<Offset>(
+            begin: const Offset(-0.08, 0),
+            end: Offset.zero,
+          ).animate(animation);
 
-          Expanded(
-            child: ListView.builder(
-              controller: scrollController,
-              padding: const EdgeInsets.fromLTRB(18, 22, 18, 18),
-              itemCount: messages.length + (isAiTyping ? 1 : 0),
-              itemBuilder: (context, index) {
-                if (isAiTyping && index == messages.length) {
-                  return const Padding(
-                    padding: EdgeInsets.only(bottom: 16),
-                    child: _TypingBubble(),
-                  );
-                }
-
-                final message = messages[index];
-
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 16),
-                  child: _ChatBubble(message: message),
-                );
-              },
+          return FadeTransition(
+            opacity: animation,
+            child: SlideTransition(
+              position: offsetAnimation,
+              child: child,
             ),
-          ),
-
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 250),
-            transitionBuilder: (child, animation) {
-              return SizeTransition(
-                sizeFactor: animation,
-                axisAlignment: -1,
-                child: FadeTransition(opacity: animation, child: child),
-              );
-            },
-            child: isRecording
-                ? _RecordingComposer(
-                    key: const ValueKey('recording'),
-                    duration: duration,
-                    onCancel: _cancelRecording,
-                    onSend: _finishRecording,
-                  )
-                : _TextComposer(
-                    key: const ValueKey('composer'),
-                    controller: messageController,
-                    hasText: hasText,
-                    isStartingRecording: isStartingRecording,
-                    onCameraTap: _openCamera,
-                    onSendTap: _sendTextMessage,
-                    onMicTap: _startRecording,
+          );
+        },
+        child: currentSession == null
+            ? _SinistroSelectionView(
+                key: const ValueKey('sinistro_selection'),
+                options: availableSinistros,
+                onSelect: _handleSinistroSelected,
+              )
+            : Column(
+                key: ValueKey('chat_${currentSession!.idvistoria}'),
+                children: [
+                  _ChatHeader(
+                    session: currentSession,
+                    onCloseChat: _closeCurrentChatAndBackToSelection,
                   ),
-          ),
-        ],
+                  Expanded(
+                    child: ListView.builder(
+                      controller: scrollController,
+                      padding: const EdgeInsets.fromLTRB(18, 22, 18, 18),
+                      itemCount: messages.length + (isAiTyping ? 1 : 0),
+                      itemBuilder: (context, index) {
+                        if (isAiTyping && index == messages.length) {
+                          return const Padding(
+                            padding: EdgeInsets.only(bottom: 16),
+                            child: _TypingBubble(),
+                          );
+                        }
+
+                        final message = messages[index];
+
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 16),
+                          child: _ChatBubble(message: message),
+                        );
+                      },
+                    ),
+                  ),
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 250),
+                    transitionBuilder: (child, animation) {
+                      return SizeTransition(
+                        sizeFactor: animation,
+                        axisAlignment: -1,
+                        child: FadeTransition(opacity: animation, child: child),
+                      );
+                    },
+                    child: isRecording
+                        ? _RecordingComposer(
+                            key: const ValueKey('recording'),
+                            duration: duration,
+                            onCancel: _cancelRecording,
+                            onSend: _finishRecording,
+                          )
+                        : _TextComposer(
+                            key: const ValueKey('composer'),
+                            controller: messageController,
+                            hasText: hasText,
+                            isStartingRecording: isStartingRecording,
+                            onCameraTap: _openCamera,
+                            onSendTap: _sendTextMessage,
+                            onMicTap: _startRecording,
+                          ),
+                  ),
+                ],
+              ),
       ),
     );
   }
 }
-
 class _ChatSessionLoading extends StatelessWidget {
   const _ChatSessionLoading();
 
@@ -1212,6 +1251,7 @@ class _SinistroSelectionView extends StatelessWidget {
   final ValueChanged<SinistroVistoriaOption> onSelect;
 
   const _SinistroSelectionView({
+    super.key,
     required this.options,
     required this.onSelect,
   });
@@ -1317,29 +1357,84 @@ class _SinistroSelectionView extends StatelessWidget {
 }
 
 class _ChatHeader extends StatelessWidget {
-  const _ChatHeader();
+  final VistoriaSession? session;
+  final VoidCallback? onCloseChat;
+
+  const _ChatHeader({
+    this.session,
+    this.onCloseChat,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final idvistoria = session?.idvistoria.trim() ?? '';
+    final placa = session?.placa.trim() ?? '';
+
+    final subtitle = [
+      if (idvistoria.isNotEmpty) idvistoria,
+      if (placa.isNotEmpty) placa,
+    ].join(' • ');
+
     return Container(
-      height: 72,
-      padding: const EdgeInsets.symmetric(horizontal: 22),
+      padding: const EdgeInsets.fromLTRB(12, 12, 16, 12),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.80),
+        color: Colors.white.withOpacity(.92),
         border: Border(
           bottom: BorderSide(color: Colors.black.withOpacity(.05)),
         ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(.03),
+            blurRadius: 18,
+            offset: const Offset(0, 8),
+          ),
+        ],
       ),
       child: Row(
         children: [
-          Container(
-            width: 42,
-            height: 42,
-            decoration: BoxDecoration(
-              color: const Color(0xFF0057C0),
-              borderRadius: BorderRadius.circular(14),
+          if (onCloseChat != null) ...[
+            Material(
+              color: const Color(0xFFE5F6FF),
+              borderRadius: BorderRadius.circular(16),
+              child: InkWell(
+                onTap: onCloseChat,
+                borderRadius: BorderRadius.circular(16),
+                child: const SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: Icon(
+                    Icons.keyboard_arrow_left_rounded,
+                    color: Color(0xFF0057C0),
+                    size: 30,
+                  ),
+                ),
+              ),
             ),
-            child: const Icon(Icons.smart_toy, color: Colors.white, size: 22),
+            const SizedBox(width: 12),
+          ],
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF0057C0), Color(0xFF0474FB)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF0057C0).withOpacity(.18),
+                  blurRadius: 16,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            child: const Icon(
+              Icons.smart_toy_outlined,
+              color: Colors.white,
+              size: 23,
+            ),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -1348,37 +1443,27 @@ class _ChatHeader extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Chat IA',
+                  'Argos IA',
                   style: GoogleFonts.spaceGrotesk(
-                    fontSize: 22,
+                    color: const Color(0xFF1F2937),
+                    fontSize: 18,
                     fontWeight: FontWeight.bold,
-                    color: const Color(0xFF0057C0),
                   ),
                 ),
-                const Text(
-                  'Assistente de vistoria ativa',
-                  style: TextStyle(
-                    color: Color(0xFF414755),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle.isEmpty
+                      ? 'Assistente de vistoria inteligente'
+                      : subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFF6B7280),
                     fontSize: 12,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
               ],
-            ),
-          ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
-            decoration: BoxDecoration(
-              color: const Color(0xFFE5F6FF),
-              borderRadius: BorderRadius.circular(999),
-            ),
-            child: const Text(
-              'ONLINE',
-              style: TextStyle(
-                color: Color(0xFF0057C0),
-                fontSize: 10,
-                fontWeight: FontWeight.w900,
-              ),
             ),
           ),
         ],
@@ -1386,7 +1471,6 @@ class _ChatHeader extends StatelessWidget {
     );
   }
 }
-
 class _ChatBubble extends StatelessWidget {
   final ChatMessage message;
 

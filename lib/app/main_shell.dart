@@ -9,8 +9,7 @@ import '../features/profile/profile_page.dart';
 class MainShell extends StatefulWidget {
   final User user;
 
-  /// Quando informado pelo StartupGate, evita que o MainShell mostre outra
-  /// splash/loading para validar o perfil de novo.
+  /// Recebido do StartupGate para evitar segunda SplashPage/loading.
   final bool? initialProfileCompletionRequired;
 
   const MainShell({
@@ -189,9 +188,8 @@ class _MainShellState extends State<MainShell> {
   @override
   Widget build(BuildContext context) {
     if (isLoadingProfile) {
-      // Fallback de segurança para quando MainShell for aberto sem StartupGate.
-      // No fluxo normal atual, isso não aparece, porque o StartupGate já entrega
-      // initialProfileCompletionRequired carregado.
+      // Fallback para uso fora do StartupGate. No fluxo normal, o StartupGate
+      // já entrega initialProfileCompletionRequired e este bloco não aparece.
       return const SizedBox.expand();
     }
 

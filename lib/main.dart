@@ -1,5 +1,7 @@
 // lib/main.dart
 
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -59,12 +61,10 @@ class ArgosApp extends StatelessWidget {
 
 /// Gate único de inicialização.
 ///
-/// Ele mantém a SplashPage visível enquanto:
-/// - a animação da splash termina;
-/// - o Firebase Auth resolve o usuário;
-/// - se estiver logado, o status de cadastro do perfil é carregado.
-///
-/// Assim não existe segunda SplashPage nem tela intermediária com roda girando.
+/// Mostra a SplashPage uma única vez na abertura do app.
+/// Depois que a splash inicial saiu, o app continua ouvindo mudanças de login.
+/// Assim, quando o usuário faz login pelo Google/e-mail, a tela troca para o
+/// MainShell sem precisar reiniciar a SplashPage e sem mostrar roda intermediária.
 class StartupGate extends StatefulWidget {
   const StartupGate({super.key});
 
@@ -73,34 +73,84 @@ class StartupGate extends StatefulWidget {
 }
 
 class _StartupGateState extends State<StartupGate> {
+  StreamSubscription<User?>? _authSubscription;
+
   User? _user;
+
   bool _splashCompleted = false;
-  bool _bootstrapCompleted = false;
+  bool _authResolved = false;
+  bool _startupGateReleased = false;
+
+  bool _isResolvingProfile = false;
   bool _profileCompletionRequired = false;
+
+  int _authChangeToken = 0;
 
   @override
   void initState() {
     super.initState();
-    _bootstrap();
+
+    _authSubscription = FirebaseAuth.instance.authStateChanges().listen(
+      _handleAuthChanged,
+      onError: (error) {
+        debugPrint('Auth state error: $error');
+
+        if (!mounted) return;
+
+        setState(() {
+          _user = null;
+          _authResolved = true;
+          _isResolvingProfile = false;
+          _profileCompletionRequired = false;
+        });
+
+        _tryReleaseStartupGate();
+      },
+    );
   }
 
-  Future<void> _bootstrap() async {
-    final authUser = FirebaseAuth.instance.currentUser ??
-        await FirebaseAuth.instance.authStateChanges().first;
+  @override
+  void dispose() {
+    _authSubscription?.cancel();
+    super.dispose();
+  }
 
-    bool profileRequired = false;
-
-    if (authUser != null) {
-      profileRequired = await _loadProfileCompletionRequired(authUser);
-    }
+  Future<void> _handleAuthChanged(User? authUser) async {
+    final token = ++_authChangeToken;
 
     if (!mounted) return;
+
+    if (authUser == null) {
+      setState(() {
+        _user = null;
+        _authResolved = true;
+        _isResolvingProfile = false;
+        _profileCompletionRequired = false;
+      });
+
+      _tryReleaseStartupGate();
+      return;
+    }
+
+    setState(() {
+      _user = authUser;
+      _authResolved = true;
+      _isResolvingProfile = true;
+    });
+
+    _tryReleaseStartupGate();
+
+    final profileRequired = await _loadProfileCompletionRequired(authUser);
+
+    if (!mounted || token != _authChangeToken) return;
 
     setState(() {
       _user = authUser;
       _profileCompletionRequired = profileRequired;
-      _bootstrapCompleted = true;
+      _isResolvingProfile = false;
     });
+
+    _tryReleaseStartupGate();
   }
 
   Future<bool> _loadProfileCompletionRequired(User user) async {
@@ -151,20 +201,35 @@ class _StartupGateState extends State<StartupGate> {
     setState(() {
       _splashCompleted = true;
     });
+
+    _tryReleaseStartupGate();
+  }
+
+  void _tryReleaseStartupGate() {
+    if (!mounted || _startupGateReleased) return;
+
+    if (!_splashCompleted) return;
+    if (!_authResolved) return;
+
+    // Na abertura com usuário já logado, segura a splash até o perfil carregar.
+    // Depois que o gate já saiu da splash, novos logins não voltam para splash.
+    if (_user != null && _isResolvingProfile) return;
+
+    setState(() {
+      _startupGateReleased = true;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    final canLeaveSplash = _splashCompleted && _bootstrapCompleted;
-
-    if (!canLeaveSplash) {
+    if (!_startupGateReleased) {
       return SplashPage(
         key: const ValueKey('startup-splash'),
         onComplete: _finishSplash,
       );
     }
 
-    final user = _user;
+    final shouldShowMainShell = _user != null && !_isResolvingProfile;
 
     return Scaffold(
       body: Stack(
@@ -174,14 +239,14 @@ class _StartupGateState extends State<StartupGate> {
             duration: const Duration(milliseconds: 400),
             switchInCurve: Curves.easeOut,
             switchOutCurve: Curves.easeIn,
-            child: user == null
-                ? const LoginPage(key: ValueKey('login-page'))
-                : MainShell(
+            child: shouldShowMainShell
+                ? MainShell(
                     key: const ValueKey('main-shell'),
-                    user: user,
+                    user: _user!,
                     initialProfileCompletionRequired:
                         _profileCompletionRequired,
-                  ),
+                  )
+                : const LoginPage(key: ValueKey('login-page')),
           ),
         ],
       ),
