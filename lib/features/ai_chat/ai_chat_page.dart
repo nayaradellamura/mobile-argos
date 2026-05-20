@@ -502,6 +502,7 @@ class _AiChatPageState extends State<AiChatPage> {
     final role = data['role']?.toString() ?? '';
     final type = data['type']?.toString() ?? '';
     final text = data['text']?.toString() ?? '';
+    final imageUrl = data['url']?.toString();
     final createdAt = _dateFromFirestoreValue(data['createdAt']);
 
     if (text.trim().isEmpty && role != 'audio') return null;
@@ -518,6 +519,7 @@ class _AiChatPageState extends State<AiChatPage> {
       return ChatMessage(
         type: ChatMessageType.photo,
         text: text,
+        imagePath: imageUrl,
         createdAt: createdAt,
       );
     }
@@ -699,21 +701,38 @@ class _AiChatPageState extends State<AiChatPage> {
 
     for (final photo in photos) {
       try {
-        await VistoriaChatSessionService.instance.appendImageBase64FromFile(
+        final uploadedImage =
+            await VistoriaChatSessionService.instance.uploadImageFile(
           vistoriaDocId: session.docId,
           imagePath: photo.path,
         );
+
+        await VistoriaChatSessionService.instance.appendImageEvidence(
+          vistoriaDocId: session.docId,
+          imageUrl: uploadedImage.downloadUrl,
+          imagePath: photo.path,
+          imageId: uploadedImage.imageId,
+          storagePath: uploadedImage.storagePath,
+          fileName: uploadedImage.fileName,
+          contentType: uploadedImage.contentType,
+          sizeBytes: uploadedImage.sizeBytes,
+        );
+
+        await VistoriaChatSessionService.instance.appendChatMessage(
+          vistoriaDocId: session.docId,
+          role: 'photo',
+          text: 'Foto anexada à vistoria',
+          extraData: {
+            'imageId': uploadedImage.imageId,
+            'url': uploadedImage.downloadUrl,
+            'storagePath': uploadedImage.storagePath,
+            'fileName': uploadedImage.fileName,
+          },
+        );
       } catch (e) {
-        debugPrint('Erro ao salvar foto em base64 na vistoria: $e');
+        debugPrint('Erro ao salvar foto da vistoria no Storage: $e');
       }
     }
-
-    await VistoriaChatSessionService.instance.appendChatMessage(
-      vistoriaDocId: session.docId,
-      role: 'photo',
-      text:
-          '${photos.length} foto${photos.length > 1 ? 's' : ''} anexada${photos.length > 1 ? 's' : ''} à vistoria.',
-    );
 
     Future.delayed(const Duration(milliseconds: 650), () async {
       if (!mounted) return;
@@ -935,23 +954,12 @@ class _AiChatPageState extends State<AiChatPage> {
 
     try {
       final uploadedAudio = await UserAudioStorageService.instance
-    .uploadOriginalAudioForMp3Conversion(
-      localAudioPath: path,
+          .uploadOriginalAudioForMp3Conversion(
+            localAudioPath: path,
       idvistoria: session.idvistoria,
-      sinistroId: session.sinistroId,
-      duration: Duration(seconds: duration),
-    );
-
-      try {
-        await VistoriaChatSessionService.instance.appendAudioBase64FromFile(
-          vistoriaDocId: session.docId,
-          audioPath: path,
-          contentType: 'audio/mp4',
-        );
-      } catch (e) {
-        debugPrint('Erro ao salvar áudio em base64 na vistoria: $e');
-      }
-
+            sinistroId: session.sinistroId,
+            duration: Duration(seconds: duration),
+          );
       if (!mounted) return;
 
       setState(() {

@@ -3,12 +3,14 @@ import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 
 class VistoriaChatSessionService {
   VistoriaChatSessionService._();
   static final instance = VistoriaChatSessionService._();
 
   final _auth = FirebaseAuth.instance;
+  final _storage = FirebaseStorage.instance;
   final _db = FirebaseFirestore.instance;
 
   static const activeStatus = 'em_andamento';
@@ -237,6 +239,7 @@ class VistoriaChatSessionService {
       'status': activeStatus,
       'veiculo': veiculo,
       'lastAudioNumber': 0,
+      'lastImageNumber': 0,
       'agentLastTurnAt': Timestamp.fromDate(now),
       'agentBusinessExpiresAt': Timestamp.fromDate(agentExpiresAt),
       'agentSessionTtlSeconds': 86400,
@@ -314,23 +317,25 @@ class VistoriaChatSessionService {
     required String vistoriaDocId,
     required String role,
     required String text,
+    Map<String, dynamic>? extraData,
   }) async {
     final cleanText = text.trim();
-    if (cleanText.isEmpty) return;
+    if (cleanText.isEmpty && role != 'photo' && role != 'audio') return;
 
     await _assertVistoriaOwnedByCurrentUser(vistoriaDocId);
 
     final now = DateTime.now();
     final expiresAt = _addBusinessHours(now, agentTtlBusinessHours);
 
+    final messageData = {
+      'role': role,
+      'text': cleanText,
+      'createdAt': Timestamp.fromDate(now),
+      if (extraData != null) ...extraData,
+    };
+
     await _vistorias.doc(vistoriaDocId).set({
-      'chatmessages': FieldValue.arrayUnion([
-        {
-          'role': role,
-          'text': cleanText,
-          'createdAt': Timestamp.fromDate(now),
-        }
-      ]),
+      'chatmessages': FieldValue.arrayUnion([messageData]),
       'agentLastTurnAt': Timestamp.fromDate(now),
       'agentBusinessExpiresAt': Timestamp.fromDate(expiresAt),
       'agentSessionTtlSeconds': 86400,
@@ -341,6 +346,139 @@ class VistoriaChatSessionService {
       },
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
+  }
+
+  Future<UploadedVistoriaImage> uploadImageFile({
+    required String vistoriaDocId,
+    required String imagePath,
+  }) async {
+    await _assertVistoriaOwnedByCurrentUser(vistoriaDocId);
+
+    final file = File(imagePath);
+    if (!await file.exists()) {
+      throw FileSystemException('Arquivo de imagem não encontrado.', imagePath);
+    }
+
+    final originalFileName = file.uri.pathSegments.isEmpty
+        ? 'foto_${DateTime.now().millisecondsSinceEpoch}.jpg'
+        : file.uri.pathSegments.last;
+
+    final imageId = await _reserveNextImageId(vistoriaDocId);
+    final fileName = '$imageId.jpg';
+    final storagePath = 'vistorias/$vistoriaDocId/images/$fileName';
+    final sizeBytes = await file.length();
+
+    final ref = _storage.ref(storagePath);
+
+    await ref.putFile(
+      file,
+      SettableMetadata(
+        contentType: 'image/jpeg',
+        customMetadata: {
+          'idvistoria': vistoriaDocId,
+          'imageId': imageId,
+          'originalFileName': originalFileName,
+          'source': 'chat_camera',
+        },
+      ),
+    );
+
+    final downloadUrl = await ref.getDownloadURL();
+
+    return UploadedVistoriaImage(
+      imageId: imageId,
+      fileName: fileName,
+      storagePath: storagePath,
+      downloadUrl: downloadUrl,
+      contentType: 'image/jpeg',
+      sizeBytes: sizeBytes,
+    );
+  }
+
+  Future<String> _reserveNextImageId(String vistoriaDocId) async {
+    final ref = _vistorias.doc(vistoriaDocId);
+
+    return _db.runTransaction<String>((transaction) async {
+      final snap = await transaction.get(ref);
+
+      if (!snap.exists) {
+        throw Exception('Vistoria não encontrada: $vistoriaDocId');
+      }
+
+      final data = snap.data() ?? {};
+      final current = _imageCounterValue(data);
+      final next = current + 1;
+      final idvistoria = _safeStorageName(
+        _str(data['idvistoria'], fallback: vistoriaDocId),
+      );
+      final imageId = '${idvistoria}_IMG_$next';
+
+      transaction.set(
+        ref,
+        {
+          'lastImageNumber': next,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+
+      return imageId;
+    });
+  }
+
+  int _imageCounterValue(Map<String, dynamic> data) {
+    final raw = data['lastImageNumber'];
+
+    if (raw is int) return raw;
+    if (raw is num) return raw.toInt();
+
+    final parsed = int.tryParse(raw?.toString() ?? '');
+    if (parsed != null) return parsed;
+
+    final images = data['images'];
+    if (images is List) return images.length;
+
+    return 0;
+  }
+
+  Future<void> appendImageEvidence({
+    required String vistoriaDocId,
+    required String imageUrl,
+    required String imagePath,
+    String? imageId,
+    String? storagePath,
+    String? fileName,
+    String contentType = 'image/jpeg',
+    int? sizeBytes,
+  }) async {
+    await _assertVistoriaOwnedByCurrentUser(vistoriaDocId);
+
+    final file = File(imagePath);
+    final resolvedSizeBytes =
+        sizeBytes ?? (await file.exists() ? await file.length() : 0);
+
+    final evidence = {
+      if (imageId != null && imageId.trim().isNotEmpty) 'imageId': imageId,
+      'url': imageUrl,
+      if (storagePath != null && storagePath.trim().isNotEmpty)
+        'storagePath': storagePath,
+      'fileName': fileName?.trim().isNotEmpty == true
+          ? fileName!.trim()
+          : file.uri.pathSegments.isEmpty
+              ? '${imageId ?? 'image_${DateTime.now().millisecondsSinceEpoch}'}.jpg'
+              : file.uri.pathSegments.last,
+      'contentType': contentType,
+      'sizeBytes': resolvedSizeBytes,
+      'createdAt': Timestamp.now(),
+    };
+
+    await _vistorias.doc(vistoriaDocId).set(
+      {
+        'images': FieldValue.arrayUnion([evidence]),
+        'updatedAt': FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
   }
 
   Future<String> appendImageBase64FromFile({
@@ -712,6 +850,14 @@ class VistoriaChatSessionService {
     return '$marca $modelo';
   }
 
+  static String _safeStorageName(String value) {
+    return value
+        .trim()
+        .replaceAll('-', '_')
+        .replaceAll(RegExp(r'[^A-Za-z0-9_]'), '_')
+        .replaceAll(RegExp(r'_+'), '_');
+  }
+
   static String _formatDate(DateTime date) {
     final d = date.day.toString().padLeft(2, '0');
     final m = date.month.toString().padLeft(2, '0');
@@ -724,6 +870,24 @@ class VistoriaChatSessionService {
     final m = date.minute.toString().padLeft(2, '0');
     return '$h:$m';
   }
+}
+
+class UploadedVistoriaImage {
+  final String imageId;
+  final String fileName;
+  final String storagePath;
+  final String downloadUrl;
+  final String contentType;
+  final int sizeBytes;
+
+  const UploadedVistoriaImage({
+    required this.imageId,
+    required this.fileName,
+    required this.storagePath,
+    required this.downloadUrl,
+    required this.contentType,
+    required this.sizeBytes,
+  });
 }
 
 class VistoriaSession {
