@@ -922,21 +922,13 @@ class _AiChatPageState extends State<AiChatPage> {
 
     try {
       final uploadedAudio = await UserAudioStorageService.instance
-          .uploadOriginalAudioForMp3Conversion(
-            localAudioPath: path,
-            sinistroId: session.sinistroId,
-            duration: Duration(seconds: duration),
-          );
+     .uploadOriginalAudioForMp3Conversion(
+      localAudioPath: path,
+      idvistoria: session.idvistoria,
+      sinistroId: session.sinistroId,
+      duration: Duration(seconds: duration),
+    );
 
-      try {
-        await VistoriaChatSessionService.instance.appendAudioBase64FromFile(
-          vistoriaDocId: session.docId,
-          audioPath: path,
-          contentType: 'audio/mp4',
-        );
-      } catch (e) {
-        debugPrint('Erro ao salvar áudio em base64 na vistoria: $e');
-      }
 
       if (!mounted) return;
 

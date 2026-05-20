@@ -1,7 +1,6 @@
 
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -457,11 +456,35 @@ class VistoriaChatSessionService {
     );
   }
 
-  String _createVistoriaId() {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final random = Random().nextInt(999999).toString().padLeft(6, '0');
-    return 'vistoria_${now}_$random';
-  }
+ Future<String> _createVistoriaId() async {
+  final year = DateTime.now().year;
+  final counterRef = _db.collection('counters').doc('vistorias_$year');
+
+  final nextNumber = await _db.runTransaction<int>((transaction) async {
+    final snapshot = await transaction.get(counterRef);
+    final data = snapshot.data();
+
+    final current = snapshot.exists && data != null
+        ? (data['lastNumber'] as int? ?? 0)
+        : 0;
+
+    final next = current + 1;
+
+    transaction.set(
+      counterRef,
+      {
+        'lastNumber': next,
+        'year': year,
+        'updatedAt': FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
+
+    return next;
+  });
+
+  return 'VIS-$year-${nextNumber.toString().padLeft(4, '0')}';
+}
 
   static bool _hasCheckIn(dynamic value) {
     final text = _str(value).toLowerCase();

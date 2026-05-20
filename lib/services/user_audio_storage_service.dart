@@ -7,14 +7,17 @@ import 'package:firebase_storage/firebase_storage.dart';
 
 /// Serviço para gravar o áudio do chat já convertido em MP3 no Firebase Storage.
 ///
-/// Estrutura final no Storage:
-/// users/{email_da_pessoa_logada}/audios/{audioId}.mp3
+/// Nova estrutura final no Storage:
+/// vistorias/{idvistoria}/audio/{audioId}.mp3
 ///
 /// Exemplo:
-/// users/matheus.opuscolo@gmail.com/audios/audio_1715200000000.mp3
+/// vistorias/VIS-2026-0001/audio/VIS_2026_0001_AUD_01.mp3
 ///
-/// Também grava metadados em:
-/// users/{email_da_pessoa_logada}/audios/{audioId}
+/// Observação:
+/// Este service NÃO grava mais áudio em base64 no Firestore.
+/// A subcoleção vistorias/{idvistoria}/audios/{audioId} continua sendo gravada
+/// pela Cloud Function sendArgosAudioMessage, com storagePath, gcsUri,
+/// transcricaoOriginal, transcricaoRevisada e agentReply.
 class UserAudioStorageService {
   UserAudioStorageService._();
 
@@ -24,17 +27,20 @@ class UserAudioStorageService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseStorage _storage = FirebaseStorage.instance;
 
-  /// Mantive o nome do método para não precisar alterar o ai_chat_page.dart.
+  /// Mantive o nome do método para reduzir impacto no ai_chat_page.dart.
   ///
   /// Agora ele:
   /// 1. Recebe o áudio local gravado em .m4a.
-  /// 2. Converte no dispositivo para .mp3 usando audio_converter_native.
-  /// 3. Salva somente o MP3 no Storage em:
-  ///    users/{email}/audios/{audioId}.mp3
-  /// 4. Cria/atualiza metadados no Firestore em:
-  ///    users/{email}/audios/{audioId}
+  /// 2. Gera um ID sequencial por vistoria:
+  ///    VIS_2026_0001_AUD_01, VIS_2026_0001_AUD_02...
+  /// 3. Converte no dispositivo para .mp3 usando audio_converter_native.
+  /// 4. Salva somente o MP3 no Storage em:
+  ///    vistorias/{idvistoria}/audio/{audioId}.mp3
+  /// 5. Retorna o storagePath para a Cloud Function salvar na subcoleção:
+  ///    vistorias/{idvistoria}/audios/{audioId}
   Future<UploadedUserAudio> uploadOriginalAudioForMp3Conversion({
     required String localAudioPath,
+    required String idvistoria,
     String? sinistroId,
     String? chatMessageId,
     Duration? duration,
@@ -49,15 +55,17 @@ class UserAudioStorageService {
       );
     }
 
-    final email = _normalizeEmail(user.email);
+    final cleanVistoriaId = idvistoria.trim();
 
-    if (email.isEmpty) {
+    if (cleanVistoriaId.isEmpty) {
       throw FirebaseException(
-        plugin: 'firebase_auth',
-        code: 'missing-email',
-        message: 'Não foi possível identificar o e-mail do usuário logado.',
+        plugin: 'cloud_firestore',
+        code: 'missing-idvistoria',
+        message: 'idvistoria é obrigatório para salvar áudio da vistoria.',
       );
     }
+
+    final email = _normalizeEmail(user.email);
 
     final originalFile = File(localAudioPath);
 
@@ -68,46 +76,23 @@ class UserAudioStorageService {
       );
     }
 
-    final audioId = _buildAudioId();
-    final mp3StoragePath = 'users/$email/audios/$audioId.mp3';
-
-    final audioDocRef = _firestore
-        .collection('users')
-        .doc(email)
-        .collection('audios')
-        .doc(audioId);
-
-    await audioDocRef.set({
-      'uid': user.uid,
-      'email': email,
-      'audioId': audioId,
-      'sinistroId': sinistroId ?? '',
-      'chatMessageId': chatMessageId ?? '',
-      'localAudioPath': localAudioPath,
-      'mp3StoragePath': mp3StoragePath,
-      'mp3DownloadUrl': '',
-      'mp3ContentType': 'audio/mpeg',
-      'mp3Status': 'converting_on_device',
-      'conversionEngine': 'audio_converter_native',
-      'durationSeconds': duration == null ? null : duration.inSeconds,
-      'createdAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    final audioId = await _createSequentialAudioId(cleanVistoriaId);
+    final mp3StoragePath = 'vistorias/$cleanVistoriaId/audio/$audioId.mp3';
 
     try {
-      final converterAvailable = await AudioConverterService.instance
-          .isAvailable();
+      final converterAvailable =
+          await AudioConverterService.instance.isAvailable();
 
       if (!converterAvailable) {
         throw Exception('Conversor nativo indisponível neste dispositivo.');
       }
 
-      final dynamic conversionResult = await AudioConverterService.instance
-          .convertToMP3(
-            inputPath: localAudioPath,
-            bitrate: 128,
-            sampleRate: 44100,
-          );
+      final dynamic conversionResult =
+          await AudioConverterService.instance.convertToMP3(
+        inputPath: localAudioPath,
+        bitrate: 128,
+        sampleRate: 44100,
+      );
 
       final bool success = conversionResult.success == true;
       final String outputPath = conversionResult.outputPath?.toString() ?? '';
@@ -128,12 +113,6 @@ class UserAudioStorageService {
         );
       }
 
-      await audioDocRef.set({
-        'mp3Status': 'uploading',
-        'convertedLocalPath': outputPath,
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-
       final mp3Ref = _storage.ref(mp3StoragePath);
 
       await mp3Ref.putFile(
@@ -144,113 +123,92 @@ class UserAudioStorageService {
             'uid': user.uid,
             'email': email,
             'audioId': audioId,
+            'idvistoria': cleanVistoriaId,
             'conversionEngine': 'audio_converter_native',
             if (sinistroId != null && sinistroId.trim().isNotEmpty)
-              'sinistroId': sinistroId,
+              'sinistroId': sinistroId.trim(),
             if (chatMessageId != null && chatMessageId.trim().isNotEmpty)
-              'chatMessageId': chatMessageId,
+              'chatMessageId': chatMessageId.trim(),
+            if (duration != null) 'durationSeconds': '${duration.inSeconds}',
           },
         ),
       );
 
       final mp3DownloadUrl = await mp3Ref.getDownloadURL();
 
-      await audioDocRef.set({
-        'mp3DownloadUrl': mp3DownloadUrl,
-        'mp3Status': 'done',
-        'convertedAt': FieldValue.serverTimestamp(),
-        'uploadedAt': FieldValue.serverTimestamp(),
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-
       return UploadedUserAudio(
         uid: user.uid,
         email: email,
         audioId: audioId,
+        idvistoria: cleanVistoriaId,
         mp3StoragePath: mp3StoragePath,
         mp3DownloadUrl: mp3DownloadUrl,
-        audioDocPath: audioDocRef.path,
 
         // Campos mantidos por compatibilidade com o ai_chat_page.dart atual.
         // Agora apontam para o próprio MP3, porque não subimos mais o .m4a.
         originalStoragePath: mp3StoragePath,
         originalDownloadUrl: mp3DownloadUrl,
       );
-    } catch (error) {
-      await audioDocRef.set({
-        'mp3Status': 'error',
-        'errorMessage': error.toString(),
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-
+    } catch (_) {
+      // Se falhar após reservar o número, não decrementamos o contador.
+      // Isso evita colisão de nome. Pode ficar um "buraco" na sequência,
+      // mas nunca teremos dois AUD_01 para a mesma vistoria.
       rethrow;
     }
   }
 
-  Stream<DocumentSnapshot<Map<String, dynamic>>> watchAudioConversion({
-    required String audioId,
-  }) {
-    final user = _auth.currentUser;
-    final email = _normalizeEmail(user?.email);
+  /// Gera o próximo ID de áudio dentro da vistoria usando transaction.
+  ///
+  /// Salva/atualiza no documento vistorias/{idvistoria}:
+  /// lastAudioNumber: 1, 2, 3...
+  ///
+  /// Retorna:
+  /// VIS_2026_0001_AUD_01
+  Future<String> _createSequentialAudioId(String idvistoria) async {
+    final vistoriaRef = _firestore.collection('vistorias').doc(idvistoria);
 
-    if (user == null || email.isEmpty) {
-      throw FirebaseException(
-        plugin: 'firebase_auth',
-        code: 'not-authenticated',
-        message: 'Usuário precisa estar logado para acompanhar áudio.',
+    final nextNumber = await _firestore.runTransaction<int>((transaction) async {
+      final snapshot = await transaction.get(vistoriaRef);
+
+      if (!snapshot.exists) {
+        throw FirebaseException(
+          plugin: 'cloud_firestore',
+          code: 'vistoria-not-found',
+          message: 'Vistoria não encontrada: $idvistoria',
+        );
+      }
+
+      final data = snapshot.data() ?? {};
+      final current = data['lastAudioNumber'] is int
+          ? data['lastAudioNumber'] as int
+          : 0;
+
+      final next = current + 1;
+
+      transaction.set(
+        vistoriaRef,
+        {
+          'lastAudioNumber': next,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
       );
-    }
 
-    return _firestore
-        .collection('users')
-        .doc(email)
-        .collection('audios')
-        .doc(audioId)
-        .snapshots();
+      return next;
+    });
+
+    final safeVistoriaId = _safeStorageName(idvistoria);
+    final number = nextNumber.toString().padLeft(2, '0');
+
+    return '${safeVistoriaId}_AUD_$number';
   }
 
-  Future<String?> getMp3DownloadUrl({required String audioId}) async {
-    final user = _auth.currentUser;
-    final email = _normalizeEmail(user?.email);
-
-    if (user == null || email.isEmpty) {
-      throw FirebaseException(
-        plugin: 'firebase_auth',
-        code: 'not-authenticated',
-        message: 'Usuário precisa estar logado para buscar áudio.',
-      );
-    }
-
-    final doc = await _firestore
-        .collection('users')
-        .doc(email)
-        .collection('audios')
-        .doc(audioId)
-        .get();
-
-    final data = doc.data();
-
-    if (data == null) return null;
-
-    final status = data['mp3Status']?.toString() ?? '';
-    final savedUrl = data['mp3DownloadUrl']?.toString() ?? '';
-    final mp3StoragePath = data['mp3StoragePath']?.toString() ?? '';
-
-    if (status != 'done') return null;
-
-    if (savedUrl.isNotEmpty) {
-      return savedUrl;
-    }
-
-    if (mp3StoragePath.isEmpty) {
-      return null;
-    }
-
-    return _storage.ref(mp3StoragePath).getDownloadURL();
-  }
-
-  String _buildAudioId() {
-    return 'audio_${DateTime.now().millisecondsSinceEpoch}';
+  String _safeStorageName(String value) {
+    return value
+        .trim()
+        .replaceAll('-', '_')
+        .replaceAll(RegExp(r'[^A-Za-z0-9_]'), '_')
+        .replaceAll(RegExp(r'_+'), '_');
   }
 
   String _normalizeEmail(String? email) {
@@ -262,15 +220,12 @@ class UploadedUserAudio {
   final String uid;
   final String email;
   final String audioId;
+  final String idvistoria;
 
   /// Caminho final do MP3 no Storage:
-  /// users/{email}/audios/{audioId}.mp3
+  /// vistorias/{idvistoria}/audio/{audioId}.mp3
   final String mp3StoragePath;
   final String mp3DownloadUrl;
-
-  /// Caminho do documento no Firestore:
-  /// users/{email}/audios/{audioId}
-  final String audioDocPath;
 
   /// Campos mantidos por compatibilidade com o chat atual.
   /// Como agora salvamos somente MP3, eles apontam para o mesmo arquivo MP3.
@@ -281,9 +236,9 @@ class UploadedUserAudio {
     required this.uid,
     required this.email,
     required this.audioId,
+    required this.idvistoria,
     required this.mp3StoragePath,
     required this.mp3DownloadUrl,
-    required this.audioDocPath,
     required this.originalStoragePath,
     required this.originalDownloadUrl,
   });

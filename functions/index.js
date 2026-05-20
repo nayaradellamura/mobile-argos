@@ -6,8 +6,6 @@ const admin = require("firebase-admin");
 const dialogflowCx = require("@google-cloud/dialogflow-cx");
 const { VertexAI } = require("@google-cloud/vertexai");
 
-// Firebase Admin usa a credencial padrão da Function no projeto fho-argos.
-// Não use service account do Dialogflow aqui, senão FCM/Firestore/Storage podem falhar.
 if (!admin.apps.length) {
   admin.initializeApp({
     projectId:
@@ -17,21 +15,14 @@ if (!admin.apps.length) {
   });
 }
 
-// Projeto/agent do Dialogflow CX.
 const DIALOGFLOW_PROJECT_ID = "upheld-magpie-404322";
 const LOCATION = "us-central1";
 const AGENT_ID = "8ece03b0-a71c-4860-818f-422d9c61ddac";
 const LANGUAGE_CODE = "pt-BR";
 
-// Secrets corretos.
-// O defineSecret recebe o NOME do secret, nunca o valor.
-// Configure com:
-// firebase functions:secrets:set DIALOGFLOW_CLIENT_EMAIL
-// firebase functions:secrets:set DIALOGFLOW_PRIVATE_KEY
 const DIALOGFLOW_CLIENT_EMAIL = defineSecret("DIALOGFLOW_CLIENT_EMAIL");
 const DIALOGFLOW_PRIVATE_KEY = defineSecret("DIALOGFLOW_PRIVATE_KEY");
 
-// Projeto principal do app/backend: fho-argos.
 const FIREBASE_PROJECT_ID =
   process.env.GCLOUD_PROJECT ||
   process.env.GCP_PROJECT ||
@@ -44,11 +35,8 @@ const GEMINI_REVIEW_MODEL = "gemini-2.5-flash";
 let cachedDialogflowClient = null;
 let cachedGeminiModel = null;
 
-
 function getDialogflowClient() {
-  if (cachedDialogflowClient) {
-    return cachedDialogflowClient;
-  }
+  if (cachedDialogflowClient) return cachedDialogflowClient;
 
   const clientEmail = DIALOGFLOW_CLIENT_EMAIL.value();
   const privateKey = DIALOGFLOW_PRIVATE_KEY.value().replace(/\\n/g, "\n");
@@ -72,9 +60,7 @@ function getDialogflowClient() {
 }
 
 function getGeminiReviewModel() {
-  if (cachedGeminiModel) {
-    return cachedGeminiModel;
-  }
+  if (cachedGeminiModel) return cachedGeminiModel;
 
   const vertexAI = new VertexAI({
     project: VERTEX_PROJECT_ID,
@@ -107,16 +93,11 @@ function extractDialogflowReply(response) {
 
   for (const message of messages) {
     if (message.text?.text && Array.isArray(message.text.text)) {
-      for (const text of message.text.text) {
-        parts.push(text);
-      }
+      for (const text of message.text.text) parts.push(text);
     }
   }
 
-  return (
-    parts.join("\n").trim() ||
-    "Entendi. Pode continuar descrevendo a vistoria."
-  );
+  return parts.join("\n").trim() || "Entendi. Pode continuar descrevendo a vistoria.";
 }
 
 exports.sendArgosMessage = onCall(
@@ -126,48 +107,52 @@ exports.sendArgosMessage = onCall(
   },
   async (request) => {
     if (!request.auth) {
-      throw new HttpsError(
-        "unauthenticated",
-        "Usuário precisa estar autenticado."
-      );
+      throw new HttpsError("unauthenticated", "Usuário precisa estar autenticado.");
     }
 
     const uid = request.auth.uid;
     const text = String(request.data.text || request.data.message || "").trim();
     const inspectionId = String(
-      request.data.inspectionId || request.data.sinistroId || "INS-001"
+      request.data.inspectionId || request.data.idvistoria || request.data.sinistroId || "INS-001"
     ).trim();
 
-    if (!text) {
-      throw new HttpsError("invalid-argument", "Mensagem vazia.");
-    }
+    if (!text) throw new HttpsError("invalid-argument", "Mensagem vazia.");
 
     try {
+      const context = await loadArgosInspectionContext({
+        inspectionId,
+        sinistroId: request.data.sinistroId,
+      });
+
+      const sessionParameters = buildArgosSessionParameters({
+        inspectionId,
+        sinistroId: context.sinistroId || request.data.sinistroId || "",
+        vistoria: context.vistoria,
+        sinistro: context.sinistro,
+        extra: request.data.parameters || {},
+      });
+
+      console.log("Parâmetros enviados ao agente Argos:", sessionParameters);
+
       const reply = await sendTextToArgosAgent({
         uid,
         inspectionId,
         text,
+        sessionParameters,
       });
 
-      return {
-        reply,
-        inspectionId,
-      };
+      return { reply, inspectionId, sessionParameters };
     } catch (error) {
       console.error("Erro no Dialogflow CX:", error);
       console.error("code:", error.code);
       console.error("message:", error.message);
       console.error("details:", error.details);
 
-      throw new HttpsError(
-        "internal",
-        "Falha na comunicação com o Argos.",
-        {
-          code: error.code || null,
-          message: error.message || null,
-          details: error.details || null,
-        }
-      );
+      throw new HttpsError("internal", "Falha na comunicação com o Argos.", {
+        code: error.code || null,
+        message: error.message || null,
+        details: error.details || null,
+      });
     }
   }
 );
@@ -182,21 +167,20 @@ exports.notifySinistroChanges = onDocumentWritten(
 
     const beforeExists = event.data.before.exists;
     const afterExists = event.data.after.exists;
-
     if (!afterExists) return;
 
     const sinistroId = event.params.sinistroId;
     const before = beforeExists ? event.data.before.data() : null;
     const after = event.data.after.data();
-
     if (!after) return;
 
+    if (beforeExists && before && shouldIgnoreSinistroNotificationUpdate(before, after)) {
+      console.log("Ignorando atualização de presença/viewers:", { sinistroId });
+      return;
+    }
+
     const credenciadoId = String(
-      after.credenciadoId ||
-        after.credenciadoID ||
-        after.workshopId ||
-        after.oficinaId ||
-        ""
+      after.credenciadoId || after.credenciadoID || after.workshopId || after.oficinaId || ""
     ).trim();
 
     if (!credenciadoId) {
@@ -217,11 +201,7 @@ exports.notifySinistroChanges = onDocumentWritten(
     }
 
     const db = admin.firestore();
-
-    const credenciadoSnap = await db
-      .collection("credenciados")
-      .doc(credenciadoId)
-      .get();
+    const credenciadoSnap = await db.collection("credenciados").doc(credenciadoId).get();
 
     if (!credenciadoSnap.exists) {
       console.log("Credenciado não encontrado:", credenciadoId);
@@ -239,7 +219,6 @@ exports.notifySinistroChanges = onDocumentWritten(
     }
 
     const tokenEntries = await loadTokenEntriesForUids(funcionariosUids);
-
     if (tokenEntries.length === 0) {
       console.log("Nenhum token encontrado para:", funcionariosUids);
       return;
@@ -278,42 +257,20 @@ exports.sendArgosAudioMessage = onCall(
   },
   async (request) => {
     if (!request.auth) {
-      throw new HttpsError(
-        "unauthenticated",
-        "Usuário precisa estar autenticado."
-      );
+      throw new HttpsError("unauthenticated", "Usuário precisa estar autenticado.");
     }
 
     const uid = request.auth.uid;
     const data = request.data || {};
 
-    const idvistoria = String(
-      data.idvistoria || data.inspectionId || ""
-    ).trim();
-
+    const idvistoria = String(data.idvistoria || data.inspectionId || "").trim();
     const sinistroId = String(data.sinistroId || "").trim();
-
-    const audioId = String(
-      data.audioId || `audio_${Date.now()}`
-    ).trim();
-
+    const audioId = String(data.audioId || `audio_${Date.now()}`).trim();
     const storagePath = String(data.storagePath || "").trim();
-
     const bucket = String(data.bucket || "").trim();
 
-    if (!idvistoria) {
-      throw new HttpsError(
-        "invalid-argument",
-        "idvistoria é obrigatório."
-      );
-    }
-
-    if (!storagePath) {
-      throw new HttpsError(
-        "invalid-argument",
-        "storagePath é obrigatório."
-      );
-    }
+    if (!idvistoria) throw new HttpsError("invalid-argument", "idvistoria é obrigatório.");
+    if (!storagePath) throw new HttpsError("invalid-argument", "storagePath é obrigatório.");
 
     const bucketName = bucket || `${FIREBASE_PROJECT_ID}.firebasestorage.app`;
     const gcsUri = `gs://${bucketName}/${storagePath}`;
@@ -351,38 +308,29 @@ exports.sendArgosAudioMessage = onCall(
       const vistoriaSnap = await vistoriaRef.get();
       const vistoria = vistoriaSnap.data() || {};
 
-    const audioAnalysis = await transcribeAndReviewAudioWithGemini({
-      gcsUri,
-      idvistoria,
-      sinistroId,
-      vistoria,
-    });
+      const sinistroSnap = sinistroId
+        ? await db.collection("sinistro").doc(sinistroId).get()
+        : null;
+      const sinistro = sinistroSnap?.exists ? sinistroSnap.data() || {} : {};
 
-    const originalTranscript = audioAnalysis.transcricaoOriginal;
-    const revisedTranscript = audioAnalysis.transcricaoRevisada;
+      const audioAnalysis = await transcribeAndReviewAudioWithGemini({
+        gcsUri,
+        idvistoria,
+        sinistroId,
+        vistoria,
+      });
 
-    if (!originalTranscript && !revisedTranscript) {
-      throw new Error("Gemini não conseguiu transcrever o áudio.");
-    }
+      const originalTranscript = audioAnalysis.transcricaoOriginal;
+      const revisedTranscript = audioAnalysis.transcricaoRevisada;
 
-    await audioRef.set(
-      {
-        transcriptionStatus: "done",
-        transcricaoOriginal: originalTranscript,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
-
-    console.log("Áudio transcrito pelo Gemini:", {
-      idvistoria,
-      audioId,
-      originalChars: originalTranscript.length,
-      revisedChars: revisedTranscript.length,
-    });
+      if (!originalTranscript && !revisedTranscript) {
+        throw new Error("Gemini não conseguiu transcrever o áudio.");
+      }
 
       await audioRef.set(
         {
+          transcriptionStatus: "done",
+          transcricaoOriginal: originalTranscript,
           reviewStatus: "done",
           transcricaoRevisada: revisedTranscript,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -390,16 +338,28 @@ exports.sendArgosAudioMessage = onCall(
         { merge: true }
       );
 
-      console.log("Transcrição revisada com Gemini:", {
+      console.log("Áudio transcrito pelo Gemini:", {
         idvistoria,
         audioId,
-        chars: revisedTranscript.length,
+        originalChars: originalTranscript.length,
+        revisedChars: revisedTranscript.length,
       });
+
+      const sessionParameters = buildArgosSessionParameters({
+        inspectionId: idvistoria,
+        sinistroId,
+        vistoria,
+        sinistro,
+        extra: data.parameters || {},
+      });
+
+      console.log("Parâmetros enviados ao agente Argos no áudio:", sessionParameters);
 
       const reply = await sendTextToArgosAgent({
         uid,
         inspectionId: idvistoria,
         text: revisedTranscript,
+        sessionParameters,
       });
 
       const now = admin.firestore.Timestamp.now();
@@ -453,6 +413,7 @@ exports.sendArgosAudioMessage = onCall(
         originalTranscript,
         revisedTranscript,
         reply,
+        sessionParameters,
       };
     } catch (error) {
       console.error("Erro em sendArgosAudioMessage:", error);
@@ -468,72 +429,91 @@ exports.sendArgosAudioMessage = onCall(
         { merge: true }
       );
 
-      throw new HttpsError(
-        "internal",
-        "Não foi possível processar o áudio do chat.",
-        {
-          message: error.message || String(error),
-        }
-      );
+      throw new HttpsError("internal", "Não foi possível processar o áudio do chat.", {
+        message: error.message || String(error),
+      });
     }
   }
 );
 
 function buildSinistroNotification({ sinistroId, before, after, isCreate }) {
   const protocol = String(after.protocol || sinistroId);
-
   const vehicle = after.veiculoSnapshot || after.vehicleSnapshot || {};
   const plate = String(vehicle.placa || after.plate || "");
   const brand = String(vehicle.marca || "");
   const model = String(vehicle.modelo || after.vehicle || "");
   const claimType = String(after.claimType || "Vistoria");
-
-  const vehicleLabel = [brand, model, plate]
-    .filter((item) => item && item.trim())
-    .join(" ");
+  const vehicleLabel = [brand, model, plate].filter((item) => item && item.trim()).join(" ");
 
   if (isCreate) {
-    return {
-      title: "Nova vistoria atribuída",
-      body: `${protocol} · ${vehicleLabel || claimType}`,
-    };
+    return { title: "Nova vistoria atribuída", body: `${protocol} · ${vehicleLabel || claimType}` };
   }
 
   if (String(before?.status || "") !== String(after.status || "")) {
-    return {
-      title: "Status da vistoria atualizado",
-      body: `${protocol} mudou para ${after.status || "novo status"}`,
-    };
+    return { title: "Status da vistoria atualizado", body: `${protocol} mudou para ${after.status || "novo status"}` };
   }
 
   if (String(before?.priority || "") !== String(after.priority || "")) {
-    return {
-      title: "Prioridade da vistoria alterada",
-      body: `${protocol} agora está com prioridade ${after.priority}`,
-    };
+    return { title: "Prioridade da vistoria alterada", body: `${protocol} agora está com prioridade ${after.priority}` };
   }
 
   if (String(before?.scheduledDate || "") !== String(after.scheduledDate || "")) {
-    return {
-      title: "Agendamento atualizado",
-      body: `${protocol} teve o horário de vistoria alterado`,
-    };
+    return { title: "Agendamento atualizado", body: `${protocol} teve o horário de vistoria alterado` };
   }
 
   const beforeCheckIn = String(before?.checkInAt || "");
   const afterCheckIn = String(after.checkInAt || "");
 
   if (!beforeCheckIn && afterCheckIn) {
-    return {
-      title: "Check-in realizado",
-      body: `${protocol} teve check-in registrado na oficina`,
-    };
+    return { title: "Check-in realizado", body: `${protocol} teve check-in registrado na oficina` };
   }
 
-  return {
-    title: "Vistoria atualizada",
-    body: `${protocol} recebeu uma nova atualização`,
-  };
+  return { title: "Vistoria atualizada", body: `${protocol} recebeu uma nova atualização` };
+}
+
+function shouldIgnoreSinistroNotificationUpdate(before, after) {
+  const ignoredFields = new Set([
+    "activeViewers",
+    "activeViewersCount",
+    "activeViewersUpdatedAt",
+    "viewersUpdatedAt",
+    "lastViewerAt",
+  ]);
+
+  const changedFields = getChangedTopLevelFields(before, after);
+  if (changedFields.length === 0) return true;
+
+  return changedFields.every((field) => ignoredFields.has(field));
+}
+
+function getChangedTopLevelFields(before, after) {
+  const keys = new Set([...Object.keys(before || {}), ...Object.keys(after || {})]);
+  const changed = [];
+
+  for (const key of keys) {
+    const beforeValue = before ? before[key] : undefined;
+    const afterValue = after ? after[key] : undefined;
+
+    if (stableStringify(beforeValue) !== stableStringify(afterValue)) {
+      changed.push(key);
+    }
+  }
+
+  return changed;
+}
+
+function stableStringify(value) {
+  if (value === null || value === undefined) return String(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+
+  if (typeof value === "object") {
+    if (typeof value.toMillis === "function") return `timestamp:${value.toMillis()}`;
+
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((key) => `${key}:${stableStringify(value[key])}`).join(",")}}`;
+  }
+
+  return JSON.stringify(value);
 }
 
 async function loadTokenEntriesForUids(uids) {
@@ -542,26 +522,16 @@ async function loadTokenEntriesForUids(uids) {
 
   for (const uid of uids) {
     const safeUid = String(uid || "").trim();
-
     if (!safeUid) continue;
 
-    const tokensSnap = await db
-      .collection("userDevices")
-      .doc(safeUid)
-      .collection("tokens")
-      .get();
+    const tokensSnap = await db.collection("userDevices").doc(safeUid).collection("tokens").get();
 
     tokensSnap.forEach((doc) => {
       const data = doc.data() || {};
       const token = String(data.token || "").trim();
-
       if (!token) return;
 
-      tokenMap.set(token, {
-        token,
-        uid: safeUid,
-        ref: doc.ref,
-      });
+      tokenMap.set(token, { token, uid: safeUid, ref: doc.ref });
     });
   }
 
@@ -578,17 +548,11 @@ async function sendPushToTokenEntries({ tokenEntries, title, body, data }) {
 
     const response = await admin.messaging().sendEachForMulticast({
       tokens,
-      notification: {
-        title,
-        body,
-      },
+      notification: { title, body },
       data,
       android: {
         priority: "high",
-        notification: {
-          channelId: "argos_vistorias",
-          sound: "default",
-        },
+        notification: { channelId: "argos_vistorias", sound: "default" },
       },
     });
 
@@ -635,37 +599,22 @@ async function sendPushToTokenEntries({ tokenEntries, title, body, data }) {
     await Promise.all(cleanupPromises);
   }
 
-  return {
-    successCount: totalSuccess,
-    failureCount: totalFailure,
-  };
+  return { successCount: totalSuccess, failureCount: totalFailure };
 }
 
-async function transcribeAndReviewAudioWithGemini({
-  gcsUri,
-  idvistoria,
-  sinistroId,
-  vistoria,
-}) {
+async function transcribeAndReviewAudioWithGemini({ gcsUri, idvistoria, sinistroId, vistoria }) {
   console.log("Gemini recebendo áudio:", gcsUri);
 
   const match = gcsUri.match(/^gs:\/\/([^/]+)\/(.+)$/);
-
-  if (!match) {
-    throw new Error(`GCS URI inválida: ${gcsUri}`);
-  }
+  if (!match) throw new Error(`GCS URI inválida: ${gcsUri}`);
 
   const bucketName = match[1];
   const filePath = match[2];
-
   const bucket = admin.storage().bucket(bucketName);
   const file = bucket.file(filePath);
-
   const [exists] = await file.exists();
 
-  if (!exists) {
-    throw new Error(`Arquivo não encontrado no Storage: ${gcsUri}`);
-  }
+  if (!exists) throw new Error(`Arquivo não encontrado no Storage: ${gcsUri}`);
 
   const [metadata] = await file.getMetadata();
 
@@ -679,12 +628,7 @@ async function transcribeAndReviewAudioWithGemini({
   });
 
   const size = Number(metadata.size || 0);
-
-  if (!size || size < 1000) {
-    throw new Error(
-      `Arquivo de áudio muito pequeno ou vazio. Size: ${metadata.size}`
-    );
-  }
+  if (!size || size < 1000) throw new Error(`Arquivo de áudio muito pequeno ou vazio. Size: ${metadata.size}`);
 
   const [audioBuffer] = await file.download();
 
@@ -694,19 +638,17 @@ async function transcribeAndReviewAudioWithGemini({
   });
 
   if (!audioBuffer || audioBuffer.length < 1000) {
-    throw new Error(
-      `Buffer de áudio vazio ou muito pequeno. Bytes: ${audioBuffer?.length || 0}`
-    );
+    throw new Error(`Buffer de áudio vazio ou muito pequeno. Bytes: ${audioBuffer?.length || 0}`);
   }
 
   const mimeType = normalizeAudioMimeType(metadata.contentType);
-
   const placa = String(vistoria.placa || "").trim();
   const veiculo = String(vistoria.veiculo || "").trim();
   const cliente = String(vistoria.cliente || "").trim();
+  const descricaoArtigos = String(vistoria.descricaoArtigos || "").trim();
   const observacoes = String(vistoria.observacoes || "").trim();
 
-  const prompt = `
+const prompt = `
 Você é um assistente técnico de vistoria automotiva.
 
 Analise o áudio enviado pelo mecânico e retorne obrigatoriamente um JSON válido, sem markdown, sem crases e sem explicações.
@@ -727,6 +669,10 @@ Regras:
 - Se algum trecho estiver incompreensível, use "[inaudível]".
 - A transcricaoOriginal deve ser próxima do que foi falado.
 - A transcricaoRevisada deve ser adequada para um relatório técnico, mas sem mudar o sentido.
+- Mesmo se o áudio for muito curto, retorne os dois campos completos.
+- Não retorne JSON dentro de string.
+- Não corte o JSON.
+- Se a transcricaoRevisada for igual à original, repita o mesmo texto nos dois campos.
 
 Contexto da vistoria:
 - Vistoria: ${idvistoria}
@@ -734,6 +680,7 @@ Contexto da vistoria:
 - Placa: ${placa}
 - Veículo: ${veiculo}
 - Cliente: ${cliente}
+- Relato inicial do cliente: ${descricaoArtigos}
 - Observações: ${observacoes}
 `.trim();
 
@@ -744,9 +691,7 @@ Contexto da vistoria:
       {
         role: "user",
         parts: [
-          {
-            text: prompt,
-          },
+          { text: prompt },
           {
             inlineData: {
               mimeType,
@@ -759,30 +704,20 @@ Contexto da vistoria:
   });
 
   const rawText = extractGeminiText(result);
-
   console.log("Resposta bruta Gemini áudio:", rawText);
 
   const parsed = parseGeminiAudioJson(rawText);
 
   const transcricaoOriginal = String(
-    parsed.transcricaoOriginal ||
-      parsed.original ||
-      parsed.transcript ||
-      ""
+    parsed.transcricaoOriginal || parsed.original || parsed.transcript || ""
   ).trim();
 
   const transcricaoRevisada = String(
-    parsed.transcricaoRevisada ||
-      parsed.revisada ||
-      parsed.revised ||
-      transcricaoOriginal ||
-      ""
+    parsed.transcricaoRevisada || parsed.revisada || parsed.revised || transcricaoOriginal || ""
   ).trim();
 
   if (!transcricaoOriginal && !transcricaoRevisada) {
-    throw new Error(
-      `Gemini não retornou transcrição válida. Resposta: ${rawText}`
-    );
+    throw new Error(`Gemini não retornou transcrição válida. Resposta: ${rawText}`);
   }
 
   return {
@@ -794,38 +729,19 @@ Contexto da vistoria:
 function normalizeAudioMimeType(contentType) {
   const clean = String(contentType || "").trim().toLowerCase();
 
-  if (clean.includes("mpeg") || clean.includes("mp3")) {
-    return "audio/mpeg";
-  }
-
-  if (clean.includes("mp4") || clean.includes("m4a")) {
-    return "audio/mp4";
-  }
-
-  if (clean.includes("aac")) {
-    return "audio/aac";
-  }
-
-  if (clean.includes("wav")) {
-    return "audio/wav";
-  }
-
-  if (clean.includes("webm")) {
-    return "audio/webm";
-  }
+  if (clean.includes("mpeg") || clean.includes("mp3")) return "audio/mpeg";
+  if (clean.includes("mp4") || clean.includes("m4a")) return "audio/mp4";
+  if (clean.includes("aac")) return "audio/aac";
+  if (clean.includes("wav")) return "audio/wav";
+  if (clean.includes("webm")) return "audio/webm";
 
   return "audio/mpeg";
 }
 
 function extractGeminiText(result) {
   const candidates = result?.response?.candidates || [];
-
   const parts = candidates[0]?.content?.parts || [];
-
-  return parts
-    .map((part) => part.text || "")
-    .join("")
-    .trim();
+  return parts.map((part) => part.text || "").join("").trim();
 }
 
 function parseGeminiAudioJson(rawText) {
@@ -836,70 +752,323 @@ function parseGeminiAudioJson(rawText) {
     .replace(/```$/i, "")
     .trim();
 
-  try {
-    return JSON.parse(cleanText);
-  } catch (error) {
-    console.error("Erro ao parsear JSON do Gemini:", {
-      error: error.message,
-      rawText,
-    });
+  const parsedDirect = safeJsonParse(cleanText);
 
-    return {
-      transcricaoOriginal: cleanText,
-      transcricaoRevisada: cleanText,
-    };
+  if (parsedDirect) {
+    return normalizeGeminiAudioParsedObject(parsedDirect, cleanText);
+  }
+
+  const jsonObjectText = extractFirstJsonObject(cleanText);
+  const parsedObject = safeJsonParse(jsonObjectText);
+
+  if (parsedObject) {
+    return normalizeGeminiAudioParsedObject(parsedObject, cleanText);
+  }
+
+  const originalFromBrokenJson =
+    extractJsonStringValue(cleanText, "transcricaoOriginal") ||
+    extractJsonStringValue(cleanText, "transcriçãoOriginal") ||
+    extractJsonStringValue(cleanText, "original") ||
+    extractJsonStringValue(cleanText, "transcript");
+
+  const revisedFromBrokenJson =
+    extractJsonStringValue(cleanText, "transcricaoRevisada") ||
+    extractJsonStringValue(cleanText, "transcriçãoRevisada") ||
+    extractJsonStringValue(cleanText, "revisada") ||
+    extractJsonStringValue(cleanText, "revised");
+
+  const fallbackText = cleanBrokenGeminiText(cleanText);
+
+  const transcricaoOriginal = String(
+    originalFromBrokenJson ||
+      revisedFromBrokenJson ||
+      fallbackText ||
+      ""
+  ).trim();
+
+  const transcricaoRevisada = String(
+    revisedFromBrokenJson ||
+      originalFromBrokenJson ||
+      fallbackText ||
+      ""
+  ).trim();
+
+  console.warn("Gemini retornou JSON inválido. Aplicando recuperação:", {
+    rawText: cleanText,
+    transcricaoOriginal,
+    transcricaoRevisada,
+  });
+
+  return {
+    transcricaoOriginal,
+    transcricaoRevisada,
+  };
+}
+
+function safeJsonParse(text) {
+  if (!text || typeof text !== "string") return null;
+
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    return null;
   }
 }
 
-async function reviewTranscriptWithGemini({
-  originalTranscript,
-  vistoria,
-  idvistoria,
-  sinistroId,
-}) {
-  const placa = String(vistoria.placa || "").trim();
-  const veiculo = String(vistoria.veiculo || "").trim();
-  const cliente = String(vistoria.cliente || "").trim();
-  const observacoes = String(vistoria.observacoes || "").trim();
+function extractFirstJsonObject(text) {
+  if (!text) return "";
 
-  const prompt = `
-Você é um revisor técnico de transcrições de vistoria automotiva.
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
 
-Corrija apenas gramática, pontuação, concordância e clareza.
-Não invente danos.
-Não adicione peças, locais de dano ou conclusões que não estejam no texto original.
-Não transforme incerteza em certeza.
-Não remova informações técnicas importantes.
-Mantenha o sentido do relato do mecânico.
-Retorne apenas o texto revisado, sem explicações.
+  if (start < 0 || end < 0 || end <= start) {
+    return "";
+  }
 
-Contexto:
-- Vistoria: ${idvistoria}
-- Sinistro: ${sinistroId}
-- Placa: ${placa}
-- Veículo: ${veiculo}
-- Cliente: ${cliente}
-- Observações: ${observacoes}
-
-Transcrição original:
-${originalTranscript}
-`.trim();
-
-  const model = getGeminiReviewModel();
-  const result = await model.generateContent(prompt);
-
-  const text =
-    result?.response?.candidates?.[0]?.content?.parts
-      ?.map((part) => part.text || "")
-      .join("")
-      .trim() || "";
-
-  return text || originalTranscript;
+  return text.substring(start, end + 1).trim();
 }
 
-async function sendTextToArgosAgent({ uid, inspectionId, text }) {
-  const client = getDialogflowClient();
+function extractJsonStringValue(text, key) {
+  if (!text || !key) return "";
 
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  const regex = new RegExp(
+    `"${escapedKey}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`,
+    "i"
+  );
+
+  const match = text.match(regex);
+
+  if (!match || !match[1]) {
+    return "";
+  }
+
+  let value = match[1];
+
+  value = value
+    .replace(/",\s*"transcricaoRe.*$/i, "")
+    .replace(/",\s*"transcriçãoRe.*$/i, "")
+    .replace(/",\s*"revisada.*$/i, "")
+    .replace(/",\s*"revised.*$/i, "")
+    .trim();
+
+  try {
+    return JSON.parse(`"${value}"`);
+  } catch (_) {
+    return value
+      .replace(/\\"/g, '"')
+      .replace(/\\n/g, "\n")
+      .replace(/\\\\/g, "\\")
+      .trim();
+  }
+}
+
+function normalizeGeminiAudioParsedObject(parsed, fallbackText) {
+  const transcricaoOriginal = String(
+    parsed.transcricaoOriginal ||
+      parsed["transcriçãoOriginal"] ||
+      parsed.original ||
+      parsed.transcript ||
+      ""
+  ).trim();
+
+  const transcricaoRevisada = String(
+    parsed.transcricaoRevisada ||
+      parsed["transcriçãoRevisada"] ||
+      parsed.revisada ||
+      parsed.revised ||
+      transcricaoOriginal ||
+      ""
+  ).trim();
+
+  return {
+    transcricaoOriginal:
+      cleanBrokenGeminiText(transcricaoOriginal) ||
+      cleanBrokenGeminiText(transcricaoRevisada) ||
+      cleanBrokenGeminiText(fallbackText),
+
+    transcricaoRevisada:
+      cleanBrokenGeminiText(transcricaoRevisada) ||
+      cleanBrokenGeminiText(transcricaoOriginal) ||
+      cleanBrokenGeminiText(fallbackText),
+  };
+}
+
+function cleanBrokenGeminiText(text) {
+  const value = String(text || "").trim();
+
+  if (!value) return "";
+
+  // Evita salvar JSON quebrado inteiro como transcrição.
+  if (
+    value.startsWith("{") &&
+    value.includes("transcricaoOriginal")
+  ) {
+    const recovered =
+      extractJsonStringValue(value, "transcricaoOriginal") ||
+      extractJsonStringValue(value, "transcricaoRevisada");
+
+    return recovered.trim();
+  }
+
+  return value
+    .replace(/^"+/, "")
+    .replace(/"+$/, "")
+    .trim();
+}
+
+async function loadArgosInspectionContext({ inspectionId, sinistroId }) {
+  const db = admin.firestore();
+  const cleanInspectionId = String(inspectionId || "").trim();
+  const cleanSinistroId = String(sinistroId || "").trim();
+
+  let vistoria = {};
+  let resolvedSinistroId = cleanSinistroId;
+
+  if (cleanInspectionId) {
+    const vistoriaSnap = await db.collection("vistorias").doc(cleanInspectionId).get();
+    if (vistoriaSnap.exists) {
+      vistoria = vistoriaSnap.data() || {};
+      resolvedSinistroId = String(vistoria.sinistroId || resolvedSinistroId || "").trim();
+    }
+  }
+
+  if (!Object.keys(vistoria).length && cleanInspectionId) {
+    const vistoriaQuery = await db
+      .collection("vistorias")
+      .where("sinistroId", "==", cleanInspectionId)
+      .limit(1)
+      .get();
+
+    if (!vistoriaQuery.empty) {
+      vistoria = vistoriaQuery.docs[0].data() || {};
+      resolvedSinistroId = String(vistoria.sinistroId || cleanInspectionId).trim();
+    }
+  }
+
+  if (!resolvedSinistroId && cleanInspectionId && cleanInspectionId.startsWith("ARG-")) {
+    resolvedSinistroId = cleanInspectionId;
+  }
+
+  let sinistro = {};
+
+  if (resolvedSinistroId) {
+    const sinistroSnap = await db.collection("sinistro").doc(resolvedSinistroId).get();
+    if (sinistroSnap.exists) sinistro = sinistroSnap.data() || {};
+  }
+
+  return { vistoria, sinistro, sinistroId: resolvedSinistroId };
+}
+
+function buildArgosSessionParameters({ inspectionId, sinistroId, vistoria = {}, sinistro = {}, extra = {} }) {
+  const veiculoSnapshot = asObject(sinistro.veiculoSnapshot || sinistro.vehicleSnapshot);
+  const clienteSnapshot = asObject(sinistro.clienteSnapshot);
+  const credenciadoSnapshot = asObject(sinistro.credenciadoSnapshot);
+
+  const marca = str(veiculoSnapshot.marca);
+  const modelo = str(veiculoSnapshot.modelo);
+  const modeloCompleto = [marca, modelo].filter(Boolean).join(" ").trim();
+
+  return removeEmptyValues({
+    placa_veiculo:
+      extra.placa_veiculo ||
+      extra.placaVeiculo ||
+      vistoria.placa ||
+      veiculoSnapshot.placa ||
+      sinistro.plate ||
+      sinistro.placa,
+
+    modelo_veiculo:
+      extra.modelo_veiculo ||
+      extra.modeloVeiculo ||
+      vistoria.veiculo ||
+      modeloCompleto ||
+      sinistro.vehicle ||
+      sinistro.veiculo,
+
+    relato_cliente_simulado:
+      extra.relato_cliente_simulado ||
+      extra.relatoClienteSimulado ||
+      vistoria.descricaoArtigos ||
+      sinistro.damageDescription ||
+      sinistro.descricaoArtigos ||
+      vistoria.observacoes ||
+      sinistro.observations ||
+      sinistro.observacoes,
+
+    id_vistoria: vistoria.idvistoria || inspectionId,
+    sinistro_id: vistoria.sinistroId || sinistroId,
+
+    cliente_nome:
+      vistoria.cliente ||
+      clienteSnapshot.nomeCompleto ||
+      sinistro.owner ||
+      sinistro.cliente,
+
+    oficina_nome:
+      vistoria.credenciado ||
+      credenciadoSnapshot.name ||
+      sinistro.workshop ||
+      sinistro.credenciadoNome,
+
+    prioridade_sinistro: sinistro.priority,
+    tipo_sinistro: sinistro.claimType,
+    status_sinistro: sinistro.status,
+  });
+}
+
+function removeEmptyValues(data) {
+  const clean = {};
+
+  for (const [key, value] of Object.entries(data || {})) {
+    if (value === undefined || value === null) continue;
+    const text = String(value).trim();
+    if (!text || text === "null" || text === "undefined") continue;
+    clean[key] = text;
+  }
+
+  return clean;
+}
+
+function asObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value;
+}
+
+function str(value) {
+  if (value === undefined || value === null) return "";
+  return String(value).trim();
+}
+
+function toProtoStruct(data) {
+  const fields = {};
+
+  for (const [key, value] of Object.entries(data || {})) {
+    fields[key] = toProtoValue(value);
+  }
+
+  return { fields };
+}
+
+function toProtoValue(value) {
+  if (value === null || value === undefined) return { nullValue: "NULL_VALUE" };
+  if (typeof value === "number") return { numberValue: value };
+  if (typeof value === "boolean") return { boolValue: value };
+
+  if (Array.isArray(value)) {
+    return { listValue: { values: value.map((item) => toProtoValue(item)) } };
+  }
+
+  if (typeof value === "object") {
+    return { structValue: toProtoStruct(value) };
+  }
+
+  return { stringValue: String(value) };
+}
+
+async function sendTextToArgosAgent({ uid, inspectionId, text, sessionParameters = {} }) {
+  const client = getDialogflowClient();
   const sessionId = createSessionId(uid, inspectionId);
 
   const sessionPath = client.projectLocationAgentSessionPath(
@@ -909,33 +1078,31 @@ async function sendTextToArgosAgent({ uid, inspectionId, text }) {
     sessionId
   );
 
-  const [response] = await client.detectIntent({
+  const request = {
     session: sessionPath,
     queryInput: {
-      text: {
-        text,
-      },
+      text: { text },
       languageCode: LANGUAGE_CODE,
     },
-  });
+  };
 
+  if (sessionParameters && Object.keys(sessionParameters).length > 0) {
+    request.queryParams = {
+      parameters: toProtoStruct(sessionParameters),
+    };
+  }
+
+  const [response] = await client.detectIntent(request);
   return extractDialogflowReply(response);
 }
 
 function maskToken(token) {
-  if (!token || token.length < 18) {
-    return token;
-  }
-
+  if (!token || token.length < 18) return token;
   return `${token.substring(0, 10)}...${token.substring(token.length - 8)}`;
 }
 
 function chunkArray(items, size) {
   const chunks = [];
-
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size));
-  }
-
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
   return chunks;
 }
