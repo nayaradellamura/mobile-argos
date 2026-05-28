@@ -284,7 +284,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 backgroundColor: Colors.redAccent,
                 foregroundColor: Colors.white,
               ),
-              child: const Text('Descartar e iniciar nova'),
+              child: const Text('Cancelar e iniciar nova'),
             ),
           ],
         );

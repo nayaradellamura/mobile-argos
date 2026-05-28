@@ -8,6 +8,7 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shimmer/shimmer.dart';
+import '../../services/sinistro_presence_service.dart'; 
 
 enum InspectionFilter {
   all,
@@ -122,11 +123,11 @@ class _InspectionsPageState extends State<InspectionsPage> {
   Stream<List<InspectionCase>>? _cachedInspectionStream;
   String? _cachedInspectionCredenciadoId;
   final Set<String> _precachedAvatarUrls = <String>{};
+  Future<void>? _initialAvatarPreloadFuture;
+  String _initialAvatarPreloadSignature = '';
+  bool _hasCompletedInitialAvatarPreload = false;
 
-  void _precachePeoplePhotos(List<InspectionCase> inspections) {
-  WidgetsBinding.instance.addPostFrameCallback((_) {
-    if (!mounted) return;
-
+  Set<String> _collectPeoplePhotoUrls(List<InspectionCase> inspections) {
     final urls = <String>{};
 
     for (final inspection in inspections) {
@@ -145,13 +146,63 @@ class _InspectionsPageState extends State<InspectionsPage> {
       }
     }
 
+    return urls;
+  }
+
+  String _peoplePhotoSignature(List<InspectionCase> inspections) {
+    final urls = _collectPeoplePhotoUrls(inspections).toList()..sort();
+    return urls.join('|');
+  }
+
+  Future<void> _precachePeoplePhotosNow(List<InspectionCase> inspections) async {
+    if (!mounted) return;
+
+    final urls = _collectPeoplePhotoUrls(inspections);
+
+    if (urls.isEmpty) return;
+
+    final futures = <Future<void>>[];
+
     for (final url in urls) {
-      if (_precachedAvatarUrls.add(url)) {
-        precacheImage(NetworkImage(url), context).catchError((_) {});
-      }
+      if (!_precachedAvatarUrls.add(url)) continue;
+
+      futures.add(
+        precacheImage(NetworkImage(url), context)
+            .then((_) {})
+            .catchError((_) {}),
+      );
     }
-  });
-}
+
+    if (futures.isEmpty) return;
+
+    await Future.wait(futures);
+  }
+
+  Future<void> _precachePeoplePhotosAfterFrame(
+    List<InspectionCase> inspections,
+  ) async {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+
+      unawaited(_precachePeoplePhotosNow(inspections));
+    });
+  }
+
+  Future<void> _precachePeoplePhotosBeforeFirstRender(
+    List<InspectionCase> inspections,
+  ) {
+    final signature = _peoplePhotoSignature(inspections);
+
+    if (_initialAvatarPreloadFuture != null &&
+        _initialAvatarPreloadSignature == signature) {
+      return _initialAvatarPreloadFuture!;
+    }
+
+    _initialAvatarPreloadSignature = signature;
+    _initialAvatarPreloadFuture = _precachePeoplePhotosNow(inspections);
+
+    return _initialAvatarPreloadFuture!;
+  }
 
   @override
   void dispose() {
@@ -359,9 +410,33 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
     );
   }
 
-  Widget _buildBodyForInspections(List<InspectionCase> inspections) {
-  _precachePeoplePhotos(inspections);
+  Widget _buildInspectionsWithAvatarPreload(List<InspectionCase> inspections) {
+    if (_hasCompletedInitialAvatarPreload) {
+      unawaited(_precachePeoplePhotosAfterFrame(inspections));
+      return _buildBodyForInspections(inspections);
+    }
 
+    return FutureBuilder<void>(
+      future: _precachePeoplePhotosBeforeFirstRender(inspections),
+      builder: (context, preloadSnapshot) {
+        if (preloadSnapshot.connectionState != ConnectionState.done) {
+          return const _InspectionsSkeleton();
+        }
+
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || _hasCompletedInitialAvatarPreload) return;
+
+          setState(() {
+            _hasCompletedInitialAvatarPreload = true;
+          });
+        });
+
+        return _buildBodyForInspections(inspections);
+      },
+    );
+  }
+
+  Widget _buildBodyForInspections(List<InspectionCase> inspections) {
   final counts = {
     for (final filter in InspectionFilter.values)
       filter: inspections.where(filter.matches).length,
@@ -506,7 +581,9 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
               );
             }
 
-            return _buildBodyForInspections(inspectionSnapshot.data ?? []);
+            final inspections = inspectionSnapshot.data ?? [];
+
+            return _buildInspectionsWithAvatarPreload(inspections);
           },
         );
       },
@@ -528,7 +605,8 @@ class InspectionSummaryPage extends StatefulWidget {
   State<InspectionSummaryPage> createState() => _InspectionSummaryPageState();
 }
 
-class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
+class _InspectionSummaryPageState extends State<InspectionSummaryPage>
+    with WidgetsBindingObserver {
   late InspectionCase inspection;
   bool isCheckingIn = false;
   bool _hasShownAssignmentChangeNotice = false;
@@ -537,21 +615,46 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
     inspection = widget.inspection;
     _watchInspectionRealtime();
+    _startPresence();
+  }
 
-    SinistroPresenceService.instance.startViewing(inspection.id).catchError((error) {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _startPresence();
+      return;
+    }
+
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _stopPresence();
+    }
+  }
+
+  void _startPresence() {
+    SinistroPresenceService.instance
+        .startViewing(inspection.id)
+        .catchError((error) {
       debugPrint('Start viewing sinistro error: $error');
+    });
+  }
+
+  void _stopPresence() {
+    SinistroPresenceService.instance.stopViewing().catchError((error) {
+      debugPrint('Stop viewing sinistro error: $error');
     });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _inspectionSubscription?.cancel();
+    _stopPresence();
 
-    SinistroPresenceService.instance.stopViewing().catchError((error) {
-      debugPrint('Stop viewing sinistro error: $error');
-    });
     super.dispose();
   }
 
@@ -4777,310 +4880,6 @@ String _formatFileSize(int bytes) {
 }
 
 
-class SinistroPresenceService {
-  SinistroPresenceService._();
-
-  static final SinistroPresenceService instance = SinistroPresenceService._();
-
-  final FirebaseFirestore _db = FirebaseFirestore.instance;
-  final FirebaseAuth _auth = FirebaseAuth.instance;
-
-  Timer? _heartbeatTimer;
-  String? _currentSinistroId;
-
-  CollectionReference<Map<String, dynamic>> get _sinistros =>
-      _db.collection('sinistro');
-
-  Future<void> startViewing(String sinistroId) async {
-    final user = _auth.currentUser;
-
-    if (user == null) return;
-
-    final cleanSinistroId = sinistroId.trim();
-
-    if (cleanSinistroId.isEmpty) return;
-
-    if (_currentSinistroId == cleanSinistroId && _heartbeatTimer != null) {
-      return;
-    }
-
-    await stopViewing();
-
-    _currentSinistroId = cleanSinistroId;
-
-    await _writeViewer(cleanSinistroId);
-
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 25), (_) {
-      _writeViewer(cleanSinistroId).catchError((error) {
-        debugPrint('Presence heartbeat error: $error');
-      });
-    });
-  }
-
-  Future<void> stopViewing() async {
-    final user = _auth.currentUser;
-    final sinistroId = _currentSinistroId;
-
-    _heartbeatTimer?.cancel();
-    _heartbeatTimer = null;
-    _currentSinistroId = null;
-
-    if (user == null || sinistroId == null || sinistroId.isEmpty) {
-      return;
-    }
-
-    await _sinistros
-        .doc(sinistroId)
-        .collection('viewers')
-        .doc(user.uid)
-        .delete()
-        .catchError((_) {});
-
-    await _refreshActiveViewersSummary(sinistroId);
-  }
-
-  Stream<List<SinistroViewer>> watchViewers(String sinistroId) {
-    final cutoffMillis = DateTime.now()
-        .subtract(const Duration(seconds: 70))
-        .millisecondsSinceEpoch;
-
-    return _sinistros
-        .doc(sinistroId)
-        .collection('viewers')
-        .where('lastSeenAtMillis', isGreaterThan: cutoffMillis)
-        .snapshots()
-        .map((snapshot) {
-      final viewers = snapshot.docs
-          .map((doc) => SinistroViewer.fromMap(doc.id, doc.data()))
-          .toList();
-
-      viewers.sort((a, b) => b.lastSeenAtMillis.compareTo(a.lastSeenAtMillis));
-
-      return viewers;
-    });
-  }
-
-  Future<InspectionCase> claimSinistroForCurrentUser({
-    required InspectionCase inspection,
-    String action = 'check_in',
-  }) async {
-    final user = _auth.currentUser;
-
-    if (user == null) {
-      throw Exception('Usuário não autenticado.');
-    }
-
-    final profile = await _loadUserProfile(user);
-    final sinistroRef = _sinistros.doc(inspection.id);
-    final now = DateTime.now();
-    final effectiveCheckInAt = inspection.checkInAt ?? now;
-    final checkInAtIso = effectiveCheckInAt.toIso8601String();
-    final nowIso = now.toIso8601String();
-
-    await _db.runTransaction((transaction) async {
-      final snap = await transaction.get(sinistroRef);
-
-      if (!snap.exists) {
-        throw Exception('Sinistro não encontrado.');
-      }
-
-      final data = snap.data() ?? {};
-      final assignedToUid = data['assignedToUid']?.toString().trim() ?? '';
-
-      if (assignedToUid.isNotEmpty && assignedToUid != user.uid) {
-        final assignedToName =
-            data['assignedToName']?.toString().trim() ?? 'outro profissional';
-
-        throw Exception('Esta vistoria já está vinculada a $assignedToName.');
-      }
-
-      transaction.set(
-        sinistroRef,
-        {
-          'assignedToUid': user.uid,
-          'assignedToName': profile.name,
-          'assignedToEmail': profile.email,
-          'assignedToPhotoURL': profile.photoURL,
-          'assignedAt': FieldValue.serverTimestamp(),
-          'assignedByAction': action,
-          'isAssigned': true,
-          'checkInAt': checkInAtIso,
-          'status': 'EM_ANDAMENTO',
-          'chatEnabled': true,
-          'chatStatus': 'Aberto',
-          'statusUpdatedAt': nowIso,
-        },
-        SetOptions(merge: true),
-      );
-    });
-
-    return inspection.copyWith(
-      checkInAt: effectiveCheckInAt,
-      status: InspectionStatus.inProgress,
-      assignedToUid: user.uid,
-      assignedToName: profile.name,
-      assignedToEmail: profile.email,
-      assignedToPhotoURL: profile.photoURL,
-      assignedAt: now,
-    );
-  }
-
-  Future<void> _writeViewer(String sinistroId) async {
-    final user = _auth.currentUser;
-
-    if (user == null) return;
-
-    final profile = await _loadUserProfile(user);
-    final nowMillis = DateTime.now().millisecondsSinceEpoch;
-
-    await _sinistros
-        .doc(sinistroId)
-        .collection('viewers')
-        .doc(user.uid)
-        .set(
-      {
-        'uid': user.uid,
-        'name': profile.name,
-        'email': profile.email,
-        'photoURL': profile.photoURL,
-        'openedAt': FieldValue.serverTimestamp(),
-        'lastSeenAt': FieldValue.serverTimestamp(),
-        'lastSeenAtMillis': nowMillis,
-      },
-      SetOptions(merge: true),
-    );
-
-    await _refreshActiveViewersSummary(sinistroId);
-  }
-
-  Future<void> _refreshActiveViewersSummary(String sinistroId) async {
-    final cutoffMillis = DateTime.now()
-        .subtract(const Duration(seconds: 70))
-        .millisecondsSinceEpoch;
-
-    final viewersSnap = await _sinistros
-        .doc(sinistroId)
-        .collection('viewers')
-        .where('lastSeenAtMillis', isGreaterThan: cutoffMillis)
-        .limit(5)
-        .get();
-
-    final viewers = viewersSnap.docs.map((doc) {
-      final data = doc.data();
-
-      return {
-        'uid': data['uid']?.toString() ?? doc.id,
-        'name': data['name']?.toString() ?? '',
-        'email': data['email']?.toString() ?? '',
-        'photoURL': data['photoURL']?.toString() ?? '',
-        'lastSeenAtMillis': data['lastSeenAtMillis'] ?? 0,
-      };
-    }).toList();
-
-    await _sinistros.doc(sinistroId).set(
-      {
-        'activeViewers': viewers,
-        'activeViewersCount': viewers.length,
-        'activeViewersUpdatedAt': FieldValue.serverTimestamp(),
-      },
-      SetOptions(merge: true),
-    );
-  }
-
-  Future<_UserPresenceProfile> _loadUserProfile(User user) async {
-    final email = user.email?.trim().toLowerCase() ?? '';
-    Map<String, dynamic> data = {};
-
-    final byUid = await _db.collection('users').doc(user.uid).get();
-    data = byUid.data() ?? {};
-
-    if (data.isEmpty && email.isNotEmpty) {
-      final byEmail = await _db.collection('users').doc(email).get();
-      data = byEmail.data() ?? {};
-    }
-
-    if (data.isEmpty) {
-      final query = await _db
-          .collection('users')
-          .where('uid', isEqualTo: user.uid)
-          .limit(1)
-          .get();
-
-      if (query.docs.isNotEmpty) {
-        data = query.docs.first.data();
-      }
-    }
-
-    final name = data['displayName']?.toString().trim().isNotEmpty == true
-        ? data['displayName'].toString().trim()
-        : data['nome']?.toString().trim().isNotEmpty == true
-            ? data['nome'].toString().trim()
-            : user.displayName?.trim().isNotEmpty == true
-                ? user.displayName!.trim()
-                : email;
-
-    final photoURL = data['photoURL']?.toString().trim().isNotEmpty == true
-        ? data['photoURL'].toString().trim()
-        : data['foto']?.toString().trim().isNotEmpty == true
-            ? data['foto'].toString().trim()
-            : user.photoURL ?? '';
-
-    return _UserPresenceProfile(
-      uid: user.uid,
-      name: name,
-      email: email,
-      photoURL: photoURL,
-    );
-  }
-}
-
-class SinistroViewer {
-  final String uid;
-  final String name;
-  final String email;
-  final String photoURL;
-  final int lastSeenAtMillis;
-
-  const SinistroViewer({
-    required this.uid,
-    required this.name,
-    required this.email,
-    required this.photoURL,
-    required this.lastSeenAtMillis,
-  });
-
-  String get displayName {
-    if (name.trim().isNotEmpty) return name.trim();
-    if (email.trim().isNotEmpty) return email.trim();
-    return 'Usuário';
-  }
-
-  factory SinistroViewer.fromMap(String id, Map<String, dynamic> data) {
-    final rawMillis = data['lastSeenAtMillis'];
-
-    return SinistroViewer(
-      uid: data['uid']?.toString() ?? id,
-      name: data['name']?.toString() ?? '',
-      email: data['email']?.toString() ?? '',
-      photoURL: data['photoURL']?.toString() ?? '',
-      lastSeenAtMillis: rawMillis is int ? rawMillis : int.tryParse('$rawMillis') ?? 0,
-    );
-  }
-}
-
-class _UserPresenceProfile {
-  final String uid;
-  final String name;
-  final String email;
-  final String photoURL;
-
-  const _UserPresenceProfile({
-    required this.uid,
-    required this.name,
-    required this.email,
-    required this.photoURL,
-  });
-}
 
 List<SinistroViewer> _parseSinistroViewers(dynamic value) {
   if (value is! List) return const [];

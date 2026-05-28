@@ -106,76 +106,93 @@ exports.sendArgosMessage = onCall(
     region: "us-central1",
     secrets: [DIALOGFLOW_CLIENT_EMAIL, DIALOGFLOW_PRIVATE_KEY],
   },
-
   async (request) => {
     if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Usuário precisa estar autenticado.");
+      throw new HttpsError(
+        "unauthenticated",
+        "Usuário precisa estar autenticado."
+      );
     }
 
     const uid = request.auth.uid;
+
     const text = String(request.data.text || request.data.message || "").trim();
+
     const inspectionId = String(
-      request.data.inspectionId || request.data.idvistoria || request.data.sinistroId || "INS-001"
+      request.data.inspectionId ||
+        request.data.idvistoria ||
+        request.data.sinistroId ||
+        "INS-001"
     ).trim();
 
-    if (!text) throw new HttpsError("invalid-argument", "Mensagem vazia.");
+    const modo = String(request.data.modo || "").trim();
+
+    if (!text) {
+      throw new HttpsError("invalid-argument", "Mensagem vazia.");
+    }
+
+    const sessionId = createSessionId(uid, inspectionId);
+    const client = getDialogflowClient();
+
+    const sessionPath = client.projectLocationAgentSessionPath(
+      DIALOGFLOW_PROJECT_ID,
+      LOCATION,
+      AGENT_ID,
+      sessionId
+    );
+
+    const detectIntentRequest = {
+      session: sessionPath,
+      queryInput: {
+        text: {
+          text,
+        },
+        languageCode: LANGUAGE_CODE,
+      },
+    };
+
+    if (modo === "retificacao") {
+      detectIntentRequest.queryParams = {
+        currentPage:
+          "projects/upheld-magpie-404322/locations/us-central1/agents/8ece03b0-a71c-4860-818f-422d9c61ddac/playbooks/029ec3ba-ffc9-4185-99cf-9cc437273dd2",
+        parameters: {
+          ajustes_necessarios: String(
+            request.data.ajustesNecessarios || ""
+          ),
+          contexto_vistoria_anterior: String(
+            request.data.contextoVistoriaAnterior || ""
+          ),
+          tipo_vistoria: "RETIFICACAO",
+          id_vistoria: inspectionId,
+        },
+      };
+    }
 
     try {
-      const context = await loadArgosInspectionContext({
-        inspectionId,
-        sinistroId: request.data.sinistroId,
-      });
+      const [response] = await client.detectIntent(detectIntentRequest);
 
-      const sessionParameters = buildArgosSessionParameters({
-        inspectionId,
-        sinistroId: context.sinistroId || request.data.sinistroId || "",
-        vistoria: context.vistoria,
-        sinistro: context.sinistro,
-        extra: request.data.parameters || {},
-      });
-
-      const savedAgentParameters = context.vistoria?.agentParameters || {};
-
-      const sessionParametersMerged = mergeSessionParameters(
-        savedAgentParameters,
-        sessionParameters
-      );
-
-      console.log("Parâmetros enviados ao agente Argos:", sessionParametersMerged);
-
-      const agentResult = await sendTextToArgosAgent({
-        uid,
-        inspectionId,
-        text,
-        sessionParameters: sessionParametersMerged,
-        currentPage: context.vistoria?.agentCurrentPage || "",
-      });
-
-      await saveAgentStateToVistoria({
-        idvistoria: inspectionId,
-        currentPage: agentResult.currentPage,
-        parameters:
-          agentResult.parameters && Object.keys(agentResult.parameters).length > 0
-            ? agentResult.parameters
-            : sessionParametersMerged,
-      });
+      const reply = extractDialogflowReply(response);
 
       return {
-        reply: agentResult.reply,
+        reply,
         inspectionId,
-        sessionParameters: sessionParametersMerged,
+        modo: modo || "normal",
       };
     } catch (error) {
-      console.error("Erro no Dialogflow CX:", error);
+      console.error("Erro ao conversar com Dialogflow CX:", error);
       console.error("code:", error.code);
       console.error("message:", error.message);
       console.error("details:", error.details);
 
-      throw new HttpsError("internal", "Falha na comunicação com o Argos.", {
-        code: error.code || null,
-        message: error.message || null,
-        details: error.details || null,
-      });
+      throw new HttpsError(
+        "internal",
+        "Não foi possível conversar com o assistente Argos.",
+        {
+          code: error.code || null,
+          message: error.message || null,
+          details: error.details || null,
+        }
+      );
     }
   }
 );

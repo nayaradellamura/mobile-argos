@@ -16,6 +16,7 @@ class SinistroPresenceService {
 
   Timer? _heartbeatTimer;
   String? _currentSinistroId;
+  String? _currentSessionId;
   int _viewingGeneration = 0;
   _UserPresenceProfile? _cachedProfile;
 
@@ -39,45 +40,61 @@ class SinistroPresenceService {
       await stopViewing();
     }
 
-    _currentSinistroId = cleanSinistroId;
-
     final generation = ++_viewingGeneration;
+    final sessionId =
+        '${user.uid}_${DateTime.now().microsecondsSinceEpoch}_$generation';
 
-    await _writeViewer(cleanSinistroId, generation);
+    _currentSinistroId = cleanSinistroId;
+    _currentSessionId = sessionId;
+
+    await _writeViewer(cleanSinistroId, generation, sessionId);
 
     _heartbeatTimer?.cancel();
     _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
-      _writeViewer(cleanSinistroId, generation).catchError((_) {});
+      _writeViewer(cleanSinistroId, generation, sessionId).catchError((_) {});
     });
   }
 
   Future<void> stopViewing() async {
     final user = _auth.currentUser;
     final sinistroId = _currentSinistroId;
+    final sessionId = _currentSessionId;
 
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _currentSinistroId = null;
+    _currentSessionId = null;
 
     // Invalida qualquer escrita em background que tenha começado antes do stop.
     _viewingGeneration++;
 
-    if (user == null || sinistroId == null || sinistroId.isEmpty) {
+    if (user == null ||
+        sinistroId == null ||
+        sinistroId.isEmpty ||
+        sessionId == null ||
+        sessionId.isEmpty) {
       return;
     }
 
-    final viewerRef = _sinistros
-        .doc(sinistroId)
-        .collection('viewers')
-        .doc(user.uid);
+    await _deleteViewerIfSameSession(
+      sinistroId: sinistroId,
+      uid: user.uid,
+      presenceSessionId: sessionId,
+    ).catchError((_) {});
 
-    await viewerRef.delete().catchError((_) {});
+    // Se a mesma tela voltou muito rápido, não remova o novo viewer do resumo.
+    if (_currentSinistroId == sinistroId &&
+        _currentSessionId != null &&
+        _currentSessionId != sessionId) {
+      return;
+    }
 
     // Remove imediatamente do resumo do documento principal.
     // Isso evita o "rastro fantasma" no card/lista de outros usuários.
     await _removeViewerFromSummary(
       sinistroId: sinistroId,
       uid: user.uid,
+      presenceSessionId: sessionId,
     ).catchError((_) {});
 
     // Recalcula o resumo pela subcoleção, excluindo o usuário atual por segurança.
@@ -92,7 +109,11 @@ class SinistroPresenceService {
         _viewingGeneration == generation;
   }
 
-  Future<void> _writeViewer(String sinistroId, int generation) async {
+  Future<void> _writeViewer(
+    String sinistroId,
+    int generation,
+    String sessionId,
+  ) async {
     final user = _auth.currentUser;
 
     if (user == null || !_isViewingActive(sinistroId, generation)) return;
@@ -111,6 +132,7 @@ class SinistroPresenceService {
       sinistroId: sinistroId,
       profile: fallbackProfile,
       generation: generation,
+      presenceSessionId: sessionId,
     );
 
     // Atualiza com dados completos do Firestore em background.
@@ -127,6 +149,7 @@ class SinistroPresenceService {
           sinistroId: sinistroId,
           profile: fullProfile,
           generation: generation,
+          presenceSessionId: sessionId,
         );
 
         if (!_isViewingActive(sinistroId, generation)) return;
@@ -142,6 +165,7 @@ class SinistroPresenceService {
     required String sinistroId,
     required _UserPresenceProfile profile,
     int? generation,
+    String? presenceSessionId,
   }) async {
     final user = _auth.currentUser;
 
@@ -153,6 +177,12 @@ class SinistroPresenceService {
 
     final now = Timestamp.now();
     final nowMillis = DateTime.now().millisecondsSinceEpoch;
+    final expiresAtMillis = DateTime.now()
+        .add(_viewerTtl)
+        .millisecondsSinceEpoch;
+    final activeSessionId = presenceSessionId ??
+        _currentSessionId ??
+        '${user.uid}_${DateTime.now().microsecondsSinceEpoch}';
 
     final sinistroRef = _sinistros.doc(sinistroId);
     final viewerRef = sinistroRef.collection('viewers').doc(user.uid);
@@ -162,9 +192,19 @@ class SinistroPresenceService {
       'name': profile.name,
       'email': profile.email,
       'photoURL': profile.photoURL,
+      'active': true,
+      'context': 'inspection_summary',
+      'presenceSessionId': activeSessionId,
       'openedAt': FieldValue.serverTimestamp(),
       'lastSeenAt': now,
       'lastSeenAtMillis': nowMillis,
+      'expiresAt': Timestamp.fromDate(
+        DateTime.fromMillisecondsSinceEpoch(
+          expiresAtMillis,
+          isUtc: true,
+        ),
+      ),
+      'expiresAtMillis': expiresAtMillis,
     };
 
     final viewerSummary = {
@@ -172,7 +212,11 @@ class SinistroPresenceService {
       'name': profile.name,
       'email': profile.email,
       'photoURL': profile.photoURL,
+      'active': true,
+      'context': 'inspection_summary',
+      'presenceSessionId': activeSessionId,
       'lastSeenAtMillis': nowMillis,
+      'expiresAtMillis': expiresAtMillis,
     };
 
     final cutoffMillis = DateTime.now()
@@ -239,9 +283,36 @@ class SinistroPresenceService {
     });
   }
 
+  Future<void> _deleteViewerIfSameSession({
+    required String sinistroId,
+    required String uid,
+    required String presenceSessionId,
+  }) async {
+    final viewerRef = _sinistros
+        .doc(sinistroId)
+        .collection('viewers')
+        .doc(uid);
+
+    await _db.runTransaction((transaction) async {
+      final snap = await transaction.get(viewerRef);
+
+      if (!snap.exists) return;
+
+      final data = snap.data() ?? {};
+      final storedSessionId = data['presenceSessionId']?.toString() ?? '';
+
+      // Não apaga um viewer novo caso o app tenha voltado para foreground
+      // antes da escrita de stop terminar.
+      if (storedSessionId == presenceSessionId) {
+        transaction.delete(viewerRef);
+      }
+    });
+  }
+
   Future<void> _removeViewerFromSummary({
     required String sinistroId,
     required String uid,
+    String? presenceSessionId,
   }) async {
     final sinistroRef = _sinistros.doc(sinistroId);
 
@@ -258,7 +329,19 @@ class SinistroPresenceService {
                   (key, value) => MapEntry(key.toString(), value),
                 ),
               )
-              .where((item) => item['uid']?.toString() != uid)
+              .where((item) {
+                final itemUid = item['uid']?.toString() ?? '';
+                final itemSessionId =
+                    item['presenceSessionId']?.toString() ?? '';
+
+                if (itemUid != uid) return true;
+
+                if (presenceSessionId == null || presenceSessionId.isEmpty) {
+                  return false;
+                }
+
+                return itemSessionId != presenceSessionId;
+              })
               .toList()
           : <Map<String, dynamic>>[];
 
@@ -299,8 +382,14 @@ class SinistroPresenceService {
         'name': data['name']?.toString() ?? '',
         'email': data['email']?.toString() ?? '',
         'photoURL': data['photoURL']?.toString() ?? '',
+        'active': data['active'] is bool ? data['active'] as bool : true,
+        'context': data['context']?.toString() ?? 'inspection_summary',
+        'presenceSessionId': data['presenceSessionId']?.toString() ?? '',
         'lastSeenAtMillis': data['lastSeenAtMillis'] is int
             ? data['lastSeenAtMillis'] as int
+            : 0,
+        'expiresAtMillis': data['expiresAtMillis'] is int
+            ? data['expiresAtMillis'] as int
             : 0,
       };
     }).toList()
@@ -335,7 +424,8 @@ class SinistroPresenceService {
 
       final list = snapshot.docs
           .map((doc) => SinistroViewer.fromMap(doc.id, doc.data()))
-          .where((viewer) => viewer.lastSeenAtMillis > cutoffMillis)
+          .where((viewer) =>
+              viewer.active && viewer.lastSeenAtMillis > cutoffMillis)
           .toList();
 
       list.sort((a, b) => b.lastSeenAtMillis.compareTo(a.lastSeenAtMillis));
@@ -423,6 +513,8 @@ class SinistroPresenceService {
       sinistroId: cleanSinistroId,
       profile: profile,
       generation: currentSinistroId == cleanSinistroId ? generation : null,
+      presenceSessionId:
+          currentSinistroId == cleanSinistroId ? _currentSessionId : null,
     );
 
     return inspection;
@@ -514,14 +606,22 @@ class SinistroViewer {
   final String name;
   final String email;
   final String photoURL;
+  final bool active;
+  final String context;
+  final String presenceSessionId;
   final int lastSeenAtMillis;
+  final int expiresAtMillis;
 
   const SinistroViewer({
     required this.uid,
     required this.name,
     required this.email,
     required this.photoURL,
+    required this.active,
+    required this.context,
+    required this.presenceSessionId,
     required this.lastSeenAtMillis,
+    required this.expiresAtMillis,
   });
 
   String get displayName {
@@ -540,8 +640,14 @@ class SinistroViewer {
       name: data['name']?.toString() ?? '',
       email: data['email']?.toString() ?? '',
       photoURL: data['photoURL']?.toString() ?? '',
+      active: data['active'] is bool ? data['active'] as bool : true,
+      context: data['context']?.toString() ?? 'inspection_summary',
+      presenceSessionId: data['presenceSessionId']?.toString() ?? '',
       lastSeenAtMillis: data['lastSeenAtMillis'] is int
           ? data['lastSeenAtMillis'] as int
+          : 0,
+      expiresAtMillis: data['expiresAtMillis'] is int
+          ? data['expiresAtMillis'] as int
           : 0,
     );
   }

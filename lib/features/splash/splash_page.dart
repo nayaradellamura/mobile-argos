@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shorebird_code_push/shorebird_code_push.dart';
 
 class SplashPage extends StatefulWidget {
   final VoidCallback onComplete;
@@ -17,9 +18,16 @@ class _SplashPageState extends State<SplashPage> {
   Timer? timer;
   bool completed = false;
 
+  // 1. Usando a classe nova do Shorebird: ShorebirdUpdater
+  final shorebirdUpdater = ShorebirdUpdater();
+  int? _patchNumber;
+
   @override
   void initState() {
     super.initState();
+    
+    // 2. Busca o número do patch ao abrir a tela
+    _fetchPatchNumber();
 
     timer = Timer.periodic(const Duration(milliseconds: 30), (timer) {
       if (!mounted) return;
@@ -44,6 +52,21 @@ class _SplashPageState extends State<SplashPage> {
         progress += 2;
       });
     });
+  }
+
+  // 3. Método atualizado para ler o patch
+  Future<void> _fetchPatchNumber() async {
+    try {
+      final currentPatch = await shorebirdUpdater.readCurrentPatch();
+      if (mounted) {
+        setState(() {
+          _patchNumber = currentPatch?.number;
+        });
+      }
+    } catch (e) {
+      // Se der erro (ex: rodando no modo debug), ignora em silêncio
+      debugPrint('Erro ao buscar patch do Shorebird: $e');
+    }
   }
 
   @override
@@ -232,8 +255,9 @@ class _SplashPageState extends State<SplashPage> {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
+                      // 4. Lógica de exibição da versão
                       Text(
-                        'v1.0',
+                        _patchNumber != null ? 'v1.0 • Patch $_patchNumber' : 'v1.0',
                         style: GoogleFonts.inter(
                           color: Colors.white,
                           fontSize: 10,
