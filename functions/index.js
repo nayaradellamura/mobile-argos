@@ -132,51 +132,70 @@ exports.sendArgosMessage = onCall(
     }
 
     const sessionId = createSessionId(uid, inspectionId);
-    const client = getDialogflowClient();
-
-    const sessionPath = client.projectLocationAgentSessionPath(
-      DIALOGFLOW_PROJECT_ID,
-      LOCATION,
-      AGENT_ID,
-      sessionId
-    );
-
-    const detectIntentRequest = {
-      session: sessionPath,
-      queryInput: {
-        text: {
-          text,
-        },
-        languageCode: LANGUAGE_CODE,
-      },
-    };
-
-    if (modo === "retificacao") {
-      detectIntentRequest.queryParams = {
-        currentPage:
-          "projects/upheld-magpie-404322/locations/us-central1/agents/8ece03b0-a71c-4860-818f-422d9c61ddac/playbooks/029ec3ba-ffc9-4185-99cf-9cc437273dd2",
-        parameters: {
-          ajustes_necessarios: String(
-            request.data.ajustesNecessarios || ""
-          ),
-          contexto_vistoria_anterior: String(
-            request.data.contextoVistoriaAnterior || ""
-          ),
-          tipo_vistoria: "RETIFICACAO",
-          id_vistoria: inspectionId,
-        },
-      };
-    }
 
     try {
-      const [response] = await client.detectIntent(detectIntentRequest);
+      const context = await loadArgosInspectionContext({
+        inspectionId,
+        sinistroId: request.data.sinistroId,
+      });
 
-      const reply = extractDialogflowReply(response);
+      const freshSessionParameters = buildArgosSessionParameters({
+        inspectionId,
+        sinistroId: context.sinistroId,
+        vistoria: context.vistoria,
+        sinistro: context.sinistro,
+        veiculo: context.veiculo,
+        extra: {
+          ...(request.data.parameters || {}),
+          ...(modo === "retificacao"
+            ? {
+                ajustes_necessarios: request.data.ajustesNecessarios,
+                contexto_vistoria_anterior:
+                  request.data.contextoVistoriaAnterior,
+                tipo_vistoria: "RETIFICACAO",
+              }
+            : {}),
+        },
+      });
+
+      const savedAgentParameters = context.vistoria?.agentParameters || {};
+      const sessionParameters = mergeSessionParameters(
+        savedAgentParameters,
+        freshSessionParameters
+      );
+
+      console.log("Parâmetros enviados ao agente Argos no texto:", {
+        inspectionId,
+        sinistroId: context.sinistroId,
+        sessionId,
+        parameters: sessionParameters,
+      });
+
+      const agentResult = await sendTextToArgosAgent({
+        uid,
+        inspectionId,
+        text,
+        sessionParameters,
+        currentPage: context.vistoria?.agentCurrentPage || "",
+      });
+
+      const reply = agentResult.reply;
+
+      await saveAgentStateToVistoria({
+        idvistoria: inspectionId,
+        currentPage: agentResult.currentPage,
+        parameters:
+          agentResult.parameters && Object.keys(agentResult.parameters).length > 0
+            ? agentResult.parameters
+            : sessionParameters,
+      });
 
       return {
         reply,
         inspectionId,
+        sinistroId: context.sinistroId,
         modo: modo || "normal",
+        sessionParameters,
       };
     } catch (error) {
       console.error("Erro ao conversar com Dialogflow CX:", error);
@@ -196,6 +215,8 @@ exports.sendArgosMessage = onCall(
     }
   }
 );
+
+exports.sendmessageargos = exports.sendArgosMessage;
 
 exports.notifySinistroChanges = onDocumentWritten(
   {
@@ -352,6 +373,7 @@ exports.sendArgosAudioMessage = onCall(
         ? await db.collection("sinistro").doc(sinistroId).get()
         : null;
       const sinistro = sinistroSnap?.exists ? sinistroSnap.data() || {} : {};
+      const veiculo = await loadVehicleContext({ db, sinistro });
 
       const audioAnalysis = await transcribeAndReviewAudioWithGemini({
         gcsUri,
@@ -390,6 +412,7 @@ exports.sendArgosAudioMessage = onCall(
   sinistroId,
   vistoria,
   sinistro,
+  veiculo,
   extra: data.parameters || {},
 });
 
@@ -476,24 +499,76 @@ console.log("Parâmetros enviados ao agente Argos no áudio:", sessionParameters
       };
     } catch (error) {
       console.error("Erro em sendArgosAudioMessage:", error);
+      const audioError = normalizeArgosAudioError(error);
 
       await audioRef.set(
         {
           transcriptionStatus: "error",
           reviewStatus: "error",
           agentStatus: "error",
-          errorMessage: error.message || String(error),
+          errorCode: audioError.code,
+          errorMessage: audioError.message,
+          errorDetails: audioError.details,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         },
         { merge: true }
       );
 
-      throw new HttpsError("internal", "Não foi possível processar o áudio do chat.", {
+      throw new HttpsError(audioError.httpsCode, audioError.message, {
+        code: audioError.code,
         message: error.message || String(error),
+        details: audioError.details,
       });
     }
   }
 );
+
+function normalizeArgosAudioError(error) {
+  const message = String(error?.message || error || "");
+  const causeMessage = String(error?.cause?.message || "");
+  const combinedMessage = `${message}\n${causeMessage}`.toLowerCase();
+  const statusCode = Number(error?.code || error?.cause?.code || 0);
+
+  if (
+    statusCode === 403 &&
+    combinedMessage.includes("dunning") &&
+    combinedMessage.includes("deny")
+  ) {
+    return {
+      httpsCode: "failed-precondition",
+      code: "vertex-ai-billing-denied",
+      message:
+        "O projeto está bloqueado para usar o Vertex AI/Gemini por cobrança ou faturamento. Verifique a conta de faturamento do projeto fho-argos e tente enviar o áudio novamente.",
+      details: {
+        provider: "vertex-ai",
+        projectId: FIREBASE_PROJECT_ID,
+        reason: "billing-or-dunning-denied",
+      },
+    };
+  }
+
+  if (statusCode === 403) {
+    return {
+      httpsCode: "permission-denied",
+      code: "vertex-ai-permission-denied",
+      message:
+        "A função não tem permissão para usar o Vertex AI/Gemini neste projeto.",
+      details: {
+        provider: "vertex-ai",
+        projectId: FIREBASE_PROJECT_ID,
+      },
+    };
+  }
+
+  return {
+    httpsCode: "internal",
+    code: "audio-processing-error",
+    message: "Não foi possível processar o áudio do chat.",
+    details: {
+      provider: "argos-audio",
+    },
+  };
+}
 
 function buildSinistroNotification({ sinistroId, before, after, isCreate }) {
   const protocol = String(after.protocol || sinistroId);
@@ -1017,17 +1092,52 @@ async function loadArgosInspectionContext({ inspectionId, sinistroId }) {
     if (sinistroSnap.exists) sinistro = sinistroSnap.data() || {};
   }
 
-  return { vistoria, sinistro, sinistroId: resolvedSinistroId };
+  const veiculo = await loadVehicleContext({ db, sinistro });
+
+  return { vistoria, sinistro, veiculo, sinistroId: resolvedSinistroId };
 }
 
-function buildArgosSessionParameters({ inspectionId, sinistroId, vistoria = {}, sinistro = {}, extra = {} }) {
+async function loadVehicleContext({ db, sinistro = {} }) {
   const veiculoSnapshot = asObject(sinistro.veiculoSnapshot || sinistro.vehicleSnapshot);
+  const veiculoId = str(sinistro.veiculoId || veiculoSnapshot.id);
+  const placa = str(veiculoSnapshot.placa || sinistro.plate || sinistro.placa);
+
+  if (veiculoId) {
+    const byIdSnap = await db.collection("veiculos").doc(veiculoId).get();
+    if (byIdSnap.exists) return byIdSnap.data() || {};
+  }
+
+  if (placa) {
+    const byPlateSnap = await db
+      .collection("veiculos")
+      .where("placa", "==", placa)
+      .limit(1)
+      .get();
+
+    if (!byPlateSnap.empty) return byPlateSnap.docs[0].data() || {};
+  }
+
+  return {};
+}
+
+function buildArgosSessionParameters({ inspectionId, sinistroId, vistoria = {}, sinistro = {}, veiculo = {}, extra = {} }) {
+  const veiculoSnapshot = asObject(sinistro.veiculoSnapshot || sinistro.vehicleSnapshot);
+  const veiculoCadastro = asObject(veiculo);
   const clienteSnapshot = asObject(sinistro.clienteSnapshot);
   const credenciadoSnapshot = asObject(sinistro.credenciadoSnapshot);
+  const seguradoraSnapshot = asObject(sinistro.seguradoraSnapshot);
 
-  const marca = str(veiculoSnapshot.marca);
-  const modelo = str(veiculoSnapshot.modelo);
+  const marca = str(veiculoSnapshot.marca || veiculoCadastro.marca);
+  const modelo = str(veiculoSnapshot.modelo || veiculoCadastro.modelo);
   const modeloCompleto = [marca, modelo].filter(Boolean).join(" ").trim();
+  const ano = str(
+    veiculoSnapshot.anoFabricacao ||
+      veiculoSnapshot.anoModelo ||
+      veiculoSnapshot.ano ||
+      veiculoCadastro.anoFabricacao ||
+      veiculoCadastro.anoModelo ||
+      veiculoCadastro.ano
+  );
 
   return removeEmptyValues({
     placa_veiculo:
@@ -1035,6 +1145,7 @@ function buildArgosSessionParameters({ inspectionId, sinistroId, vistoria = {}, 
       extra.placaVeiculo ||
       vistoria.placa ||
       veiculoSnapshot.placa ||
+      veiculoCadastro.placa ||
       sinistro.plate ||
       sinistro.placa,
 
@@ -1043,8 +1154,88 @@ function buildArgosSessionParameters({ inspectionId, sinistroId, vistoria = {}, 
       extra.modeloVeiculo ||
       vistoria.veiculo ||
       modeloCompleto ||
+      veiculoCadastro.modelo ||
       sinistro.vehicle ||
       sinistro.veiculo,
+
+    marca_veiculo:
+      extra.marca_veiculo ||
+      extra.marcaVeiculo ||
+      marca ||
+      veiculoCadastro.marca ||
+      sinistro.marca,
+
+    ano_veiculo:
+      extra.ano_veiculo ||
+      extra.anoVeiculo ||
+      ano ||
+      sinistro.ano,
+
+    ano_fabricacao_veiculo:
+      extra.ano_fabricacao_veiculo ||
+      extra.anoFabricacaoVeiculo ||
+      veiculoSnapshot.anoFabricacao ||
+      veiculoCadastro.anoFabricacao,
+
+    ano_modelo_veiculo:
+      extra.ano_modelo_veiculo ||
+      extra.anoModeloVeiculo ||
+      veiculoSnapshot.anoModelo ||
+      veiculoCadastro.anoModelo,
+
+    cor_veiculo:
+      extra.cor_veiculo ||
+      extra.corVeiculo ||
+      veiculoSnapshot.cor ||
+      veiculoCadastro.cor ||
+      sinistro.cor,
+
+    chassi_veiculo:
+      extra.chassi_veiculo ||
+      extra.chassiVeiculo ||
+      veiculoSnapshot.chassi ||
+      veiculoSnapshot.chassis ||
+      veiculoCadastro.chassi ||
+      veiculoCadastro.chassis ||
+      sinistro.chassi ||
+      sinistro.chassis,
+
+    renavam_veiculo:
+      extra.renavam_veiculo ||
+      extra.renavamVeiculo ||
+      veiculoSnapshot.renavam ||
+      veiculoCadastro.renavam ||
+      sinistro.renavam,
+
+    combustivel_veiculo:
+      extra.combustivel_veiculo ||
+      extra.combustivelVeiculo ||
+      veiculoSnapshot.combustivel ||
+      veiculoCadastro.combustivel ||
+      sinistro.combustivel,
+
+    veiculo_id:
+      extra.veiculo_id ||
+      extra.veiculoId ||
+      sinistro.veiculoId ||
+      veiculoSnapshot.id ||
+      veiculoCadastro.id,
+
+    proprietario_veiculo:
+      extra.proprietario_veiculo ||
+      extra.proprietarioVeiculo ||
+      veiculoCadastro.proprietario ||
+      sinistro.clienteId,
+
+    status_veiculo:
+      extra.status_veiculo ||
+      extra.statusVeiculo ||
+      veiculoCadastro.status,
+
+    tipo_cobertura_veiculo:
+      extra.tipo_cobertura_veiculo ||
+      extra.tipoCoberturaVeiculo ||
+      veiculoCadastro.tipoCobertura,
 
     relato_cliente_simulado:
       extra.relato_cliente_simulado ||
@@ -1056,8 +1247,24 @@ function buildArgosSessionParameters({ inspectionId, sinistroId, vistoria = {}, 
       sinistro.observations ||
       sinistro.observacoes,
 
+    ocorrido_sinistro:
+      extra.ocorrido_sinistro ||
+      extra.ocorridoSinistro ||
+      sinistro.damageDescription ||
+      sinistro.descricaoArtigos ||
+      vistoria.descricaoArtigos,
+
+    observacoes_sinistro:
+      extra.observacoes_sinistro ||
+      extra.observacoesSinistro ||
+      sinistro.observations ||
+      sinistro.observacoes ||
+      vistoria.observacoes,
+
     id_vistoria: vistoria.idvistoria || inspectionId,
     sinistro_id: vistoria.sinistroId || sinistroId,
+    protocolo_sinistro: sinistro.protocol || sinistroId,
+    tipo_vistoria: extra.tipo_vistoria || extra.tipoVistoria || vistoria.tipoVistoria,
 
     cliente_nome:
       vistoria.cliente ||
@@ -1065,15 +1272,42 @@ function buildArgosSessionParameters({ inspectionId, sinistroId, vistoria = {}, 
       sinistro.owner ||
       sinistro.cliente,
 
+    cliente_id: sinistro.clienteId,
+    cliente_documento: clienteSnapshot.cpfCnpj,
+    cliente_email: clienteSnapshot.email,
+    cliente_telefone: clienteSnapshot.telefone,
+
     oficina_nome:
       vistoria.credenciado ||
       credenciadoSnapshot.name ||
       sinistro.workshop ||
       sinistro.credenciadoNome,
 
+    credenciado_id: sinistro.credenciadoId,
+    credenciado_nome: credenciadoSnapshot.name || vistoria.credenciado,
+    credenciado_email: credenciadoSnapshot.email,
+    credenciado_telefone: credenciadoSnapshot.phone,
+    credenciado_endereco: credenciadoSnapshot.address || vistoria.local,
+    credenciado_cidade: credenciadoSnapshot.city,
+    credenciado_uf: credenciadoSnapshot.uf,
+
+    seguradora_id: sinistro.seguradoraId,
+    seguradora_nome: seguradoraSnapshot.name,
+    seguradora_cnpj: seguradoraSnapshot.cnpj,
+
     prioridade_sinistro: sinistro.priority,
     tipo_sinistro: sinistro.claimType,
     status_sinistro: sinistro.status,
+    dias_no_status_sinistro: sinistro.daysInStage,
+    data_entrada_sinistro: sinistro.entryDate,
+    data_agendada_sinistro: sinistro.scheduledDate,
+    checkin_sinistro: sinistro.checkInAt || vistoria.checkInAt,
+    status_atualizado_em_sinistro: sinistro.statusUpdatedAt,
+    chat_habilitado_sinistro: sinistro.chatEnabled,
+    chat_status_sinistro: sinistro.chatStatus,
+    ultima_mensagem_sinistro: sinistro.lastMessage,
+    ultima_mensagem_em_sinistro: sinistro.lastMessageAt,
+    ultima_mensagem_por_sinistro: sinistro.lastMessageBy,
   });
 }
 

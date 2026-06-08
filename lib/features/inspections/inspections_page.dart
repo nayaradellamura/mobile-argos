@@ -15,6 +15,8 @@ enum InspectionFilter {
   pending,
   inProgress,
   aiAnalysis,
+  revision,
+  cancelled,
   completed,
 }
 
@@ -29,6 +31,10 @@ extension InspectionFilterX on InspectionFilter {
         return 'Andamento';
       case InspectionFilter.aiAnalysis:
         return 'Análise';
+      case InspectionFilter.revision:
+        return 'Revisão';
+      case InspectionFilter.cancelled:
+        return 'Canceladas';
       case InspectionFilter.completed:
         return 'Concluídas';
     }
@@ -44,8 +50,12 @@ extension InspectionFilterX on InspectionFilter {
         return 'Aguardando vistoria';
       case InspectionFilter.aiAnalysis:
         return 'Em Análise';
+      case InspectionFilter.revision:
+        return 'Retificação/revisão';
+      case InspectionFilter.cancelled:
+        return 'Canceladas';
       case InspectionFilter.completed:
-        return 'Aprovadas/negadas';
+        return 'Finalizadas';
     }
   }
 
@@ -59,6 +69,10 @@ extension InspectionFilterX on InspectionFilter {
         return Icons.build_circle_outlined;
       case InspectionFilter.aiAnalysis:
         return Icons.psychology_alt_outlined;
+      case InspectionFilter.revision:
+        return Icons.rate_review_outlined;
+      case InspectionFilter.cancelled:
+        return Icons.cancel_outlined;
       case InspectionFilter.completed:
         return Icons.verified_outlined;
     }
@@ -74,6 +88,10 @@ extension InspectionFilterX on InspectionFilter {
         return const Color(0xFF0057C0);
       case InspectionFilter.aiAnalysis:
         return Colors.purple;
+      case InspectionFilter.revision:
+        return Colors.deepOrange;
+      case InspectionFilter.cancelled:
+        return Colors.redAccent;
       case InspectionFilter.completed:
         return Colors.green;
     }
@@ -89,6 +107,10 @@ extension InspectionFilterX on InspectionFilter {
         return inspection.isInProgressCategory;
       case InspectionFilter.aiAnalysis:
         return inspection.isAiAnalysisCategory;
+      case InspectionFilter.revision:
+        return inspection.isRevisionCategory;
+      case InspectionFilter.cancelled:
+        return inspection.isCancelledCategory;
       case InspectionFilter.completed:
         return inspection.isCompletedCategory;
     }
@@ -1105,16 +1127,9 @@ class _InspectionHistoryTabState extends State<_InspectionHistoryTab> {
   String? _selectedDocId;
 
   Stream<QuerySnapshot<Map<String, dynamic>>> _historyStream() {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-
-    if (uid.isEmpty) {
-      return Stream<QuerySnapshot<Map<String, dynamic>>>.empty();
-    }
-
     return FirebaseFirestore.instance
         .collection('vistorias')
         .where('sinistroId', isEqualTo: widget.inspection.id)
-        .where('inspectorId', isEqualTo: uid)
         .snapshots();
   }
 
@@ -1150,9 +1165,9 @@ class _InspectionHistoryTabState extends State<_InspectionHistoryTab> {
         if (vistorias.isEmpty) {
           return const _StateMessage(
             icon: Icons.assignment_outlined,
-            title: 'Nenhuma vistoria sua vinculada',
+            title: 'Nenhuma vistoria vinculada',
             message:
-                'Quando você iniciar uma vistoria para este sinistro, o histórico técnico aparecerá aqui.',
+                'Quando uma vistoria for iniciada para este sinistro, o histórico técnico aparecerá aqui.',
           );
         }
 
@@ -1268,7 +1283,7 @@ class _HistoryHeaderCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 3),
                 Text(
-                  '$total vistoria${total == 1 ? '' : 's'} vinculada${total == 1 ? '' : 's'} por você',
+                  '$total vistoria${total == 1 ? '' : 's'} vinculada${total == 1 ? '' : 's'} ao sinistro',
                   style: const TextStyle(
                     color: Color(0xFF414755),
                     fontSize: 12,
@@ -1373,13 +1388,24 @@ class _HistoryVistoriaCard extends StatelessWidget {
                     const SizedBox(height: 4),
                     Text(
                       date == null
-                          ? vistoria.statusLabel
-                          : '${vistoria.statusLabel} • ${_formatDateTime(date)}',
+                          ? '${vistoria.statusLabel} • ${vistoria.tipoLabel}'
+                          : '${vistoria.statusLabel} • ${vistoria.tipoLabel} • ${_formatDateTime(date)}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Color(0xFF414755),
                         fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      'Responsável: ${vistoria.responsibleLabel}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xFF6B7280),
+                        fontSize: 10,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
@@ -1732,7 +1758,7 @@ class _HistoryPhotoPreviewGrid extends StatelessWidget {
       runSpacing: 8,
       children: List.generate(photos.length, (index) {
         return _HistoryPhotoThumb(
-          base64Value: photos[index],
+          imageValue: photos[index],
           allPhotos: photos,
           initialIndex: index,
         );
@@ -1742,12 +1768,12 @@ class _HistoryPhotoPreviewGrid extends StatelessWidget {
 }
 
 class _HistoryPhotoThumb extends StatelessWidget {
-  final String base64Value;
+  final String imageValue;
   final List<String> allPhotos;
   final int initialIndex;
 
   const _HistoryPhotoThumb({
-    required this.base64Value,
+    required this.imageValue,
     required this.allPhotos,
     required this.initialIndex,
   });
@@ -1755,8 +1781,6 @@ class _HistoryPhotoThumb extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     try {
-      final bytes = _decodeBase64Image(base64Value);
-
       return Material(
         color: Colors.transparent,
         child: InkWell(
@@ -1774,15 +1798,11 @@ class _HistoryPhotoThumb extends StatelessWidget {
             borderRadius: BorderRadius.circular(14),
             child: Stack(
               children: [
-                Image.memory(
-                  Uint8List.fromList(bytes),
+                _HistoryPhotoImage(
+                  value: imageValue,
                   width: 82,
                   height: 82,
                   fit: BoxFit.cover,
-                  gaplessPlayback: true,
-                  errorBuilder: (_, __, ___) => const _HistoryBrokenPreview(
-                    icon: Icons.broken_image_outlined,
-                  ),
                 ),
                 Positioned(
                   right: 6,
@@ -1878,28 +1898,16 @@ class _PhotoGalleryDialogState extends State<_PhotoGalleryDialog> {
                   setState(() => _currentIndex = index);
                 },
                 itemBuilder: (context, index) {
-                  try {
-                    final bytes = _decodeBase64Image(widget.photos[index]);
-                    return InteractiveViewer(
-                      minScale: 0.8,
-                      maxScale: 4,
-                      child: Center(
-                        child: Image.memory(
-                          Uint8List.fromList(bytes),
-                          fit: BoxFit.contain,
-                          gaplessPlayback: true,
-                        ),
+                  return InteractiveViewer(
+                    minScale: 0.8,
+                    maxScale: 4,
+                    child: Center(
+                      child: _HistoryPhotoImage(
+                        value: widget.photos[index],
+                        fit: BoxFit.contain,
                       ),
-                    );
-                  } catch (_) {
-                    return const Center(
-                      child: Icon(
-                        Icons.broken_image_outlined,
-                        color: Colors.white,
-                        size: 48,
-                      ),
-                    );
-                  }
+                    ),
+                  );
                 },
               ),
             ),
@@ -1907,6 +1915,55 @@ class _PhotoGalleryDialogState extends State<_PhotoGalleryDialog> {
         ),
       ),
     );
+  }
+}
+
+class _HistoryPhotoImage extends StatelessWidget {
+  final String value;
+  final double? width;
+  final double? height;
+  final BoxFit fit;
+
+  const _HistoryPhotoImage({
+    required this.value,
+    this.width,
+    this.height,
+    required this.fit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cleanValue = value.trim();
+
+    if (_isRemoteImageValue(cleanValue)) {
+      return Image.network(
+        cleanValue,
+        width: width,
+        height: height,
+        fit: fit,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) => const _HistoryBrokenPreview(
+          icon: Icons.broken_image_outlined,
+        ),
+      );
+    }
+
+    try {
+      final bytes = _decodeBase64Image(cleanValue);
+
+      return Image.memory(
+        Uint8List.fromList(bytes),
+        width: width,
+        height: height,
+        fit: fit,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) => const _HistoryBrokenPreview(
+          icon: Icons.broken_image_outlined,
+        ),
+      );
+    } catch (_) {
+      return const _HistoryBrokenPreview(icon: Icons.broken_image_outlined);
+    }
   }
 }
 
@@ -2611,6 +2668,14 @@ class _InspectionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (inspection.vistoriaAtualId.trim().isNotEmpty) {
+      return _InspectionCardContent(
+        inspection: inspection,
+        hasLinkedVistoria: true,
+        onTap: onTap,
+      );
+    }
+
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: _linkedVistoriaStream(),
       builder: (context, snapshot) {
@@ -4317,6 +4382,11 @@ class InspectionCase {
   final String assignedToPhotoURL;
   final DateTime? assignedAt;
   final List<SinistroViewer> activeViewers;
+  final String vistoriaAtualId;
+  final String vistoriaAtualStatus;
+  final String vistoriaAtualTipo;
+  final String vistoriaAtualOrigemId;
+  final String retificacaoAtualId;
 
   const InspectionCase({
     required this.id,
@@ -4338,6 +4408,11 @@ class InspectionCase {
     this.assignedToPhotoURL = '',
     this.assignedAt,
     this.activeViewers = const [],
+    this.vistoriaAtualId = '',
+    this.vistoriaAtualStatus = '',
+    this.vistoriaAtualTipo = '',
+    this.vistoriaAtualOrigemId = '',
+    this.retificacaoAtualId = '',
   });
 
   factory InspectionCase.fromFirestore(
@@ -4378,6 +4453,11 @@ class InspectionCase {
       assignedToPhotoURL: _stringValue(data['assignedToPhotoURL']),
       assignedAt: _parseDateTime(data['assignedAt']),
       activeViewers: _parseSinistroViewers(data['activeViewers']),
+      vistoriaAtualId: _stringValue(data['vistoriaAtualId']),
+      vistoriaAtualStatus: _stringValue(data['vistoriaAtualStatus']),
+      vistoriaAtualTipo: _stringValue(data['vistoriaAtualTipo']),
+      vistoriaAtualOrigemId: _stringValue(data['vistoriaAtualOrigemId']),
+      retificacaoAtualId: _stringValue(data['retificacaoAtualId']),
     );
   }
 
@@ -4397,26 +4477,85 @@ class InspectionCase {
   }
 
   bool get isCompletedCategory {
+    final vistoriaStatus = _normalizeStatus(vistoriaAtualStatus);
+
     return status == InspectionStatus.approved ||
-        status == InspectionStatus.rejected;
+        status == InspectionStatus.finalized ||
+        vistoriaStatus.contains('aprovada') ||
+        vistoriaStatus.contains('aprovado') ||
+        vistoriaStatus.contains('approved') ||
+        vistoriaStatus.contains('finalizada') ||
+        vistoriaStatus.contains('finalizado') ||
+        vistoriaStatus.contains('finalized');
   }
 
   bool get isAiAnalysisCategory {
-    return status == InspectionStatus.submitted;
+    final vistoriaStatus = _normalizeStatus(vistoriaAtualStatus);
+
+    return status == InspectionStatus.submitted ||
+        vistoriaStatus.contains('analise') ||
+        vistoriaStatus.contains('análise') ||
+        vistoriaStatus.contains('review') ||
+        vistoriaStatus.contains('submitted');
+  }
+
+  bool get isRevisionCategory {
+    final tipo = _normalizeStatus(vistoriaAtualTipo);
+    final vistoriaStatus = _normalizeStatus(vistoriaAtualStatus);
+    final origemId = vistoriaAtualOrigemId.trim();
+    final retificacaoId = retificacaoAtualId.trim();
+
+    // Retificação/revisão deve ser identificada pela modelagem nova:
+    // - a vistoria atual é RETIFICACAO/REVISAO;
+    // - ou a vistoria atual nasceu de uma vistoria original (vistoriaAtualOrigemId);
+    // - ou este sinistro/original aponta para uma retificação atual (retificacaoAtualId).
+    // Status REJEITADA sozinho não é usado aqui, porque rejeição e retificação
+    // são conceitos diferentes no novo fluxo operacional.
+    return status == InspectionStatus.rejected ||
+        tipo.contains('retificacao') ||
+        tipo.contains('retificação') ||
+        tipo.contains('revisao') ||
+        tipo.contains('revisão') ||
+        origemId.isNotEmpty ||
+        retificacaoId.isNotEmpty ||
+        vistoriaStatus.contains('rejeitada') ||
+        vistoriaStatus.contains('rejeitado') ||
+        vistoriaStatus.contains('rejected') ||
+        vistoriaStatus.contains('retificar') ||
+        vistoriaStatus.contains('retificacao') ||
+        vistoriaStatus.contains('retificação') ||
+        vistoriaStatus.contains('revisao') ||
+        vistoriaStatus.contains('revisão');
+  }
+
+  bool get isCancelledCategory {
+    final vistoriaStatus = _normalizeStatus(vistoriaAtualStatus);
+
+    return status == InspectionStatus.cancelled ||
+        vistoriaStatus.contains('cancelada') ||
+        vistoriaStatus.contains('cancelado') ||
+        vistoriaStatus.contains('cancelled') ||
+        vistoriaStatus.contains('expirada') ||
+        vistoriaStatus.contains('expirado') ||
+        vistoriaStatus.contains('expired') ||
+        vistoriaStatus.contains('abandonada') ||
+        vistoriaStatus.contains('abandonado');
   }
 
   bool get isInProgressCategory {
     return checkInAt != null &&
         !isAiAnalysisCategory &&
-        !isCompletedCategory &&
-        status != InspectionStatus.cancelled;
+        !isRevisionCategory &&
+        !isCancelledCategory &&
+        !isCompletedCategory;
   }
 
   bool get isPendingCategory {
     return checkInAt == null &&
         !isAiAnalysisCategory &&
-        !isCompletedCategory &&
-        status != InspectionStatus.cancelled;
+        !isRevisionCategory &&
+        !isCancelledCategory &&
+        !isCompletedCategory;
   }
 
   InspectionCase copyWith({
@@ -4428,6 +4567,11 @@ class InspectionCase {
     String? assignedToPhotoURL,
     DateTime? assignedAt,
     List<SinistroViewer>? activeViewers,
+    String? vistoriaAtualId,
+    String? vistoriaAtualStatus,
+    String? vistoriaAtualTipo,
+    String? vistoriaAtualOrigemId,
+    String? retificacaoAtualId,
   }) {
     return InspectionCase(
       id: id,
@@ -4449,6 +4593,11 @@ class InspectionCase {
       assignedToPhotoURL: assignedToPhotoURL ?? this.assignedToPhotoURL,
       assignedAt: assignedAt ?? this.assignedAt,
       activeViewers: activeViewers ?? this.activeViewers,
+      vistoriaAtualId: vistoriaAtualId ?? this.vistoriaAtualId,
+      vistoriaAtualStatus: vistoriaAtualStatus ?? this.vistoriaAtualStatus,
+      vistoriaAtualTipo: vistoriaAtualTipo ?? this.vistoriaAtualTipo,
+      vistoriaAtualOrigemId: vistoriaAtualOrigemId ?? this.vistoriaAtualOrigemId,
+      retificacaoAtualId: retificacaoAtualId ?? this.retificacaoAtualId,
     );
   }
 }
@@ -4582,6 +4731,10 @@ class LinkedVistoriaInfo {
   final String veiculo;
   final String cliente;
   final String credenciado;
+  final String tipoVistoria;
+  final String inspectorId;
+  final String inspectorName;
+  final String inspectorEmail;
   final DateTime? createdAt;
   final DateTime? updatedAt;
 
@@ -4602,6 +4755,10 @@ class LinkedVistoriaInfo {
     required this.veiculo,
     required this.cliente,
     required this.credenciado,
+    required this.tipoVistoria,
+    required this.inspectorId,
+    required this.inspectorName,
+    required this.inspectorEmail,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -4651,18 +4808,57 @@ class LinkedVistoriaInfo {
       veiculo: _stringValue(data['veiculo']),
       cliente: _stringValue(data['cliente']),
       credenciado: _stringValue(data['credenciado']),
+      tipoVistoria: _stringValue(data['tipoVistoria'], fallback: 'ORIGINAL'),
+      inspectorId: _stringValue(data['inspectorId']),
+      inspectorName: _stringValue(
+        data['inspectorName'],
+        fallback: _stringValue(
+          data['inspectorNome'],
+          fallback: _stringValue(data['inspectorEmail']),
+        ),
+      ),
+      inspectorEmail: _stringValue(data['inspectorEmail']),
       createdAt: _parseDateTime(data['createdAt']),
       updatedAt: _parseDateTime(data['updatedAt']),
     );
   }
 
+  bool get isRetificacao {
+    final normalized = _normalizeStatus(tipoVistoria);
+
+    return normalized.contains('retificacao') ||
+        normalized.contains('retificação') ||
+        normalized.contains('revisao') ||
+        normalized.contains('revisão') ||
+        normalized.contains('retificacao');
+  }
+
+  String get tipoLabel => isRetificacao ? 'Retificação' : 'Original';
+
+  String get responsibleLabel {
+    final name = inspectorName.trim();
+    final email = inspectorEmail.trim();
+
+    if (name.isNotEmpty) return name;
+    if (email.isNotEmpty) return email;
+    return 'Mecânico não informado';
+  }
+
   String get statusLabel {
     final normalized = _normalizeStatus(status);
 
-    if (normalized.contains('abandonada')) return 'Abandonada';
-    if (normalized.contains('expirada')) return 'Expirada';
-    if (normalized.contains('finalizada')) return 'Finalizada';
-    if (normalized.contains('cancelada')) return 'Cancelada';
+    if (normalized.contains('abandonada') ||
+        normalized.contains('abandonado')) return 'Abandonada';
+    if (normalized.contains('expirada') ||
+        normalized.contains('expirado')) return 'Expirada';
+    if (normalized.contains('finalizada') ||
+        normalized.contains('finalizado')) return 'Finalizada';
+    if (normalized.contains('cancelada') ||
+        normalized.contains('cancelado')) return 'Cancelada';
+    if (normalized.contains('rejeitada') ||
+        normalized.contains('rejeitado')) return 'Rejeitada';
+    if (normalized.contains('analise') ||
+        normalized.contains('análise')) return 'Em análise';
 
     return 'Em andamento';
   }
@@ -4670,10 +4866,18 @@ class LinkedVistoriaInfo {
   Color get statusColor {
     final normalized = _normalizeStatus(status);
 
-    if (normalized.contains('abandonada')) return Colors.grey;
-    if (normalized.contains('expirada')) return Colors.deepOrange;
-    if (normalized.contains('finalizada')) return Colors.green;
-    if (normalized.contains('cancelada')) return Colors.redAccent;
+    if (normalized.contains('abandonada') ||
+        normalized.contains('abandonado')) return Colors.grey;
+    if (normalized.contains('expirada') ||
+        normalized.contains('expirado')) return Colors.deepOrange;
+    if (normalized.contains('finalizada') ||
+        normalized.contains('finalizado')) return Colors.green;
+    if (normalized.contains('cancelada') ||
+        normalized.contains('cancelado')) return Colors.redAccent;
+    if (normalized.contains('rejeitada') ||
+        normalized.contains('rejeitado')) return Colors.redAccent;
+    if (normalized.contains('analise') ||
+        normalized.contains('análise')) return Colors.purple;
 
     return const Color(0xFF0057C0);
   }
@@ -4681,13 +4885,22 @@ class LinkedVistoriaInfo {
   IconData get statusIcon {
     final normalized = _normalizeStatus(status);
 
-    if (normalized.contains('abandonada')) return Icons.block_outlined;
-    if (normalized.contains('expirada')) return Icons.timer_off_outlined;
-    if (normalized.contains('finalizada')) return Icons.verified_outlined;
-    if (normalized.contains('cancelada')) return Icons.cancel_outlined;
+    if (normalized.contains('abandonada') ||
+        normalized.contains('abandonado')) return Icons.block_outlined;
+    if (normalized.contains('expirada') ||
+        normalized.contains('expirado')) return Icons.timer_off_outlined;
+    if (normalized.contains('finalizada') ||
+        normalized.contains('finalizado')) return Icons.verified_outlined;
+    if (normalized.contains('cancelada') ||
+        normalized.contains('cancelado')) return Icons.cancel_outlined;
+    if (normalized.contains('rejeitada') ||
+        normalized.contains('rejeitado')) return Icons.rate_review_outlined;
+    if (normalized.contains('analise') ||
+        normalized.contains('análise')) return Icons.psychology_alt_outlined;
 
     return Icons.pending_actions_outlined;
   }
+  
 }
 
 class AudioPreviewInfo {
@@ -4728,6 +4941,22 @@ List<String> _extractImageBase64Previews(List<dynamic> images) {
     }
 
     if (item is Map) {
+      final directImage = _stringValue(
+        item['url'],
+        fallback: _stringValue(
+          item['downloadUrl'],
+          fallback: _stringValue(
+            item['imageUrl'],
+            fallback: _stringValue(item['imagePath']),
+          ),
+        ),
+      );
+
+      if (directImage.isNotEmpty) {
+        previews.add(directImage);
+        continue;
+      }
+
       for (final entry in item.entries) {
         final key = entry.key.toString();
         final value = entry.value;
@@ -4743,6 +4972,13 @@ List<String> _extractImageBase64Previews(List<dynamic> images) {
   }
 
   return previews;
+}
+
+bool _isRemoteImageValue(String value) {
+  final normalized = value.trim().toLowerCase();
+
+  return normalized.startsWith('http://') ||
+      normalized.startsWith('https://');
 }
 
 List<AudioPreviewInfo> _extractAudioPreviews(List<dynamic> audios) {
@@ -4919,6 +5155,7 @@ enum InspectionStatus {
   submitted,
   approved,
   rejected,
+  finalized,
   cancelled,
 }
 
@@ -4929,6 +5166,8 @@ extension InspectionStatusX on InspectionStatus {
     if (normalized.contains('andamento') ||
         normalized.contains('checkin') ||
         normalized.contains('check_in') ||
+        normalized.contains('check in') ||
+        normalized.contains('in progress') ||
         normalized.contains('in_progress')) {
       return InspectionStatus.inProgress;
     }
@@ -4939,6 +5178,8 @@ extension InspectionStatusX on InspectionStatus {
         normalized.contains('analise') ||
         normalized.contains('aguardando_ia') ||
         normalized.contains('processando_ia') ||
+        normalized.contains('aguardando ia') ||
+        normalized.contains('processando ia') ||
         normalized.contains('review')) {
       return InspectionStatus.submitted;
     }
@@ -4947,6 +5188,12 @@ extension InspectionStatusX on InspectionStatus {
         normalized.contains('aprovado') ||
         normalized.contains('approved')) {
       return InspectionStatus.approved;
+    }
+
+    if (normalized.contains('finalizada') ||
+        normalized.contains('finalizado') ||
+        normalized.contains('finalized')) {
+      return InspectionStatus.finalized;
     }
 
     if (normalized.contains('rejeitada') ||
@@ -4980,6 +5227,8 @@ extension InspectionStatusX on InspectionStatus {
         return 'Aprovada';
       case InspectionStatus.rejected:
         return 'Rejeitada';
+      case InspectionStatus.finalized:
+        return 'Finalizada';
       case InspectionStatus.cancelled:
         return 'Cancelada';
     }
@@ -4997,6 +5246,8 @@ extension InspectionStatusX on InspectionStatus {
         return Colors.green;
       case InspectionStatus.rejected:
         return Colors.redAccent;
+      case InspectionStatus.finalized:
+        return Colors.green;
       case InspectionStatus.cancelled:
         return Colors.grey;
     }
@@ -5126,6 +5377,20 @@ String _formatWorkshopAddress(Map<String, dynamic> snapshot) {
 String _normalizeStatus(dynamic value) {
   return _stringValue(value)
       .toLowerCase()
+      .replaceAll('_', ' ')
+      .replaceAll('-', ' ')
+      .replaceAll('ã', 'a')
+      .replaceAll('á', 'a')
+      .replaceAll('à', 'a')
+      .replaceAll('â', 'a')
+      .replaceAll('é', 'e')
+      .replaceAll('ê', 'e')
+      .replaceAll('í', 'i')
+      .replaceAll('ó', 'o')
+      .replaceAll('ô', 'o')
+      .replaceAll('õ', 'o')
+      .replaceAll('ú', 'u')
+      .replaceAll('ç', 'c')
       .replaceAll('ã', 'a')
       .replaceAll('á', 'a')
       .replaceAll('à', 'a')
