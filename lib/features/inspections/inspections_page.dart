@@ -30,7 +30,7 @@ extension InspectionFilterX on InspectionFilter {
       case InspectionFilter.inProgress:
         return 'Andamento';
       case InspectionFilter.aiAnalysis:
-        return 'Análise';
+        return 'Analise';
       case InspectionFilter.revision:
         return 'Revisão';
       case InspectionFilter.cancelled:
@@ -49,7 +49,7 @@ extension InspectionFilterX on InspectionFilter {
       case InspectionFilter.inProgress:
         return 'Aguardando vistoria';
       case InspectionFilter.aiAnalysis:
-        return 'Em Análise';
+        return 'Analise humana';
       case InspectionFilter.revision:
         return 'Retificação/revisão';
       case InspectionFilter.cancelled:
@@ -360,46 +360,109 @@ void _scrollFilterCarouselTo(InspectionFilter filter) {
 
 Stream<List<InspectionCase>> _inspectionStream(String credenciadoId) {
   late final StreamController<List<InspectionCase>> controller;
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? subscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? sinistroSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? vistoriaSubscription;
   Timer? debounceTimer;
 
   bool hasEmittedFirstList = false;
   List<InspectionCase>? latestInspections;
+  List<LinkedVistoriaInfo> latestVistorias = const [];
+
+  void scheduleEmit() {
+    debounceTimer?.cancel();
+
+    debounceTimer = Timer(
+      Duration(milliseconds: hasEmittedFirstList ? 90 : 360),
+      () {
+        final inspections = latestInspections;
+
+        if (inspections == null || controller.isClosed) return;
+
+        controller.add(
+          _enrichInspectionsWithLinkedVistorias(
+            inspections,
+            latestVistorias,
+          ),
+        );
+        hasEmittedFirstList = true;
+      },
+    );
+  }
 
   controller = StreamController<List<InspectionCase>>(
     onListen: () {
-      subscription = FirebaseFirestore.instance
+      sinistroSubscription = FirebaseFirestore.instance
           .collection('sinistro')
           .where('credenciadoId', isEqualTo: credenciadoId)
           .snapshots()
           .listen(
         (snapshot) {
           latestInspections = _buildInspectionListFromSnapshot(snapshot);
+          scheduleEmit();
+        },
+        onError: controller.addError,
+      );
 
-          debounceTimer?.cancel();
+      vistoriaSubscription = FirebaseFirestore.instance
+          .collection('vistorias')
+          .where('credenciadoId', isEqualTo: credenciadoId)
+          .snapshots()
+          .listen(
+        (snapshot) {
+          latestVistorias = snapshot.docs
+              .map(LinkedVistoriaInfo.fromFirestore)
+              .where((vistoria) => vistoria.sinistroId.trim().isNotEmpty)
+              .toList();
 
-          debounceTimer = Timer(
-            Duration(milliseconds: hasEmittedFirstList ? 90 : 360),
-            () {
-              final value = latestInspections;
-
-              if (value == null || controller.isClosed) return;
-
-              controller.add(value);
-              hasEmittedFirstList = true;
-            },
-          );
+          scheduleEmit();
         },
         onError: controller.addError,
       );
     },
     onCancel: () async {
       debounceTimer?.cancel();
-      await subscription?.cancel();
+      await sinistroSubscription?.cancel();
+      await vistoriaSubscription?.cancel();
     },
   );
 
   return controller.stream;
+}
+
+List<InspectionCase> _enrichInspectionsWithLinkedVistorias(
+  List<InspectionCase> inspections,
+  List<LinkedVistoriaInfo> vistorias,
+) {
+  if (vistorias.isEmpty) return inspections;
+
+  final latestBySinistro = <String, LinkedVistoriaInfo>{};
+
+  for (final vistoria in vistorias) {
+    final sinistroId = vistoria.sinistroId.trim();
+    if (sinistroId.isEmpty) continue;
+
+    final current = latestBySinistro[sinistroId];
+    final currentDate = current?.updatedAt ?? current?.createdAt;
+    final candidateDate = vistoria.updatedAt ?? vistoria.createdAt;
+
+    if (current == null ||
+        (candidateDate != null &&
+            (currentDate == null || candidateDate.isAfter(currentDate)))) {
+      latestBySinistro[sinistroId] = vistoria;
+    }
+  }
+
+  return inspections.map((inspection) {
+    final vistoria = latestBySinistro[inspection.id];
+
+    if (vistoria == null) return inspection;
+
+    return inspection.copyWith(
+      vistoriaAtualId: vistoria.idvistoria,
+      vistoriaAtualStatus: vistoria.status,
+      vistoriaAtualTipo: vistoria.tipoVistoria,
+    );
+  }).toList();
 }
 
 List<InspectionCase> _buildInspectionListFromSnapshot(
@@ -840,7 +903,12 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     final isAssignedToMe = inspection.isAssignedToCurrentUser;
     final canCheckIn =
         !isAssignedToAnother && (!hasCheckIn || !inspection.hasAssignedUser);
-    final canOpenChat = hasCheckIn && isAssignedToMe;
+    final isHumanAnalysis = inspection.isAiAnalysisCategory;
+    final canOpenChat = hasCheckIn &&
+        isAssignedToMe &&
+        !isHumanAnalysis &&
+        !inspection.isCompletedCategory &&
+        !inspection.isCancelledCategory;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF3FBFF),
@@ -900,7 +968,15 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                     inspection.priority.label,
                                     valueColor: inspection.priority.color,
                                   ),
-                                  _InfoRow('Status', inspection.status.label),
+                                  _InfoRow(
+                                    'Status',
+                                    isHumanAnalysis
+                                        ? 'Em analise'
+                                        : inspection.status.label,
+                                    valueColor: isHumanAnalysis
+                                        ? Colors.purple
+                                        : inspection.status.color,
+                                  ),
                                   _InfoRow(
                                     'Agendamento',
                                     _formatDateTime(inspection.scheduledDate),
@@ -985,7 +1061,9 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                   label: Text(
                                     isCheckingIn
                                         ? 'Realizando check-in...'
-                                        : isAssignedToAnother
+                                        : isHumanAnalysis
+                                            ? 'Vistoria em analise humana'
+                                            : isAssignedToAnother
                                             ? 'Vistoria vinculada a ${inspection.assignedToName}'
                                             : hasCheckIn &&
                                                     !inspection.hasAssignedUser
@@ -1026,7 +1104,9 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                   label: Text(
                                     canOpenChat
                                         ? 'Iniciar coleta no Chat IA'
-                                        : isAssignedToAnother
+                                        : isHumanAnalysis
+                                            ? 'Vistoria em analise humana'
+                                            : isAssignedToAnother
                                             ? 'Chat bloqueado para outro responsável'
                                             : 'Faça check-in para iniciar o Chat IA',
                                   ),
@@ -2662,28 +2742,24 @@ class _InspectionCard extends StatelessWidget {
     return FirebaseFirestore.instance
         .collection('vistorias')
         .where('sinistroId', isEqualTo: inspection.id)
-        .limit(1)
+        .limit(6)
         .snapshots();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (inspection.vistoriaAtualId.trim().isNotEmpty) {
-      return _InspectionCardContent(
-        inspection: inspection,
-        hasLinkedVistoria: true,
-        onTap: onTap,
-      );
-    }
-
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: _linkedVistoriaStream(),
       builder: (context, snapshot) {
-        final hasLinkedVistoria =
-            snapshot.hasData && snapshot.data!.docs.isNotEmpty;
+        final linkedVistoria = snapshot.hasData
+            ? _latestLinkedVistoriaFromSnapshot(snapshot.data!)
+            : null;
+        final hasLinkedVistoria = inspection.vistoriaAtualId.trim().isNotEmpty ||
+            linkedVistoria != null;
 
         return _InspectionCardContent(
           inspection: inspection,
+          linkedVistoria: linkedVistoria,
           hasLinkedVistoria: hasLinkedVistoria,
           onTap: onTap,
         );
@@ -2692,13 +2768,35 @@ class _InspectionCard extends StatelessWidget {
   }
 }
 
+LinkedVistoriaInfo? _latestLinkedVistoriaFromSnapshot(
+  QuerySnapshot<Map<String, dynamic>> snapshot,
+) {
+  LinkedVistoriaInfo? latest;
+
+  for (final doc in snapshot.docs) {
+    final vistoria = LinkedVistoriaInfo.fromFirestore(doc);
+    final latestDate = latest?.updatedAt ?? latest?.createdAt;
+    final candidateDate = vistoria.updatedAt ?? vistoria.createdAt;
+
+    if (latest == null ||
+        (candidateDate != null &&
+            (latestDate == null || candidateDate.isAfter(latestDate)))) {
+      latest = vistoria;
+    }
+  }
+
+  return latest;
+}
+
 class _InspectionCardContent extends StatelessWidget {
   final InspectionCase inspection;
+  final LinkedVistoriaInfo? linkedVistoria;
   final bool hasLinkedVistoria;
   final VoidCallback onTap;
 
   const _InspectionCardContent({
     required this.inspection,
+    required this.linkedVistoria,
     required this.hasLinkedVistoria,
     required this.onTap,
   });
@@ -2706,6 +2804,7 @@ class _InspectionCardContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasCheckIn = inspection.checkInAt != null;
+    final isHumanAnalysis = inspection.isAiAnalysisCategory;
 
     return Material(
       color: Colors.white,
@@ -2802,8 +2901,8 @@ class _InspectionCardContent extends StatelessWidget {
               Row(
                 children: [
                   _StatusChip(
-                    label: inspection.status.label,
-                    color: inspection.status.color,
+                    label: isHumanAnalysis ? 'Em analise' : inspection.status.label,
+                    color: isHumanAnalysis ? Colors.purple : inspection.status.color,
                   ),
                   const SizedBox(width: 8),
                   _StatusChip(
@@ -2852,6 +2951,14 @@ class _InspectionCardContent extends StatelessWidget {
                 const SizedBox(height: 8),
                 _ActiveViewersBadge(viewers: inspection.activeViewers),
               ],
+              if (isHumanAnalysis) ...[
+                const SizedBox(height: 10),
+                const _HumanAnalysisNotice(),
+              ],
+              if (linkedVistoria != null) ...[
+                const SizedBox(height: 10),
+                _InspectionCardChatPreview(vistoria: linkedVistoria!),
+              ],
               const SizedBox(height: 12),
               Row(
                 children: [
@@ -2895,6 +3002,187 @@ class _InspectionCardContent extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _HumanAnalysisNotice extends StatelessWidget {
+  const _HumanAnalysisNotice();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.purple.withOpacity(.08),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.purple.withOpacity(.12)),
+      ),
+      child: const Row(
+        children: [
+          Icon(
+            Icons.manage_search_outlined,
+            size: 18,
+            color: Colors.purple,
+          ),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Em analise humana. Aprovacao ou reprovacao depende da equipe responsavel.',
+              style: TextStyle(
+                color: Color(0xFF414755),
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+                height: 1.25,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InspectionCardChatPreview extends StatelessWidget {
+  final LinkedVistoriaInfo vistoria;
+
+  const _InspectionCardChatPreview({required this.vistoria});
+
+  @override
+  Widget build(BuildContext context) {
+    final previews = vistoria.chatPreviews
+        .where((message) => message.text.trim().isNotEmpty)
+        .toList();
+    final visibleMessages = previews.length > 2
+        ? previews.sublist(previews.length - 2)
+        : previews;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FCFF),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFF0057C0).withOpacity(.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.forum_outlined,
+                size: 16,
+                color: Color(0xFF0057C0),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Preview do chat',
+                  style: GoogleFonts.spaceGrotesk(
+                    color: const Color(0xFF0057C0),
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              Text(
+                '${vistoria.chatCount}',
+                style: const TextStyle(
+                  color: Color(0xFF0057C0),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (visibleMessages.isEmpty)
+            const Text(
+              'Nenhuma mensagem registrada no chat ainda.',
+              style: TextStyle(
+                color: Color(0xFF6B7280),
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+              ),
+            )
+          else
+            Column(
+              children: visibleMessages
+                  .map((message) => _InspectionCardChatLine(message: message))
+                  .toList(),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InspectionCardChatLine extends StatelessWidget {
+  final ChatPreviewInfo message;
+
+  const _InspectionCardChatLine({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    final role = message.role.toLowerCase();
+    final isAi = role.contains('ai') || role.contains('assistant');
+    final isAudio = message.kind == ChatPreviewKind.audio;
+    final isImage = message.kind == ChatPreviewKind.image;
+    final label = isAi ? 'Argos' : 'Usuario';
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 24,
+            height: 24,
+            decoration: BoxDecoration(
+              color: isAi ? Colors.purple.withOpacity(.10) : const Color(0xFFE5F6FF),
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: Icon(
+              isAudio
+                  ? Icons.mic_none
+                  : isImage
+                      ? Icons.image_outlined
+                      : isAi
+                          ? Icons.smart_toy_outlined
+                          : Icons.person_outline,
+              size: 14,
+              color: isAi ? Colors.purple : const Color(0xFF0057C0),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: RichText(
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              text: TextSpan(
+                style: const TextStyle(
+                  color: Color(0xFF414755),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  height: 1.25,
+                ),
+                children: [
+                  TextSpan(
+                    text: '$label: ',
+                    style: TextStyle(
+                      color: isAi ? Colors.purple : const Color(0xFF0057C0),
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  TextSpan(text: message.text),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -3791,6 +4079,8 @@ class _SummaryTopBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isHumanAnalysis = inspection.isAiAnalysisCategory;
+
     return Container(
       height: 70,
       padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -3819,8 +4109,8 @@ class _SummaryTopBar extends StatelessWidget {
             ),
           ),
           _StatusChip(
-            label: inspection.status.label,
-            color: inspection.status.color,
+            label: isHumanAnalysis ? 'Em analise' : inspection.status.label,
+            color: isHumanAnalysis ? Colors.purple : inspection.status.color,
           ),
         ],
       ),
@@ -4483,18 +4773,25 @@ class InspectionCase {
         status == InspectionStatus.finalized ||
         vistoriaStatus.contains('aprovada') ||
         vistoriaStatus.contains('aprovado') ||
-        vistoriaStatus.contains('approved') ||
-        vistoriaStatus.contains('finalizada') ||
-        vistoriaStatus.contains('finalizado') ||
-        vistoriaStatus.contains('finalized');
+        vistoriaStatus.contains('approved');
   }
 
   bool get isAiAnalysisCategory {
     final vistoriaStatus = _normalizeStatus(vistoriaAtualStatus);
 
     return status == InspectionStatus.submitted ||
+        (vistoriaStatus.isNotEmpty &&
+            !vistoriaStatus.contains('em_andamento') &&
+            !vistoriaStatus.contains('andamento') &&
+            !isCompletedCategory &&
+            !isRevisionCategory &&
+            !isCancelledCategory) ||
         vistoriaStatus.contains('analise') ||
         vistoriaStatus.contains('análise') ||
+        vistoriaStatus.contains('finalizada') ||
+        vistoriaStatus.contains('finalizado') ||
+        vistoriaStatus.contains('finalized') ||
+        vistoriaStatus.contains('em_analise_operacional') ||
         vistoriaStatus.contains('review') ||
         vistoriaStatus.contains('submitted');
   }
@@ -4717,6 +5014,7 @@ class WorkshopInfo {
 class LinkedVistoriaInfo {
   final String docId;
   final String idvistoria;
+  final String sinistroId;
   final String status;
   final int chatCount;
   final int imageCount;
@@ -4741,6 +5039,7 @@ class LinkedVistoriaInfo {
   const LinkedVistoriaInfo({
     required this.docId,
     required this.idvistoria,
+    required this.sinistroId,
     required this.status,
     required this.chatCount,
     required this.imageCount,
@@ -4764,9 +5063,9 @@ class LinkedVistoriaInfo {
   });
 
   factory LinkedVistoriaInfo.fromFirestore(
-    QueryDocumentSnapshot<Map<String, dynamic>> doc,
+    DocumentSnapshot<Map<String, dynamic>> doc,
   ) {
-    final data = doc.data();
+    final data = doc.data() ?? <String, dynamic>{};
 
     final images = data['images'] is List ? data['images'] as List : const [];
     final audios = data['audios'] is List ? data['audios'] as List : const [];
@@ -4794,6 +5093,7 @@ class LinkedVistoriaInfo {
     return LinkedVistoriaInfo(
       docId: doc.id,
       idvistoria: _stringValue(data['idvistoria'], fallback: doc.id),
+      sinistroId: _stringValue(data['sinistroId']),
       status: _stringValue(data['status'], fallback: 'em_andamento'),
       chatCount: chatmessages.length,
       imageCount: images.length,
@@ -4851,14 +5151,15 @@ class LinkedVistoriaInfo {
         normalized.contains('abandonado')) return 'Abandonada';
     if (normalized.contains('expirada') ||
         normalized.contains('expirado')) return 'Expirada';
-    if (normalized.contains('finalizada') ||
-        normalized.contains('finalizado')) return 'Finalizada';
     if (normalized.contains('cancelada') ||
         normalized.contains('cancelado')) return 'Cancelada';
     if (normalized.contains('rejeitada') ||
         normalized.contains('rejeitado')) return 'Rejeitada';
     if (normalized.contains('analise') ||
-        normalized.contains('análise')) return 'Em análise';
+        normalized.contains('análise') ||
+        normalized.contains('finalizada') ||
+        normalized.contains('finalizado') ||
+        normalized.contains('finalized')) return 'Em analise';
 
     return 'Em andamento';
   }
@@ -4870,14 +5171,15 @@ class LinkedVistoriaInfo {
         normalized.contains('abandonado')) return Colors.grey;
     if (normalized.contains('expirada') ||
         normalized.contains('expirado')) return Colors.deepOrange;
-    if (normalized.contains('finalizada') ||
-        normalized.contains('finalizado')) return Colors.green;
     if (normalized.contains('cancelada') ||
         normalized.contains('cancelado')) return Colors.redAccent;
     if (normalized.contains('rejeitada') ||
         normalized.contains('rejeitado')) return Colors.redAccent;
     if (normalized.contains('analise') ||
-        normalized.contains('análise')) return Colors.purple;
+        normalized.contains('análise') ||
+        normalized.contains('finalizada') ||
+        normalized.contains('finalizado') ||
+        normalized.contains('finalized')) return Colors.purple;
 
     return const Color(0xFF0057C0);
   }
@@ -4889,14 +5191,17 @@ class LinkedVistoriaInfo {
         normalized.contains('abandonado')) return Icons.block_outlined;
     if (normalized.contains('expirada') ||
         normalized.contains('expirado')) return Icons.timer_off_outlined;
-    if (normalized.contains('finalizada') ||
-        normalized.contains('finalizado')) return Icons.verified_outlined;
     if (normalized.contains('cancelada') ||
         normalized.contains('cancelado')) return Icons.cancel_outlined;
     if (normalized.contains('rejeitada') ||
         normalized.contains('rejeitado')) return Icons.rate_review_outlined;
     if (normalized.contains('analise') ||
-        normalized.contains('análise')) return Icons.psychology_alt_outlined;
+        normalized.contains('análise') ||
+        normalized.contains('finalizada') ||
+        normalized.contains('finalizado') ||
+        normalized.contains('finalized')) {
+      return Icons.manage_search_outlined;
+    }
 
     return Icons.pending_actions_outlined;
   }
@@ -5222,7 +5527,7 @@ extension InspectionStatusX on InspectionStatus {
       case InspectionStatus.inProgress:
         return 'Em andamento';
       case InspectionStatus.submitted:
-        return 'Análise IA';
+        return 'Em analise';
       case InspectionStatus.approved:
         return 'Aprovada';
       case InspectionStatus.rejected:

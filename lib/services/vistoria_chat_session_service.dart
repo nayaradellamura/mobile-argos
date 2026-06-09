@@ -36,6 +36,23 @@ class VistoriaChatSessionService {
   CollectionReference<Map<String, dynamic>> get _credenciados =>
       _db.collection('credenciados');
 
+  Stream<VistoriaChatCompletionState> watchCompletionState({
+    required String vistoriaDocId,
+  }) {
+    return _vistorias.doc(vistoriaDocId).snapshots().map((doc) {
+      final data = doc.data() ?? <String, dynamic>{};
+      final status = _str(data['status']);
+      final hasAnalyticalReport = _hasFilledAnalyticalReport(data);
+
+      return VistoriaChatCompletionState(
+        status: status,
+        isCompleted: status.isNotEmpty &&
+            status != statusEmAndamento &&
+            hasAnalyticalReport,
+      );
+    });
+  }
+
   Future<VistoriaSession?> findOpenVistoria({String? sinistroId}) async {
     final ctx = await _currentContext();
 
@@ -837,6 +854,32 @@ class VistoriaChatSessionService {
     return text.isEmpty ? fallback : text;
   }
 
+  static bool _hasFilledAnalyticalReport(Map<String, dynamic> data) {
+    const candidateFields = [
+      'laudo_analiticolaudo_analitico',
+      'laudo_analitico',
+      'laudoAnalitico',
+    ];
+
+    return candidateFields.any((field) => _hasAnyFilledValue(data[field]));
+  }
+
+  static bool _hasAnyFilledValue(dynamic value) {
+    if (value == null) return false;
+
+    if (value is String) return value.trim().isNotEmpty;
+
+    if (value is Iterable) {
+      return value.any(_hasAnyFilledValue);
+    }
+
+    if (value is Map) {
+      return value.values.any(_hasAnyFilledValue);
+    }
+
+    return true;
+  }
+
   static DateTime _dateValue(dynamic value) {
     if (value is Timestamp) return value.toDate();
     if (value is DateTime) return value;
@@ -917,6 +960,16 @@ class VistoriaChatSessionService {
 
     return '$h:$m';
   }
+}
+
+class VistoriaChatCompletionState {
+  final String status;
+  final bool isCompleted;
+
+  const VistoriaChatCompletionState({
+    required this.status,
+    required this.isCompleted,
+  });
 }
 
 class VistoriaSession {

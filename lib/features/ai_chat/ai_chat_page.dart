@@ -82,8 +82,12 @@ class _AiChatPageState extends State<AiChatPage> {
   final List<ChatMessage> messages = [];
 
   VistoriaSession? currentSession;
+  StreamSubscription<VistoriaChatCompletionState>?
+      vistoriaCompletionSubscription;
   List<SinistroVistoriaOption> availableSinistros = [];
   bool isLoadingSession = true;
+  bool isInspectionCompleted = false;
+  String completedInspectionStatus = '';
 
   bool hasText = false;
   bool isRecording = false;
@@ -113,6 +117,7 @@ class _AiChatPageState extends State<AiChatPage> {
 
   @override
   void dispose() {
+    vistoriaCompletionSubscription?.cancel();
     recordingTimer?.cancel();
 
     if (isRecording) {
@@ -146,6 +151,44 @@ class _AiChatPageState extends State<AiChatPage> {
         duration: const Duration(milliseconds: 300),
         curve: Curves.easeOut,
       );
+    });
+  }
+
+  void _listenToVistoriaCompletion(VistoriaSession session) {
+    vistoriaCompletionSubscription?.cancel();
+    vistoriaCompletionSubscription = VistoriaChatSessionService.instance
+        .watchCompletionState(vistoriaDocId: session.docId)
+        .listen(
+      (completionState) {
+        if (!completionState.isCompleted || isInspectionCompleted) return;
+
+        _completeChatFromVistoriaUpdate(completionState.status);
+      },
+      onError: (error) {
+        debugPrint('Erro ao escutar conclusão da vistoria: $error');
+      },
+    );
+  }
+
+  Future<void> _completeChatFromVistoriaUpdate(String status) async {
+    vistoriaCompletionSubscription?.cancel();
+    vistoriaCompletionSubscription = null;
+
+    if (isRecording) {
+      await _cancelRecording();
+    }
+
+    if (!mounted) return;
+
+    FocusScope.of(context).unfocus();
+
+    setState(() {
+      isInspectionCompleted = true;
+      completedInspectionStatus = status;
+      isAiTyping = false;
+      isStartingRecording = false;
+      hasText = false;
+      messageController.clear();
     });
   }
 
@@ -187,6 +230,9 @@ class _AiChatPageState extends State<AiChatPage> {
   }
 
   Future<void> _loadAvailableSinistros({String? message}) async {
+    await vistoriaCompletionSubscription?.cancel();
+    vistoriaCompletionSubscription = null;
+
     final options = await VistoriaChatSessionService.instance
         .listCheckedInSinistrosForCurrentUser();
 
@@ -196,6 +242,8 @@ class _AiChatPageState extends State<AiChatPage> {
       currentSession = null;
       availableSinistros = options;
       isLoadingSession = false;
+      isInspectionCompleted = false;
+      completedInspectionStatus = '';
       isAiTyping = false;
       messages
         ..clear()
@@ -414,7 +462,7 @@ class _AiChatPageState extends State<AiChatPage> {
   Future<void> _sendInitialOiToAgent() async {
     final session = currentSession;
 
-    if (session == null) return;
+    if (session == null || isInspectionCompleted) return;
 
     setState(() {
       isAiTyping = true;
@@ -425,6 +473,8 @@ class _AiChatPageState extends State<AiChatPage> {
         text: 'oi',
         inspectionId: session.idvistoria,
       );
+
+      if (isInspectionCompleted) return;
 
       await VistoriaChatSessionService.instance.appendAiMessage(
         vistoriaDocId: session.docId,
@@ -452,6 +502,9 @@ class _AiChatPageState extends State<AiChatPage> {
 
   void _loadSessionIntoChat(VistoriaSession session) {
     currentSession = session;
+    isInspectionCompleted = false;
+    completedInspectionStatus = '';
+    _listenToVistoriaCompletion(session);
 
     final loadedMessages = session.chatMessages
         .where((item) => item['backgroundStart'] != true)
@@ -566,6 +619,7 @@ class _AiChatPageState extends State<AiChatPage> {
     final text = messageController.text.trim();
 
     if (text.isEmpty) return;
+    if (isInspectionCompleted) return;
 
     if (session == null) {
       _showSnack(
@@ -591,10 +645,14 @@ class _AiChatPageState extends State<AiChatPage> {
     );
 
     try {
+      if (isInspectionCompleted) return;
+
       final reply = await ArgosAiService.instance.sendMessage(
         text: text,
         inspectionId: session.idvistoria,
       );
+
+      if (isInspectionCompleted) return;
 
       await VistoriaChatSessionService.instance.appendAiMessage(
         vistoriaDocId: session.docId,
@@ -667,6 +725,8 @@ class _AiChatPageState extends State<AiChatPage> {
 
   Future<void> _openCamera() async {
     final session = currentSession;
+
+    if (isInspectionCompleted) return;
 
     if (session == null) {
       _showSnack(
@@ -778,6 +838,7 @@ class _AiChatPageState extends State<AiChatPage> {
 
   Future<void> _startRecording() async {
     if (isRecording || isStartingRecording) return;
+    if (isInspectionCompleted) return;
 
     FocusScope.of(context).unfocus();
 
@@ -873,6 +934,10 @@ class _AiChatPageState extends State<AiChatPage> {
 
   Future<void> _finishRecording() async {
     if (!isRecording) return;
+    if (isInspectionCompleted) {
+      await _cancelRecording();
+      return;
+    }
 
     final session = currentSession;
 
@@ -989,6 +1054,8 @@ class _AiChatPageState extends State<AiChatPage> {
 
       _scrollToBottom();
 
+      if (isInspectionCompleted) return;
+
       final audioResult = await ArgosAiService.instance.sendAudioMessage(
         idvistoria: session.idvistoria,
         sinistroId: session.sinistroId,
@@ -996,6 +1063,8 @@ class _AiChatPageState extends State<AiChatPage> {
         storagePath: uploadedAudio.mp3StoragePath,
         durationSeconds: duration,
       );
+
+      if (isInspectionCompleted) return;
 
       if (!mounted) return;
 
@@ -1161,67 +1230,91 @@ class _AiChatPageState extends State<AiChatPage> {
                 options: availableSinistros,
                 onSelect: _handleSinistroSelected,
               )
-            : Column(
-                key: ValueKey('chat_${currentSession!.idvistoria}'),
-                children: [
-                  _ChatHeader(
-                    session: currentSession,
-                    onCloseChat: _closeCurrentChatAndBackToSelection,
-                  ),
-                  Expanded(
-                    child: ListView.builder(
-                      controller: scrollController,
-                      padding: const EdgeInsets.fromLTRB(18, 22, 18, 18),
-                      itemCount: messages.length + (isAiTyping ? 1 : 0),
-                      itemBuilder: (context, index) {
-                        if (isAiTyping && index == messages.length) {
-                          return const Padding(
-                            padding: EdgeInsets.only(bottom: 16),
-                            child: _TypingBubble(),
-                          );
-                        }
-
-                        final message = messages[index];
-
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 16),
-                          child: _ChatBubble(message: message),
-                        );
-                      },
+            : isInspectionCompleted
+                ? Column(
+                    key: ValueKey(
+                      'chat_completed_${currentSession!.idvistoria}',
                     ),
+                    children: [
+                      _ChatHeader(
+                        session: currentSession,
+                        onCloseChat: _closeCurrentChatAndBackToSelection,
+                      ),
+                      Expanded(
+                        child: _InspectionCompletedView(
+                          session: currentSession!,
+                          status: completedInspectionStatus,
+                          onBackToSelection:
+                              _closeCurrentChatAndBackToSelection,
+                        ),
+                      ),
+                    ],
+                  )
+                : Column(
+                    key: ValueKey('chat_${currentSession!.idvistoria}'),
+                    children: [
+                      _ChatHeader(
+                        session: currentSession,
+                        onCloseChat: _closeCurrentChatAndBackToSelection,
+                      ),
+                      Expanded(
+                        child: ListView.builder(
+                          controller: scrollController,
+                          padding: const EdgeInsets.fromLTRB(18, 22, 18, 18),
+                          itemCount: messages.length + (isAiTyping ? 1 : 0),
+                          itemBuilder: (context, index) {
+                            if (isAiTyping && index == messages.length) {
+                              return const Padding(
+                                padding: EdgeInsets.only(bottom: 16),
+                                child: _TypingBubble(),
+                              );
+                            }
+
+                            final message = messages[index];
+
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 16),
+                              child: _ChatBubble(message: message),
+                            );
+                          },
+                        ),
+                      ),
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 250),
+                        transitionBuilder: (child, animation) {
+                          return SizeTransition(
+                            sizeFactor: animation,
+                            axisAlignment: -1,
+                            child: FadeTransition(
+                              opacity: animation,
+                              child: child,
+                            ),
+                          );
+                        },
+                        child: isRecording
+                            ? _RecordingComposer(
+                                key: const ValueKey('recording'),
+                                duration: duration,
+                                onCancel: _cancelRecording,
+                                onSend: _finishRecording,
+                              )
+                            : _TextComposer(
+                                key: const ValueKey('composer'),
+                                controller: messageController,
+                                hasText: hasText,
+                                isStartingRecording: isStartingRecording,
+                                onCameraTap: _openCamera,
+                                onSendTap: _sendTextMessage,
+                                onMicTap: _startRecording,
+                              ),
+                      ),
+                    ],
                   ),
-                  AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 250),
-                    transitionBuilder: (child, animation) {
-                      return SizeTransition(
-                        sizeFactor: animation,
-                        axisAlignment: -1,
-                        child: FadeTransition(opacity: animation, child: child),
-                      );
-                    },
-                    child: isRecording
-                        ? _RecordingComposer(
-                            key: const ValueKey('recording'),
-                            duration: duration,
-                            onCancel: _cancelRecording,
-                            onSend: _finishRecording,
-                          )
-                        : _TextComposer(
-                            key: const ValueKey('composer'),
-                            controller: messageController,
-                            hasText: hasText,
-                            isStartingRecording: isStartingRecording,
-                            onCameraTap: _openCamera,
-                            onSendTap: _sendTextMessage,
-                            onMicTap: _startRecording,
-                          ),
-                  ),
-                ],
-              ),
       ),
     );
   }
 }
+
 class _ChatSessionLoading extends StatelessWidget {
   const _ChatSessionLoading();
 
@@ -1250,6 +1343,193 @@ class _ChatSessionLoading extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _InspectionCompletedView extends StatefulWidget {
+  final VistoriaSession session;
+  final String status;
+  final VoidCallback onBackToSelection;
+
+  const _InspectionCompletedView({
+    required this.session,
+    required this.status,
+    required this.onBackToSelection,
+  });
+
+  @override
+  State<_InspectionCompletedView> createState() =>
+      _InspectionCompletedViewState();
+}
+
+class _InspectionCompletedViewState extends State<_InspectionCompletedView>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController controller;
+  late final Animation<double> pulseAnimation;
+  late final Animation<double> checkAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+
+    controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat(reverse: true);
+
+    pulseAnimation = Tween<double>(begin: .92, end: 1.08).animate(
+      CurvedAnimation(parent: controller, curve: Curves.easeInOutCubic),
+    );
+
+    checkAnimation = Tween<double>(begin: .82, end: 1).animate(
+      CurvedAnimation(parent: controller, curve: Curves.easeOutBack),
+    );
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = widget.status.trim();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(24, 32, 24, 28),
+      decoration: const BoxDecoration(
+        color: Color(0xFFF3FBFF),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          AnimatedBuilder(
+            animation: controller,
+            builder: (context, child) {
+              return Transform.scale(
+                scale: pulseAnimation.value,
+                child: child,
+              );
+            },
+            child: Container(
+              width: 116,
+              height: 116,
+              decoration: BoxDecoration(
+                color: const Color(0xFFE5F6FF),
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFF00A36C).withOpacity(.18),
+                    blurRadius: 28,
+                    spreadRadius: 8,
+                  ),
+                ],
+              ),
+              child: Center(
+                child: AnimatedBuilder(
+                  animation: controller,
+                  builder: (context, child) {
+                    return Transform.scale(
+                      scale: checkAnimation.value,
+                      child: child,
+                    );
+                  },
+                  child: Container(
+                    width: 74,
+                    height: 74,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF00A36C),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.check_rounded,
+                      color: Colors.white,
+                      size: 46,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 30),
+          Text(
+            'Vistoria concluida',
+            textAlign: TextAlign.center,
+            style: GoogleFonts.spaceGrotesk(
+              color: const Color(0xFF0F172A),
+              fontWeight: FontWeight.w900,
+              fontSize: 26,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Aguarde a proxima etapa.',
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Color(0xFF414755),
+              fontWeight: FontWeight.w700,
+              fontSize: 16,
+            ),
+          ),
+          const SizedBox(height: 22),
+          Container(
+            width: double.infinity,
+            constraints: const BoxConstraints(maxWidth: 360),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: const Color(0xFFE5F6FF)),
+            ),
+            child: Column(
+              children: [
+                Text(
+                  widget.session.placa.isEmpty
+                      ? widget.session.idvistoria
+                      : widget.session.placa,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xFF0057C0),
+                    fontWeight: FontWeight.w900,
+                    fontSize: 18,
+                  ),
+                ),
+                if (status.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    status,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Color(0xFF64748B),
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+          ElevatedButton(
+            onPressed: widget.onBackToSelection,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF0057C0),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+            ),
+            child: const Text(
+              'Ver outras vistorias',
+              style: TextStyle(fontWeight: FontWeight.w900),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
