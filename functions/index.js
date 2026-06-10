@@ -296,6 +296,7 @@ exports.notifySinistroChanges = onDocumentWritten(
         protocol: String(after.protocol || ""),
         status: String(after.status || ""),
         priority: String(after.priority || ""),
+        notificationType: notification.type,
       },
     });
 
@@ -580,29 +581,61 @@ function buildSinistroNotification({ sinistroId, before, after, isCreate }) {
   const vehicleLabel = [brand, model, plate].filter((item) => item && item.trim()).join(" ");
 
   if (isCreate) {
-    return { title: "Nova vistoria atribuída", body: `${protocol} · ${vehicleLabel || claimType}` };
+    return {
+      type: "sinistro_created",
+      title: "Nova vistoria atribuída",
+      body: `${protocol} · ${vehicleLabel || claimType}`,
+    };
   }
 
   if (String(before?.status || "") !== String(after.status || "")) {
-    return { title: "Status da vistoria atualizado", body: `${protocol} mudou para ${after.status || "novo status"}` };
+    return {
+      type: "status_changed",
+      title: "Status da vistoria atualizado",
+      body: `${protocol} mudou para ${after.status || "novo status"}`,
+    };
   }
 
   if (String(before?.priority || "") !== String(after.priority || "")) {
-    return { title: "Prioridade da vistoria alterada", body: `${protocol} agora está com prioridade ${after.priority}` };
+    return {
+      type: "priority_changed",
+      title: "Prioridade da vistoria alterada",
+      body: `${protocol} agora está com prioridade ${after.priority}`,
+    };
   }
 
   if (String(before?.scheduledDate || "") !== String(after.scheduledDate || "")) {
-    return { title: "Agendamento atualizado", body: `${protocol} teve o horário de vistoria alterado` };
+    return {
+      type: "schedule_changed",
+      title: "Agendamento atualizado",
+      body: `${protocol} teve o horário de vistoria alterado`,
+    };
   }
 
   const beforeCheckIn = String(before?.checkInAt || "");
   const afterCheckIn = String(after.checkInAt || "");
 
   if (!beforeCheckIn && afterCheckIn) {
-    return { title: "Check-in realizado", body: `${protocol} teve check-in registrado na oficina` };
+    return {
+      type: "checkin_created",
+      title: "Check-in realizado",
+      body: `${protocol} teve check-in registrado na oficina`,
+    };
   }
 
-  return { title: "Vistoria atualizada", body: `${protocol} recebeu uma nova atualização` };
+  if (String(before?.chatStatus || "") !== String(after.chatStatus || "")) {
+    return {
+      type: "chat_status_changed",
+      title: "Chat da vistoria atualizado",
+      body: `${protocol} está com chat ${after.chatStatus || "atualizado"}`,
+    };
+  }
+
+  return {
+    type: "sinistro_updated",
+    title: "Vistoria atualizada",
+    body: `${protocol} recebeu uma nova atualização`,
+  };
 }
 
 function shouldIgnoreSinistroNotificationUpdate(before, after) {
@@ -612,6 +645,14 @@ function shouldIgnoreSinistroNotificationUpdate(before, after) {
     "activeViewersUpdatedAt",
     "viewersUpdatedAt",
     "lastViewerAt",
+    "lastMessage",
+    "lastMessageAt",
+    "lastMessageBy",
+    "agentBusinessExpiresAt",
+    "agentSessionTtlSeconds",
+    "ttlBusinessHours",
+    "workdays",
+    "updatedAt",
   ]);
 
   const changedFields = getChangedTopLevelFields(before, after);
@@ -686,7 +727,7 @@ async function sendPushToTokenEntries({ tokenEntries, title, body, data }) {
       data,
       android: {
         priority: "high",
-        notification: { channelId: "argos_vistorias", sound: "default" },
+        notification: { sound: "default" },
       },
     });
 

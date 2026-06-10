@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
+import 'dart:ui';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -119,6 +120,7 @@ extension InspectionFilterX on InspectionFilter {
 
 class InspectionsPage extends StatefulWidget {
   final VoidCallback onOpenInspection;
+  final String? notificationSinistroIdToOpen;
 
   /// Preparação para o fluxo novo do Chat IA por sinistro.
   ///
@@ -131,6 +133,7 @@ class InspectionsPage extends StatefulWidget {
     super.key,
     required this.onOpenInspection,
     this.onOpenInspectionById,
+    this.notificationSinistroIdToOpen,
   });
 
   @override
@@ -148,6 +151,17 @@ class _InspectionsPageState extends State<InspectionsPage> {
   Future<void>? _initialAvatarPreloadFuture;
   String _initialAvatarPreloadSignature = '';
   bool _hasCompletedInitialAvatarPreload = false;
+  String? _lastOpenedNotificationSinistroId;
+
+  @override
+  void didUpdateWidget(covariant InspectionsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (widget.notificationSinistroIdToOpen !=
+        oldWidget.notificationSinistroIdToOpen) {
+      _lastOpenedNotificationSinistroId = null;
+    }
+  }
 
   Set<String> _collectPeoplePhotoUrls(List<InspectionCase> inspections) {
     final urls = <String>{};
@@ -522,12 +536,15 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
   }
 
   Widget _buildBodyForInspections(List<InspectionCase> inspections) {
-  final counts = {
-    for (final filter in InspectionFilter.values)
-      filter: inspections.where(filter.matches).length,
-  };
+    _maybeOpenNotificationInspection(inspections);
 
-    final filteredInspections = inspections.where(_selectedFilter.matches).toList();
+    final counts = {
+      for (final filter in InspectionFilter.values)
+        filter: inspections.where(filter.matches).length,
+    };
+
+    final filteredInspections =
+        inspections.where(_selectedFilter.matches).toList();
 
     return SafeArea(
       child: Column(
@@ -571,6 +588,36 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
         ],
       ),
     );
+  }
+
+  void _maybeOpenNotificationInspection(List<InspectionCase> inspections) {
+    final targetId = widget.notificationSinistroIdToOpen?.trim() ?? '';
+
+    if (targetId.isEmpty || targetId == _lastOpenedNotificationSinistroId) {
+      return;
+    }
+
+    InspectionCase? target;
+
+    for (final inspection in inspections) {
+      if (inspection.id == targetId) {
+        target = inspection;
+        break;
+      }
+    }
+
+    if (target == null) return;
+
+    _lastOpenedNotificationSinistroId = targetId;
+
+    final targetInspection = target;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+
+      setState(() => _selectedFilter = InspectionFilter.all);
+      _openInspectionSummary(targetInspection);
+    });
   }
 
   @override
@@ -1699,17 +1746,9 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
       case _HistoryPreviewSection.chat:
         return _PreviewBlock(
           key: const ValueKey('chat_preview'),
-          title: 'Mensagens do Chat IA',
+          title: 'Chat IA',
           icon: Icons.forum_outlined,
-          child: vistoria.chatPreviews.isEmpty
-              ? const _EmptyPreviewText(
-                  text: 'Nenhuma mensagem registrada nesta vistoria.',
-                )
-              : Column(
-                  children: vistoria.chatPreviews.map((message) {
-                    return _ChatPreviewMessage(message: message);
-                  }).toList(),
-                ),
+          child: _MiniChatPreview(vistoria: vistoria),
         );
       case _HistoryPreviewSection.photos:
         return _PreviewBlock(
@@ -1756,7 +1795,8 @@ class _PreviewSelectorTile extends StatelessWidget {
           height: 82,
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
           decoration: BoxDecoration(
-            color: isSelected ? const Color(0xFF0057C0) : const Color(0xFFEFF7FD),
+            color:
+                isSelected ? const Color(0xFF0057C0) : const Color(0xFFEFF7FD),
             borderRadius: BorderRadius.circular(16),
             boxShadow: isSelected
                 ? [
@@ -1802,7 +1842,9 @@ class _PreviewSelectorTile extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: isSelected ? Colors.white.withOpacity(.88) : const Color(0xFF414755),
+                      color: isSelected
+                          ? Colors.white.withOpacity(.88)
+                          : const Color(0xFF414755),
                       fontWeight: FontWeight.w800,
                       fontSize: 11,
                       height: 1.0,
@@ -1813,6 +1855,327 @@ class _PreviewSelectorTile extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+}
+
+class _MiniChatPreview extends StatelessWidget {
+  final LinkedVistoriaInfo vistoria;
+
+  const _MiniChatPreview({required this.vistoria});
+
+  @override
+  Widget build(BuildContext context) {
+    final messages = vistoria.chatPreviews
+        .where((message) => message.text.trim().isNotEmpty)
+        .toList();
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: messages.isEmpty
+            ? null
+            : () => _showExpandedChatPreview(context, vistoria, messages),
+        borderRadius: BorderRadius.circular(18),
+        child: _MiniChatSurface(
+          messages: messages,
+          emptyText: 'Nenhuma mensagem registrada nesta vistoria.',
+          minHeight: 184,
+          maxHeight: 360,
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+        ),
+      ),
+    );
+  }
+
+  void _showExpandedChatPreview(
+    BuildContext context,
+    LinkedVistoriaInfo vistoria,
+    List<ChatPreviewInfo> messages,
+  ) {
+    showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Fechar preview do chat',
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 180),
+      pageBuilder: (context, animation, secondaryAnimation) {
+        final screen = MediaQuery.of(context).size;
+
+        return Material(
+          color: Colors.transparent,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => Navigator.of(context).pop(),
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+                    child: Container(color: Colors.black.withOpacity(.22)),
+                  ),
+                ),
+              ),
+              SafeArea(
+                child: Center(
+                  child: Container(
+                    width: screen.width > 520 ? 500 : screen.width - 28,
+                    constraints: BoxConstraints(
+                      maxHeight: screen.height * .82,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(.92),
+                      borderRadius: BorderRadius.circular(22),
+                      border: Border.all(
+                        color: const Color(0xFF0057C0).withOpacity(.10),
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(.18),
+                          blurRadius: 34,
+                          offset: const Offset(0, 18),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 14, 8, 8),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 36,
+                                height: 36,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFE5F6FF),
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                child: const Icon(
+                                  Icons.forum_outlined,
+                                  color: Color(0xFF0057C0),
+                                  size: 19,
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Chat IA',
+                                      style: GoogleFonts.spaceGrotesk(
+                                        color: const Color(0xFF1F2937),
+                                        fontSize: 17,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    Text(
+                                      '${vistoria.idvistoria} • ${messages.length} mensagens',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Color(0xFF6B7280),
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                onPressed: () => Navigator.of(context).pop(),
+                                icon: const Icon(Icons.close),
+                                color: const Color(0xFF414755),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Flexible(
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                            child: _MiniChatSurface(
+                              messages: messages,
+                              emptyText:
+                                  'Nenhuma mensagem registrada nesta vistoria.',
+                              minHeight: 260,
+                              padding:
+                                  const EdgeInsets.fromLTRB(12, 14, 12, 10),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+      transitionBuilder: (context, animation, secondaryAnimation, child) {
+        return FadeTransition(
+          opacity: animation,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: .98, end: 1).animate(animation),
+            child: child,
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _MiniChatSurface extends StatelessWidget {
+  final List<ChatPreviewInfo> messages;
+  final String emptyText;
+  final double minHeight;
+  final double? maxHeight;
+  final EdgeInsetsGeometry padding;
+
+  const _MiniChatSurface({
+    required this.messages,
+    required this.emptyText,
+    required this.minHeight,
+    required this.padding,
+    this.maxHeight,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(18),
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    const Color(0xFFE5F6FF).withOpacity(.82),
+                    const Color(0xFFF8FCFF).withOpacity(.72),
+                    const Color(0xFFEFF7FD).withOpacity(.82),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+              child: Container(color: Colors.white.withOpacity(.12)),
+            ),
+          ),
+          Container(
+            width: double.infinity,
+            constraints: BoxConstraints(
+              minHeight: minHeight,
+              maxHeight: maxHeight ?? double.infinity,
+            ),
+            padding: padding,
+            child: messages.isEmpty
+                ? Center(child: _EmptyPreviewText(text: emptyText))
+                : SingleChildScrollView(
+                    child: Column(
+                      children: messages
+                          .map((message) => _MiniChatBubble(message: message))
+                          .toList(),
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MiniChatBubble extends StatelessWidget {
+  final ChatPreviewInfo message;
+
+  const _MiniChatBubble({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    final role = message.role.toLowerCase();
+    final isAi = role.contains('ai') ||
+        role.contains('assistant') ||
+        role.contains('system');
+    final isImage = message.kind == ChatPreviewKind.image;
+    final isAudio = message.kind == ChatPreviewKind.audio;
+    final text = isImage
+        ? 'Foto anexada'
+        : isAudio
+            ? 'Áudio enviado'
+            : message.text.trim();
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        mainAxisAlignment:
+            isAi ? MainAxisAlignment.start : MainAxisAlignment.end,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (isAi) ...[
+            const CircleAvatar(
+              radius: 13,
+              backgroundColor: Color(0xFF0057C0),
+              child: Icon(Icons.smart_toy, color: Colors.white, size: 13),
+            ),
+            const SizedBox(width: 7),
+          ],
+          Flexible(
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 250),
+              padding: const EdgeInsets.fromLTRB(12, 9, 12, 8),
+              decoration: BoxDecoration(
+                color:
+                    isAi ? Colors.white.withOpacity(.90) : const Color(0xFF0057C0),
+                borderRadius: BorderRadius.only(
+                  topLeft: Radius.circular(isAi ? 4 : 16),
+                  topRight: Radius.circular(isAi ? 16 : 4),
+                  bottomLeft: const Radius.circular(16),
+                  bottomRight: const Radius.circular(16),
+                ),
+                border: isAi
+                    ? Border.all(
+                        color: const Color(0xFF0057C0).withOpacity(.08),
+                      )
+                    : null,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (isImage || isAudio) ...[
+                    Icon(
+                      isImage ? Icons.image_outlined : Icons.mic_none,
+                      size: 14,
+                      color: isAi ? const Color(0xFF0057C0) : Colors.white,
+                    ),
+                    const SizedBox(width: 6),
+                  ],
+                  Flexible(
+                    child: Text(
+                      text,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: isAi ? const Color(0xFF1F2937) : Colors.white,
+                        fontSize: 11,
+                        height: 1.25,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -2805,6 +3168,9 @@ class _InspectionCardContent extends StatelessWidget {
   Widget build(BuildContext context) {
     final hasCheckIn = inspection.checkInAt != null;
     final isHumanAnalysis = inspection.isAiAnalysisCategory;
+    final linkedStatusColor = linkedVistoria?.statusColor ?? Colors.teal;
+    final linkedStatusIcon =
+        linkedVistoria?.statusIcon ?? Icons.assignment_turned_in_outlined;
 
     return Material(
       color: Colors.white,
@@ -2917,22 +3283,22 @@ class _InspectionCardContent extends StatelessWidget {
                         vertical: 6,
                       ),
                       decoration: BoxDecoration(
-                        color: Colors.teal.withOpacity(.10),
+                        color: linkedStatusColor.withOpacity(.10),
                         borderRadius: BorderRadius.circular(999),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(
-                            Icons.assignment_turned_in_outlined,
+                          Icon(
+                            linkedStatusIcon,
                             size: 12,
-                            color: Colors.teal,
+                            color: linkedStatusColor,
                           ),
                           const SizedBox(width: 4),
                           Text(
-                            'Vinculada',
+                            linkedVistoria?.statusLabel ?? 'Vinculada',
                             style: TextStyle(
-                              color: Colors.teal.shade700,
+                              color: linkedStatusColor,
                               fontSize: 10,
                               fontWeight: FontWeight.w900,
                             ),
@@ -2954,10 +3320,6 @@ class _InspectionCardContent extends StatelessWidget {
               if (isHumanAnalysis) ...[
                 const SizedBox(height: 10),
                 const _HumanAnalysisNotice(),
-              ],
-              if (linkedVistoria != null) ...[
-                const SizedBox(height: 10),
-                _InspectionCardChatPreview(vistoria: linkedVistoria!),
               ],
               const SizedBox(height: 12),
               Row(
@@ -3044,150 +3406,6 @@ class _HumanAnalysisNotice extends StatelessWidget {
     );
   }
 }
-
-class _InspectionCardChatPreview extends StatelessWidget {
-  final LinkedVistoriaInfo vistoria;
-
-  const _InspectionCardChatPreview({required this.vistoria});
-
-  @override
-  Widget build(BuildContext context) {
-    final previews = vistoria.chatPreviews
-        .where((message) => message.text.trim().isNotEmpty)
-        .toList();
-    final visibleMessages = previews.length > 2
-        ? previews.sublist(previews.length - 2)
-        : previews;
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF8FCFF),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: const Color(0xFF0057C0).withOpacity(.08)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(
-                Icons.forum_outlined,
-                size: 16,
-                color: Color(0xFF0057C0),
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  'Preview do chat',
-                  style: GoogleFonts.spaceGrotesk(
-                    color: const Color(0xFF0057C0),
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-              Text(
-                '${vistoria.chatCount}',
-                style: const TextStyle(
-                  color: Color(0xFF0057C0),
-                  fontSize: 11,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          if (visibleMessages.isEmpty)
-            const Text(
-              'Nenhuma mensagem registrada no chat ainda.',
-              style: TextStyle(
-                color: Color(0xFF6B7280),
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-              ),
-            )
-          else
-            Column(
-              children: visibleMessages
-                  .map((message) => _InspectionCardChatLine(message: message))
-                  .toList(),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _InspectionCardChatLine extends StatelessWidget {
-  final ChatPreviewInfo message;
-
-  const _InspectionCardChatLine({required this.message});
-
-  @override
-  Widget build(BuildContext context) {
-    final role = message.role.toLowerCase();
-    final isAi = role.contains('ai') || role.contains('assistant');
-    final isAudio = message.kind == ChatPreviewKind.audio;
-    final isImage = message.kind == ChatPreviewKind.image;
-    final label = isAi ? 'Argos' : 'Usuario';
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 24,
-            height: 24,
-            decoration: BoxDecoration(
-              color: isAi ? Colors.purple.withOpacity(.10) : const Color(0xFFE5F6FF),
-              borderRadius: BorderRadius.circular(9),
-            ),
-            child: Icon(
-              isAudio
-                  ? Icons.mic_none
-                  : isImage
-                      ? Icons.image_outlined
-                      : isAi
-                          ? Icons.smart_toy_outlined
-                          : Icons.person_outline,
-              size: 14,
-              color: isAi ? Colors.purple : const Color(0xFF0057C0),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: RichText(
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              text: TextSpan(
-                style: const TextStyle(
-                  color: Color(0xFF414755),
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  height: 1.25,
-                ),
-                children: [
-                  TextSpan(
-                    text: '$label: ',
-                    style: TextStyle(
-                      color: isAi ? Colors.purple : const Color(0xFF0057C0),
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                  TextSpan(text: message.text),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 
 class SinistroViewersBar extends StatelessWidget {
   final String sinistroId;
@@ -3477,6 +3695,8 @@ class _LinkedVistoriaSummaryCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final statusColor = vistoria.statusColor;
+
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
       decoration: BoxDecoration(
@@ -3500,12 +3720,12 @@ class _LinkedVistoriaSummaryCard extends StatelessWidget {
                 width: 44,
                 height: 44,
                 decoration: BoxDecoration(
-                  color: const Color(0xFFE8FFF8),
+                  color: statusColor.withOpacity(.12),
                   borderRadius: BorderRadius.circular(16),
                 ),
-                child: const Icon(
-                  Icons.assignment_turned_in_outlined,
-                  color: Colors.teal,
+                child: Icon(
+                  vistoria.statusIcon,
+                  color: statusColor,
                 ),
               ),
               const SizedBox(width: 12),
@@ -3516,7 +3736,7 @@ class _LinkedVistoriaSummaryCard extends StatelessWidget {
                     Text(
                       'Vistoria vinculada',
                       style: GoogleFonts.spaceGrotesk(
-                        color: Colors.teal.shade700,
+                        color: statusColor,
                         fontSize: 17,
                         fontWeight: FontWeight.bold,
                       ),
@@ -3615,6 +3835,8 @@ class _LinkedVistoriaPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final statusColor = vistoria.statusColor;
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 6),
       child: Column(
@@ -3626,12 +3848,12 @@ class _LinkedVistoriaPage extends StatelessWidget {
                 width: 46,
                 height: 46,
                 decoration: BoxDecoration(
-                  color: const Color(0xFFE8FFF8),
+                  color: statusColor.withOpacity(.12),
                   borderRadius: BorderRadius.circular(16),
                 ),
-                child: const Icon(
-                  Icons.assignment_turned_in_outlined,
-                  color: Colors.teal,
+                child: Icon(
+                  vistoria.statusIcon,
+                  color: statusColor,
                 ),
               ),
               const SizedBox(width: 12),
@@ -3653,7 +3875,7 @@ class _LinkedVistoriaPage extends StatelessWidget {
                     Text(
                       'Sessão de vistoria vinculada',
                       style: TextStyle(
-                        color: Colors.teal.shade700,
+                        color: statusColor,
                         fontWeight: FontWeight.w800,
                         fontSize: 12,
                       ),
@@ -5155,6 +5377,8 @@ class LinkedVistoriaInfo {
         normalized.contains('cancelado')) return 'Cancelada';
     if (normalized.contains('rejeitada') ||
         normalized.contains('rejeitado')) return 'Rejeitada';
+    if (normalized.contains('encerrada') ||
+        normalized.contains('encerrado')) return 'Encerrada';
     if (normalized.contains('analise') ||
         normalized.contains('análise') ||
         normalized.contains('finalizada') ||
@@ -5175,6 +5399,8 @@ class LinkedVistoriaInfo {
         normalized.contains('cancelado')) return Colors.redAccent;
     if (normalized.contains('rejeitada') ||
         normalized.contains('rejeitado')) return Colors.redAccent;
+    if (normalized.contains('encerrada') ||
+        normalized.contains('encerrado')) return Colors.green;
     if (normalized.contains('analise') ||
         normalized.contains('análise') ||
         normalized.contains('finalizada') ||
@@ -5195,6 +5421,8 @@ class LinkedVistoriaInfo {
         normalized.contains('cancelado')) return Icons.cancel_outlined;
     if (normalized.contains('rejeitada') ||
         normalized.contains('rejeitado')) return Icons.rate_review_outlined;
+    if (normalized.contains('encerrada') ||
+        normalized.contains('encerrado')) return Icons.task_alt_outlined;
     if (normalized.contains('analise') ||
         normalized.contains('análise') ||
         normalized.contains('finalizada') ||
@@ -5205,7 +5433,6 @@ class LinkedVistoriaInfo {
 
     return Icons.pending_actions_outlined;
   }
-  
 }
 
 class AudioPreviewInfo {

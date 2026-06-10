@@ -25,6 +25,7 @@ class ChatMessage {
   final String text;
   final String? imagePath;
   final String? audioPath;
+  final List<int> boldLineIndexes;
   final int? durationSeconds;
 
   /// ID do registro criado em users/{uid}/audios/{audioId}.
@@ -51,6 +52,7 @@ class ChatMessage {
     required this.text,
     this.imagePath,
     this.audioPath,
+    this.boldLineIndexes = const [],
     this.durationSeconds,
     this.audioId,
     this.originalStoragePath,
@@ -93,6 +95,7 @@ class _AiChatPageState extends State<AiChatPage> {
   bool isRecording = false;
   bool isStartingRecording = false;
   bool isAiTyping = false;
+  bool autoCameraOpenedForPhotoRelease = false;
 
   Timer? recordingTimer;
   int recordingSeconds = 0;
@@ -151,6 +154,53 @@ class _AiChatPageState extends State<AiChatPage> {
         duration: const Duration(milliseconds: 300),
         curve: Curves.easeOut,
       );
+    });
+  }
+
+  String _normalizeMessage(String value) {
+    return value
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), ' ');
+  }
+
+  bool _isPhotoReleaseText(String value) {
+    final normalized = _normalizeMessage(value);
+
+    return normalized.contains('identificação recebida') &&
+        normalized.contains('liberei') &&
+        normalized.contains('fotos dos danos externos');
+  }
+
+  ChatMessage _aiMessageFromText(String text, {DateTime? createdAt}) {
+    final boldLineIndexes = <int>[];
+    final cleanLines = text.split('\n').asMap().entries.map((entry) {
+      final line = entry.value;
+
+      if (line.contains('*')) {
+        boldLineIndexes.add(entry.key);
+      }
+
+      return line.replaceAll('*', '');
+    }).toList();
+
+    return ChatMessage(
+      type: ChatMessageType.ai,
+      text: cleanLines.join('\n').trim(),
+      boldLineIndexes: boldLineIndexes,
+      createdAt: createdAt,
+    );
+  }
+
+  void _openCameraAfterPhotoRelease(String text) {
+    if (autoCameraOpenedForPhotoRelease) return;
+    if (!_isPhotoReleaseText(text)) return;
+
+    autoCameraOpenedForPhotoRelease = true;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || isInspectionCompleted) return;
+      _openCamera();
     });
   }
 
@@ -485,9 +535,10 @@ class _AiChatPageState extends State<AiChatPage> {
 
       setState(() {
         isAiTyping = false;
-        messages.add(ChatMessage(type: ChatMessageType.ai, text: reply, createdAt: DateTime.now()));
+        messages.add(_aiMessageFromText(reply, createdAt: DateTime.now()));
       });
 
+      _openCameraAfterPhotoRelease(reply);
       _scrollToBottom();
     } catch (e) {
       debugPrint('Erro ao enviar oi inicial para IA: $e');
@@ -504,6 +555,7 @@ class _AiChatPageState extends State<AiChatPage> {
     currentSession = session;
     isInspectionCompleted = false;
     completedInspectionStatus = '';
+    autoCameraOpenedForPhotoRelease = false;
     _listenToVistoriaCompletion(session);
 
     final loadedMessages = session.chatMessages
@@ -590,11 +642,7 @@ class _AiChatPageState extends State<AiChatPage> {
       );
     }
 
-    return ChatMessage(
-      type: ChatMessageType.ai,
-      text: text,
-      createdAt: createdAt,
-    );
+    return _aiMessageFromText(text, createdAt: createdAt);
   }
 
   Future<void> _handleSinistroSelected(SinistroVistoriaOption option) async {
@@ -664,9 +712,10 @@ class _AiChatPageState extends State<AiChatPage> {
       setState(() {
         isAiTyping = false;
 
-        messages.add(ChatMessage(type: ChatMessageType.ai, text: reply, createdAt: DateTime.now()));
+        messages.add(_aiMessageFromText(reply, createdAt: DateTime.now()));
       });
 
+      _openCameraAfterPhotoRelease(reply);
       _scrollToBottom();
     } on FirebaseFunctionsException catch (e) {
       debugPrint('ERRO CLOUD FUNCTION');
@@ -759,6 +808,8 @@ class _AiChatPageState extends State<AiChatPage> {
 
     _scrollToBottom();
 
+    var uploadedAnyPhoto = false;
+
     for (final photo in photos) {
       try {
         final uploadedImage =
@@ -789,6 +840,8 @@ class _AiChatPageState extends State<AiChatPage> {
             'fileName': uploadedImage.fileName,
           },
         );
+
+        uploadedAnyPhoto = true;
       } catch (e) {
         debugPrint('Erro ao salvar foto da vistoria no Storage: $e');
       }
@@ -820,6 +873,21 @@ class _AiChatPageState extends State<AiChatPage> {
 
       _scrollToBottom();
     });
+
+    if (uploadedAnyPhoto) {
+      unawaited(_notifyPhotosSentInBackground(session.idvistoria));
+    }
+  }
+
+  Future<void> _notifyPhotosSentInBackground(String inspectionId) async {
+    try {
+      await ArgosAiService.instance.sendBackgroundMessage(
+        text: 'enviadas',
+        inspectionId: inspectionId,
+      );
+    } catch (e) {
+      debugPrint('Erro ao notificar envio de fotos para IA: $e');
+    }
   }
 
   Future<String> _createAudioFilePath() async {
@@ -1101,16 +1169,13 @@ class _AiChatPageState extends State<AiChatPage> {
         }
 
         messages.add(
-          ChatMessage(
-            type: ChatMessageType.ai,
-            text: audioResult.reply,
-            createdAt: DateTime.now(),
-          ),
+          _aiMessageFromText(audioResult.reply, createdAt: DateTime.now()),
         );
 
         isAiTyping = false;
       });
 
+      _openCameraAfterPhotoRelease(audioResult.reply);
       _scrollToBottom();
     } on FirebaseFunctionsException catch (e) {
       debugPrint('ERRO CLOUD FUNCTION AUDIO');
@@ -1768,7 +1833,11 @@ class _ChatBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     switch (message.type) {
       case ChatMessageType.ai:
-        return _AiBubble(text: message.text, createdAt: message.createdAt);
+        return _AiBubble(
+          text: message.text,
+          boldLineIndexes: message.boldLineIndexes,
+          createdAt: message.createdAt,
+        );
 
       case ChatMessageType.user:
         return _UserBubble(text: message.text, createdAt: message.createdAt);
@@ -1797,9 +1866,14 @@ class _ChatBubble extends StatelessWidget {
 
 class _AiBubble extends StatelessWidget {
   final String text;
+  final List<int> boldLineIndexes;
   final DateTime? createdAt;
 
-  const _AiBubble({required this.text, this.createdAt});
+  const _AiBubble({
+    required this.text,
+    this.boldLineIndexes = const [],
+    this.createdAt,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1828,12 +1902,14 @@ class _AiBubble extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  text,
-                  style: const TextStyle(
-                    color: Color(0xFF1F2937),
-                    height: 1.35,
-                    fontWeight: FontWeight.w500,
+                RichText(
+                  text: TextSpan(
+                    style: const TextStyle(
+                      color: Color(0xFF1F2937),
+                      height: 1.35,
+                      fontWeight: FontWeight.w500,
+                    ),
+                    children: _buildLineSpans(),
                   ),
                 ),
                 const SizedBox(height: 6),
@@ -1855,6 +1931,24 @@ class _AiBubble extends StatelessWidget {
       ],
     );
   }
+
+  List<TextSpan> _buildLineSpans() {
+    final lines = text.split('\n');
+
+    return lines.asMap().entries.expand((entry) {
+      final isBold = boldLineIndexes.contains(entry.key);
+
+      return [
+        TextSpan(
+          text: entry.value,
+          style: TextStyle(
+            fontWeight: isBold ? FontWeight.w800 : FontWeight.w500,
+          ),
+        ),
+        if (entry.key < lines.length - 1) const TextSpan(text: '\n'),
+      ];
+    }).toList();
+  }
 }
 
 class _UserBubble extends StatelessWidget {
@@ -1869,42 +1963,47 @@ class _UserBubble extends StatelessWidget {
       mainAxisAlignment: MainAxisAlignment.end,
       children: [
         Flexible(
-          child: Container(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
-            decoration: const BoxDecoration(
-              color: Color(0xFF0057C0),
-              borderRadius: BorderRadius.only(
-                topLeft: Radius.circular(22),
-                topRight: Radius.circular(4),
-                bottomLeft: Radius.circular(22),
-                bottomRight: Radius.circular(22),
-              ),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  text,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    height: 1.35,
-                    fontWeight: FontWeight.w600,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 330),
+            child: IntrinsicWidth(
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(16, 10, 14, 7),
+                decoration: const BoxDecoration(
+                  color: Color(0xFF0057C0),
+                  borderRadius: BorderRadius.only(
+                    topLeft: Radius.circular(18),
+                    topRight: Radius.circular(4),
+                    bottomLeft: Radius.circular(18),
+                    bottomRight: Radius.circular(18),
                   ),
                 ),
-                const SizedBox(height: 6),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: Text(
-                    _formatMessageTime(createdAt),
-                    style: TextStyle(
-                      color: Colors.white.withOpacity(.72),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      text,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        height: 1.30,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
-                  ),
+                    const SizedBox(height: 4),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Text(
+                        _formatMessageTime(createdAt),
+                        style: TextStyle(
+                          color: Colors.white.withOpacity(.72),
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         ),
@@ -2542,6 +2641,7 @@ class _TextComposer extends StatelessWidget {
             onPressed: onCameraTap,
             icon: const Icon(Icons.camera_alt),
             color: const Color(0xFF0057C0),
+            tooltip: 'Anexar fotos',
           ),
           Expanded(
             child: TextField(

@@ -5,12 +5,19 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+
+import '../firebase_options.dart';
 
 @pragma('vm:entry-point')
 Future<void> argosFirebaseMessagingBackgroundHandler(
   RemoteMessage message,
 ) async {
-  await Firebase.initializeApp();
+  if (Firebase.apps.isEmpty) {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+  }
 
   debugPrint('FCM background message: ${message.messageId}');
 }
@@ -35,6 +42,9 @@ class ArgosPushNotificationService {
   final FirebaseMessaging _messaging = FirebaseMessaging.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
+  final ValueNotifier<ArgosAppNotification?> foregroundNotification =
+      ValueNotifier<ArgosAppNotification?>(null);
+  final ValueNotifier<String?> openedSinistroId = ValueNotifier<String?>(null);
 
   bool _initialized = false;
   bool _listeningTokenRefresh = false;
@@ -79,26 +89,32 @@ class ArgosPushNotificationService {
 
   void _listenForegroundMessages() {
     FirebaseMessaging.onMessage.listen((message) {
+      final notification = ArgosAppNotification.fromRemoteMessage(message);
+
       debugPrint('FCM foreground message: ${message.messageId}');
       debugPrint('Título: ${message.notification?.title}');
       debugPrint('Corpo: ${message.notification?.body}');
       debugPrint('Dados: ${message.data}');
 
-      // Sem flutter_local_notifications, no Android a notificação recebida
-      // com o app aberto pode não aparecer como popup do sistema.
-      // Ela ainda chega aqui e pode ser usada futuramente para mostrar
-      // um banner próprio dentro do app.
+      foregroundNotification.value = notification;
+
+      Future.delayed(const Duration(seconds: 7), () {
+        if (foregroundNotification.value == notification) {
+          foregroundNotification.value = null;
+        }
+      });
     });
   }
 
   void _listenNotificationOpenedApp() {
     FirebaseMessaging.onMessageOpenedApp.listen((message) {
-      final sinistroId = message.data['sinistroId']?.toString();
+      final sinistroId = _sinistroIdFromMessage(message);
 
       debugPrint('App aberto pela notificação. sinistroId: $sinistroId');
 
-      // Futuro:
-      // navegar para a tela de resumo do sinistro.
+      if (sinistroId != null && sinistroId.isNotEmpty) {
+        openedSinistroId.value = sinistroId;
+      }
     });
   }
 
@@ -107,9 +123,25 @@ class ArgosPushNotificationService {
 
     if (initialMessage == null) return;
 
-    final sinistroId = initialMessage.data['sinistroId']?.toString();
+    final sinistroId = _sinistroIdFromMessage(initialMessage);
 
     debugPrint('App iniciado pela notificação. sinistroId: $sinistroId');
+
+    if (sinistroId != null && sinistroId.isNotEmpty) {
+      openedSinistroId.value = sinistroId;
+    }
+  }
+
+  void clearForegroundNotification() {
+    foregroundNotification.value = null;
+  }
+
+  void clearOpenedSinistroId() {
+    openedSinistroId.value = null;
+  }
+
+  String? _sinistroIdFromMessage(RemoteMessage message) {
+    return message.data['sinistroId']?.toString().trim();
   }
 
   Future<void> registerDeviceTokenForCurrentUser() async {
@@ -187,10 +219,49 @@ class ArgosPushNotificationService {
           'uid': uid,
           'email': email,
           'platform': Platform.operatingSystem,
+          'permissionStatus':
+              (await _messaging.getNotificationSettings())
+                  .authorizationStatus
+                  .name,
           'createdAt': FieldValue.serverTimestamp(),
           'updatedAt': FieldValue.serverTimestamp(),
         }, SetOptions(merge: true));
 
     debugPrint('FCM token salvo para UID $uid');
+  }
+}
+
+class ArgosAppNotification {
+  final String title;
+  final String body;
+  final String? sinistroId;
+  final String type;
+
+  const ArgosAppNotification({
+    required this.title,
+    required this.body,
+    required this.type,
+    this.sinistroId,
+  });
+
+  factory ArgosAppNotification.fromRemoteMessage(RemoteMessage message) {
+    final data = message.data;
+
+    return ArgosAppNotification(
+      title: message.notification?.title?.trim().isNotEmpty == true
+          ? message.notification!.title!.trim()
+          : data['title']?.toString().trim().isNotEmpty == true
+              ? data['title'].toString().trim()
+              : 'Atualização no Argos',
+      body: message.notification?.body?.trim().isNotEmpty == true
+          ? message.notification!.body!.trim()
+          : data['body']?.toString().trim().isNotEmpty == true
+              ? data['body'].toString().trim()
+              : 'Uma vistoria recebeu uma nova atualização.',
+      type: data['notificationType']?.toString().trim().isNotEmpty == true
+          ? data['notificationType'].toString().trim()
+          : data['type']?.toString().trim() ?? 'argos_update',
+      sinistroId: data['sinistroId']?.toString().trim(),
+    );
   }
 }

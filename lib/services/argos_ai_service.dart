@@ -33,6 +33,22 @@ class ArgosAiService {
         'Entendi. Pode continuar descrevendo a vistoria.';
   }
 
+  Future<void> sendBackgroundMessage({
+    required String text,
+    required String inspectionId,
+  }) async {
+    final cleanText = text.trim();
+
+    if (cleanText.isEmpty) return;
+
+    final callable = _functions.httpsCallable('sendmessageargos');
+
+    await callable.call<Map<String, dynamic>>({
+      'text': cleanText,
+      'inspectionId': inspectionId,
+    });
+  }
+
   Future<ArgosAudioMessageResult> sendAudioMessage({
     required String idvistoria,
     required String sinistroId,

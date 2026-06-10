@@ -52,9 +52,150 @@ class ArgosApp extends StatelessWidget {
         useMaterial3: true,
       ),
       builder: (context, child) {
-        return ArgosNetworkGate(child: child ?? const SizedBox.shrink());
+        return ArgosNotificationOverlay(
+          child: ArgosNetworkGate(child: child ?? const SizedBox.shrink()),
+        );
       },
       home: const StartupGate(),
+    );
+  }
+}
+
+class ArgosNotificationOverlay extends StatelessWidget {
+  final Widget child;
+
+  const ArgosNotificationOverlay({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<ArgosAppNotification?>(
+      valueListenable:
+          ArgosPushNotificationService.instance.foregroundNotification,
+      builder: (context, notification, _) {
+        return Stack(
+          children: [
+            child,
+            if (notification != null)
+              Positioned(
+                left: 14,
+                right: 14,
+                top: MediaQuery.of(context).padding.top + 10,
+                child: _ArgosForegroundNotificationBanner(
+                  notification: notification,
+                  onDismiss: ArgosPushNotificationService
+                      .instance.clearForegroundNotification,
+                  onTap: () {
+                    final sinistroId = notification.sinistroId?.trim() ?? '';
+
+                    ArgosPushNotificationService.instance
+                        .clearForegroundNotification();
+
+                    if (sinistroId.isNotEmpty) {
+                      ArgosPushNotificationService
+                          .instance.openedSinistroId.value = sinistroId;
+                    }
+                  },
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _ArgosForegroundNotificationBanner extends StatelessWidget {
+  final ArgosAppNotification notification;
+  final VoidCallback onDismiss;
+  final VoidCallback onTap;
+
+  const _ArgosForegroundNotificationBanner({
+    required this.notification,
+    required this.onDismiss,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: Dismissible(
+        key: ValueKey('${notification.type}_${notification.sinistroId}_${notification.title}'),
+        direction: DismissDirection.up,
+        onDismissed: (_) => onDismiss(),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(18),
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: const Color(0xFF0057C0).withOpacity(.10)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(.14),
+                  blurRadius: 24,
+                  offset: const Offset(0, 10),
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE5F6FF),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: const Icon(
+                    Icons.notifications_active_outlined,
+                    color: Color(0xFF0057C0),
+                    size: 20,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        notification.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Color(0xFF1F2937),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        notification.body,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Color(0xFF414755),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          height: 1.25,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  onPressed: onDismiss,
+                  icon: const Icon(Icons.close, size: 18),
+                  color: const Color(0xFF6B7280),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

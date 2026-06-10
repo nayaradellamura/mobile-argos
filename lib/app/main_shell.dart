@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import '../features/inspections/inspections_page.dart';
 import '../features/ai_chat/ai_chat_page.dart';
 import '../features/profile/profile_page.dart';
+import '../services/argos_push_notification_service.dart';
 
 class MainShell extends StatefulWidget {
   final User user;
@@ -24,6 +25,7 @@ class MainShell extends StatefulWidget {
 
 class _MainShellState extends State<MainShell> {
   int selectedIndex = 0;
+  VoidCallback? _notificationOpenListener;
 
   bool isLoadingProfile = true;
   bool profileCompletionRequired = false;
@@ -31,12 +33,20 @@ class _MainShellState extends State<MainShell> {
   /// Guarda o sinistro selecionado quando o usuário abre o Chat IA
   /// a partir do botão dentro do sumário da vistoria.
   String? selectedSinistroIdForChat;
+  String? notificationSinistroIdToOpen;
 
   String get _emailKey => (widget.user.email ?? '').trim().toLowerCase();
 
   @override
   void initState() {
     super.initState();
+    _notificationOpenListener = _handleNotificationSinistroOpened;
+    ArgosPushNotificationService.instance.openedSinistroId.addListener(
+      _notificationOpenListener!,
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _handleNotificationSinistroOpened();
+    });
 
     final initialProfileCompletionRequired =
         widget.initialProfileCompletionRequired;
@@ -49,6 +59,18 @@ class _MainShellState extends State<MainShell> {
     }
 
     _loadProfileCompletionStatus();
+  }
+
+  @override
+  void dispose() {
+    final listener = _notificationOpenListener;
+
+    if (listener != null) {
+      ArgosPushNotificationService.instance.openedSinistroId
+          .removeListener(listener);
+    }
+
+    super.dispose();
   }
 
   Future<void> _loadProfileCompletionStatus() async {
@@ -100,6 +122,41 @@ class _MainShellState extends State<MainShell> {
       profileCompletionRequired = false;
       selectedIndex = 0;
     });
+  }
+
+  void _handleNotificationSinistroOpened() {
+    final sinistroId =
+        ArgosPushNotificationService.instance.openedSinistroId.value?.trim() ??
+            '';
+
+    if (sinistroId.isEmpty || !mounted) return;
+
+    ArgosPushNotificationService.instance.clearOpenedSinistroId();
+
+    if (profileCompletionRequired) {
+      setState(() => selectedIndex = 2);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Finalize seu cadastro para abrir a vistoria.'),
+          backgroundColor: Color(0xFF0057C0),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      selectedIndex = 0;
+      selectedSinistroIdForChat = null;
+      notificationSinistroIdToOpen = sinistroId;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Notificação recebida para o sinistro $sinistroId.'),
+        backgroundColor: const Color(0xFF0057C0),
+      ),
+    );
   }
 
   void _handleNavTap(int index) {
@@ -168,6 +225,7 @@ class _MainShellState extends State<MainShell> {
       InspectionsPage(
         onOpenInspection: _openGenericChat,
         onOpenInspectionById: _openChatForSinistro,
+        notificationSinistroIdToOpen: notificationSinistroIdToOpen,
       ),
 
       /// O ValueKey força o Flutter a reconstruir o chat quando outro
