@@ -2122,6 +2122,10 @@ class _AudioBubble extends StatefulWidget {
 class _AudioBubbleState extends State<_AudioBubble> {
   final AudioPlayer player = AudioPlayer();
 
+  StreamSubscription<Duration>? _durationSubscription;
+  StreamSubscription<Duration>? _positionSubscription;
+  StreamSubscription<void>? _completeSubscription;
+
   bool isPlaying = false;
   Duration currentPosition = Duration.zero;
   Duration totalDuration = Duration.zero;
@@ -2132,17 +2136,17 @@ class _AudioBubbleState extends State<_AudioBubble> {
 
     totalDuration = Duration(seconds: widget.durationSeconds ?? 0);
 
-    player.onDurationChanged.listen((duration) {
+    _durationSubscription = player.onDurationChanged.listen((duration) {
       if (!mounted) return;
       setState(() => totalDuration = duration);
     });
 
-    player.onPositionChanged.listen((position) {
+    _positionSubscription = player.onPositionChanged.listen((position) {
       if (!mounted) return;
       setState(() => currentPosition = position);
     });
 
-    player.onPlayerComplete.listen((_) {
+    _completeSubscription = player.onPlayerComplete.listen((_) {
       if (!mounted) return;
       setState(() {
         isPlaying = false;
@@ -2153,6 +2157,9 @@ class _AudioBubbleState extends State<_AudioBubble> {
 
   @override
   void dispose() {
+    _durationSubscription?.cancel();
+    _positionSubscription?.cancel();
+    _completeSubscription?.cancel();
     player.dispose();
     super.dispose();
   }

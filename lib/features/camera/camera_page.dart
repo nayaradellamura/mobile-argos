@@ -232,7 +232,10 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
 
       final controller = CameraController(
         _cameras[_selectedCameraIndex],
-        ResolutionPreset.high,
+        // "medium" já é suficiente para evidência de vistoria e mantém o
+        // tamanho do arquivo compatível com o restante do pipeline (chat,
+        // Storage e limite de 1 MiB de documento no Firestore).
+        ResolutionPreset.medium,
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.jpeg,
       );
@@ -251,7 +254,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
 
         final retryController = CameraController(
           _cameras[_selectedCameraIndex],
-          ResolutionPreset.high,
+          ResolutionPreset.medium,
           enableAudio: false,
           imageFormatGroup: ImageFormatGroup.jpeg,
         );

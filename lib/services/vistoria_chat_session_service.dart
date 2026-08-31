@@ -462,6 +462,20 @@ class VistoriaChatSessionService {
     final ref = _vistorias.doc(vistoriaDocId);
 
     if (hardDelete) {
+      // Sincroniza o sinistro (marcando a vistoria como cancelada) ANTES de
+      // apagar o documento: _syncSinistroVistoriaStatus precisa ler o
+      // próprio documento da vistoria para saber a qual sinistro ele
+      // pertence, então isso tem que acontecer antes do delete.
+      await _syncSinistroVistoriaStatus(
+        vistoriaDocId: vistoriaDocId,
+        status: statusCancelada,
+      );
+
+      // Firestore não apaga subcoleções ao deletar o documento pai — a
+      // subcoleção "audios" (gravada pela Cloud Function de transcrição)
+      // ficaria órfã se não for limpa explicitamente aqui.
+      await _deleteSubcollection(ref.collection('audios'));
+
       await ref.delete();
       return;
     }
@@ -476,6 +490,27 @@ class VistoriaChatSessionService {
       vistoriaDocId: vistoriaDocId,
       status: statusCancelada,
     );
+  }
+
+  Future<void> _deleteSubcollection(
+    CollectionReference<Map<String, dynamic>> collection, {
+    int batchSize = 450,
+  }) async {
+    while (true) {
+      final snap = await collection.limit(batchSize).get();
+
+      if (snap.docs.isEmpty) return;
+
+      final batch = _db.batch();
+
+      for (final doc in snap.docs) {
+        batch.delete(doc.reference);
+      }
+
+      await batch.commit();
+
+      if (snap.docs.length < batchSize) return;
+    }
   }
 
   Future<void> _expireVistoria({
@@ -704,21 +739,37 @@ class VistoriaChatSessionService {
   Future<void> cleanupRootTranscriptionFields({
     int batchSize = 450,
   }) async {
-    final snap = await _vistorias.limit(batchSize).get();
+    // Pagina por toda a coleção usando um cursor estável (id do documento);
+    // sem isso, chamadas repetidas sempre reprocessavam o mesmo primeiro
+    // lote e nunca alcançavam o restante da coleção.
+    Query<Map<String, dynamic>> query = _vistorias
+        .orderBy(FieldPath.documentId)
+        .limit(batchSize);
 
-    if (snap.docs.isEmpty) return;
+    while (true) {
+      final snap = await query.get();
 
-    final batch = _db.batch();
+      if (snap.docs.isEmpty) return;
 
-    for (final doc in snap.docs) {
-      batch.update(doc.reference, {
-        'transcriptionStatus': FieldValue.delete(),
-        'ultimaTranscricaoOriginal': FieldValue.delete(),
-        'ultimaTranscricaoRevisada': FieldValue.delete(),
-      });
+      final batch = _db.batch();
+
+      for (final doc in snap.docs) {
+        batch.update(doc.reference, {
+          'transcriptionStatus': FieldValue.delete(),
+          'ultimaTranscricaoOriginal': FieldValue.delete(),
+          'ultimaTranscricaoRevisada': FieldValue.delete(),
+        });
+      }
+
+      await batch.commit();
+
+      if (snap.docs.length < batchSize) return;
+
+      query = _vistorias
+          .orderBy(FieldPath.documentId)
+          .startAfterDocument(snap.docs.last)
+          .limit(batchSize);
     }
-
-    await batch.commit();
   }
 
   Future<void> _syncSinistroVistoriaStatus({
@@ -856,7 +907,6 @@ class VistoriaChatSessionService {
 
   static bool _hasFilledAnalyticalReport(Map<String, dynamic> data) {
     const candidateFields = [
-      'laudo_analiticolaudo_analitico',
       'laudo_analitico',
       'laudoAnalitico',
     ];

@@ -9,114 +9,12 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shimmer/shimmer.dart';
-import '../../services/sinistro_presence_service.dart'; 
-
-enum InspectionFilter {
-  all,
-  pending,
-  inProgress,
-  aiAnalysis,
-  revision,
-  cancelled,
-  completed,
-}
-
-extension InspectionFilterX on InspectionFilter {
-  String get label {
-    switch (this) {
-      case InspectionFilter.all:
-        return 'Todas';
-      case InspectionFilter.pending:
-        return 'Pendentes';
-      case InspectionFilter.inProgress:
-        return 'Andamento';
-      case InspectionFilter.aiAnalysis:
-        return 'Analise';
-      case InspectionFilter.revision:
-        return 'Revisão';
-      case InspectionFilter.cancelled:
-        return 'Canceladas';
-      case InspectionFilter.completed:
-        return 'Concluídas';
-    }
-  }
-
-  String get description {
-    switch (this) {
-      case InspectionFilter.all:
-        return 'Todos os sinistros';
-      case InspectionFilter.pending:
-        return 'Sem check-in';
-      case InspectionFilter.inProgress:
-        return 'Aguardando vistoria';
-      case InspectionFilter.aiAnalysis:
-        return 'Analise humana';
-      case InspectionFilter.revision:
-        return 'Retificação/revisão';
-      case InspectionFilter.cancelled:
-        return 'Canceladas';
-      case InspectionFilter.completed:
-        return 'Finalizadas';
-    }
-  }
-
-  IconData get icon {
-    switch (this) {
-      case InspectionFilter.all:
-        return Icons.dashboard_customize_outlined;
-      case InspectionFilter.pending:
-        return Icons.schedule;
-      case InspectionFilter.inProgress:
-        return Icons.build_circle_outlined;
-      case InspectionFilter.aiAnalysis:
-        return Icons.psychology_alt_outlined;
-      case InspectionFilter.revision:
-        return Icons.rate_review_outlined;
-      case InspectionFilter.cancelled:
-        return Icons.cancel_outlined;
-      case InspectionFilter.completed:
-        return Icons.verified_outlined;
-    }
-  }
-
-  Color get color {
-    switch (this) {
-      case InspectionFilter.all:
-        return const Color(0xFF0057C0);
-      case InspectionFilter.pending:
-        return Colors.orange;
-      case InspectionFilter.inProgress:
-        return const Color(0xFF0057C0);
-      case InspectionFilter.aiAnalysis:
-        return Colors.purple;
-      case InspectionFilter.revision:
-        return Colors.deepOrange;
-      case InspectionFilter.cancelled:
-        return Colors.redAccent;
-      case InspectionFilter.completed:
-        return Colors.green;
-    }
-  }
-
-  bool matches(InspectionCase inspection) {
-    switch (this) {
-      case InspectionFilter.all:
-        return true;
-      case InspectionFilter.pending:
-        return inspection.isPendingCategory;
-      case InspectionFilter.inProgress:
-        return inspection.isInProgressCategory;
-      case InspectionFilter.aiAnalysis:
-        return inspection.isAiAnalysisCategory;
-      case InspectionFilter.revision:
-        return inspection.isRevisionCategory;
-      case InspectionFilter.cancelled:
-        return inspection.isCancelledCategory;
-      case InspectionFilter.completed:
-        return inspection.isCompletedCategory;
-    }
-  }
-}
+import '../../services/sinistro_presence_service.dart';
+import '../metrics/metrics_page.dart';
+import 'data/inspection_case.dart';
+import 'data/inspection_filter.dart';
+import 'data/inspection_parsing_utils.dart';
+import 'data/linked_vistoria_info.dart';
 
 class InspectionsPage extends StatefulWidget {
   final VoidCallback onOpenInspection;
@@ -143,6 +41,7 @@ class InspectionsPage extends StatefulWidget {
 class _InspectionsPageState extends State<InspectionsPage> {
   late Future<_CredenciadoContext> _credenciadoFuture;
   InspectionFilter _selectedFilter = InspectionFilter.all;
+  bool _onlyMine = false;
   final ScrollController _filterScrollController = ScrollController();
 
   Stream<List<InspectionCase>>? _cachedInspectionStream;
@@ -509,10 +408,13 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
     );
   }
 
-  Widget _buildInspectionsWithAvatarPreload(List<InspectionCase> inspections) {
+  Widget _buildInspectionsWithAvatarPreload(
+    List<InspectionCase> inspections,
+    String credenciadoId,
+  ) {
     if (_hasCompletedInitialAvatarPreload) {
       unawaited(_precachePeoplePhotosAfterFrame(inspections));
-      return _buildBodyForInspections(inspections);
+      return _buildBodyForInspections(inspections, credenciadoId);
     }
 
     return FutureBuilder<void>(
@@ -530,32 +432,58 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
           });
         });
 
-        return _buildBodyForInspections(inspections);
+        return _buildBodyForInspections(inspections, credenciadoId);
       },
     );
   }
 
-  Widget _buildBodyForInspections(List<InspectionCase> inspections) {
+  void _openTeamRanking(String credenciadoId) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => MetricsPage(credenciadoId: credenciadoId),
+      ),
+    );
+  }
+
+  Widget _buildBodyForInspections(
+    List<InspectionCase> inspections,
+    String credenciadoId,
+  ) {
     _maybeOpenNotificationInspection(inspections);
+
+    final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+    final scopedInspections = _onlyMine
+        ? inspections
+            .where((inspection) => inspection.assignedToUid.trim() == currentUid)
+            .toList()
+        : inspections;
 
     final counts = {
       for (final filter in InspectionFilter.values)
-        filter: inspections.where(filter.matches).length,
+        filter: scopedInspections.where(filter.matches).length,
     };
 
     final filteredInspections =
-        inspections.where(_selectedFilter.matches).toList();
+        scopedInspections.where(_selectedFilter.matches).toList();
 
     return SafeArea(
       child: Column(
         children: [
           _InspectionsHeader(
-              total: inspections.length,
-              counts: counts,
-              selectedFilter: _selectedFilter,
-              filterController: _filterScrollController,
-              onFilterChanged: _changeFilter,
-            ),
+            total: scopedInspections.length,
+            counts: counts,
+            selectedFilter: _selectedFilter,
+            filterController: _filterScrollController,
+            onFilterChanged: _changeFilter,
+            onlyMine: _onlyMine,
+            onToggleOnlyMine: () {
+              setState(() {
+                _onlyMine = !_onlyMine;
+              });
+            },
+            onOpenRanking: () => _openTeamRanking(credenciadoId),
+          ),
           Expanded(
             child: inspections.isEmpty
                 ? const _StateMessage(
@@ -564,26 +492,34 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
                     message:
                         'Não há sinistros atribuídos para esta oficina no momento.',
                   )
-                : filteredInspections.isEmpty
-                    ? _StateMessage(
-                        icon: _selectedFilter.icon,
-                        title: 'Nenhum item em ${_selectedFilter.label}',
+                : scopedInspections.isEmpty
+                    ? const _StateMessage(
+                        icon: Icons.person_search_outlined,
+                        title: 'Nenhuma vistoria sua',
                         message:
-                            'Não há vistorias nessa categoria no momento. Toque em outra categoria para alterar o filtro.',
+                            'Você ainda não tem sinistros atribuídos. Desative "Minhas vistorias" para ver todas as da oficina.',
                       )
-                    : ListView.separated(
-                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-                        itemCount: filteredInspections.length,
-                        separatorBuilder: (_, __) => const SizedBox(height: 12),
-                        itemBuilder: (context, index) {
-                          final inspection = filteredInspections[index];
+                    : filteredInspections.isEmpty
+                        ? _StateMessage(
+                            icon: _selectedFilter.icon,
+                            title: 'Nenhum item em ${_selectedFilter.label}',
+                            message:
+                                'Não há vistorias nessa categoria no momento. Toque em outra categoria para alterar o filtro.',
+                          )
+                        : ListView.separated(
+                            padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+                            itemCount: filteredInspections.length,
+                            separatorBuilder: (_, __) => const SizedBox(height: 12),
+                            itemBuilder: (context, index) {
+                              final inspection = filteredInspections[index];
 
-                          return _InspectionCard(
-                            inspection: inspection,
-                            onTap: () => _openInspectionSummary(inspection),
-                          );
-                        },
-                      ),
+                              return _InspectionCard(
+                                key: ValueKey(inspection.id),
+                                inspection: inspection,
+                                onTap: () => _openInspectionSummary(inspection),
+                              );
+                            },
+                          ),
           ),
         ],
       ),
@@ -715,7 +651,10 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
 
             final inspections = inspectionSnapshot.data ?? [];
 
-            return _buildInspectionsWithAvatarPreload(inspections);
+            return _buildInspectionsWithAvatarPreload(
+              inspections,
+              contextData.credenciadoId,
+            );
           },
         );
       },
@@ -2418,35 +2357,44 @@ List<int> _decodeBase64Image(String base64Value) {
   return base64Decode(cleanValue);
 }
 
-class _HistoryAudioPreviewList extends StatelessWidget {
+class _HistoryAudioPreviewList extends StatefulWidget {
   final LinkedVistoriaInfo vistoria;
 
   const _HistoryAudioPreviewList({required this.vistoria});
 
   @override
+  State<_HistoryAudioPreviewList> createState() =>
+      _HistoryAudioPreviewListState();
+}
+
+class _HistoryAudioPreviewListState extends State<_HistoryAudioPreviewList> {
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _stream =
+      FirebaseFirestore.instance
+          .collection('vistorias')
+          .doc(widget.vistoria.docId)
+          .collection('audios')
+          .snapshots();
+
+  @override
   Widget build(BuildContext context) {
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: FirebaseFirestore.instance
-          .collection('vistorias')
-          .doc(vistoria.docId)
-          .collection('audios')
-          .snapshots(),
+      stream: _stream,
       builder: (context, snapshot) {
         final docs = snapshot.data?.docs ?? [];
 
         if (docs.isNotEmpty) {
           final audios = docs.map((doc) {
             final data = doc.data();
-            final audioId = _stringValue(data['audioId'], fallback: doc.id);
-            final status = _stringValue(data['transcriptionStatus']);
-            final storagePath = _stringValue(data['storagePath']);
-            final downloadUrl = _stringValue(
+            final audioId = stringValue(data['audioId'], fallback: doc.id);
+            final status = stringValue(data['transcriptionStatus']);
+            final storagePath = stringValue(data['storagePath']);
+            final downloadUrl = stringValue(
               data['mp3DownloadUrl'],
-              fallback: _stringValue(
+              fallback: stringValue(
                 data['downloadUrl'],
-                fallback: _stringValue(
+                fallback: stringValue(
                   data['audioUrl'],
-                  fallback: _stringValue(data['url']),
+                  fallback: stringValue(data['url']),
                 ),
               ),
             );
@@ -2468,18 +2416,18 @@ class _HistoryAudioPreviewList extends StatelessWidget {
         }
 
         if (snapshot.connectionState == ConnectionState.waiting &&
-            vistoria.audioPreviews.isEmpty) {
+            widget.vistoria.audioPreviews.isEmpty) {
           return const _EmptyPreviewText(text: 'Carregando áudios...');
         }
 
-        if (vistoria.audioPreviews.isEmpty) {
+        if (widget.vistoria.audioPreviews.isEmpty) {
           return const _EmptyPreviewText(
             text: 'Nenhum áudio registrado nesta vistoria.',
           );
         }
 
         return Column(
-          children: vistoria.audioPreviews.map((preview) {
+          children: widget.vistoria.audioPreviews.map((preview) {
             return _HistoryAudioTile(
               label: preview.label,
               subtitle: preview.canPlay
@@ -2891,12 +2839,16 @@ class _HistorySkeleton extends StatelessWidget {
   }
 }
 
+
 class _InspectionsHeader extends StatelessWidget {
   final int total;
   final Map<InspectionFilter, int> counts;
   final InspectionFilter selectedFilter;
   final ValueChanged<InspectionFilter>? onFilterChanged;
   final ScrollController? filterController;
+  final bool onlyMine;
+  final VoidCallback? onToggleOnlyMine;
+  final VoidCallback? onOpenRanking;
 
   const _InspectionsHeader({
     required this.total,
@@ -2904,6 +2856,9 @@ class _InspectionsHeader extends StatelessWidget {
     this.counts = const {},
     this.selectedFilter = InspectionFilter.all,
     this.onFilterChanged,
+    this.onlyMine = false,
+    this.onToggleOnlyMine,
+    this.onOpenRanking,
   });
 
   int _countFor(InspectionFilter filter) {
@@ -2929,29 +2884,53 @@ class _InspectionsHeader extends StatelessWidget {
           Row(
             children: [
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Vistorias',
-                      style: GoogleFonts.spaceGrotesk(
-                        fontSize: 28,
-                        fontWeight: FontWeight.bold,
-                        color: const Color(0xFF0057C0),
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    const Text(
-                      'Toque em uma categoria para filtrar',
-                      style: TextStyle(
-                        color: Color(0xFF414755),
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
+                child: Text(
+                  'Vistorias',
+                  style: GoogleFonts.spaceGrotesk(
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                    color: const Color(0xFF0057C0),
+                  ),
                 ),
               ),
+              if (onOpenRanking != null)
+                Padding(
+                  padding: const EdgeInsets.only(left: 8),
+                  child: Tooltip(
+                    message: 'Ranking da equipe',
+                    child: Material(
+                      color: const Color(0xFFE5F6FF),
+                      borderRadius: BorderRadius.circular(12),
+                      child: InkWell(
+                        onTap: onOpenRanking,
+                        borderRadius: BorderRadius.circular(12),
+                        child: const SizedBox(
+                          width: 36,
+                          height: 36,
+                          child: Icon(
+                            Icons.emoji_events_outlined,
+                            color: Color(0xFF0057C0),
+                            size: 19,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 2),
+          const Text(
+            'Toque em uma categoria para filtrar',
+            style: TextStyle(
+              color: Color(0xFF414755),
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
               Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 12,
@@ -2969,6 +2948,50 @@ class _InspectionsHeader extends StatelessWidget {
                   ),
                 ),
               ),
+              if (onToggleOnlyMine != null) ...[
+                const SizedBox(width: 8),
+                Material(
+                  color: onlyMine
+                      ? const Color(0xFF0057C0)
+                      : const Color(0xFFE5F6FF),
+                  borderRadius: BorderRadius.circular(16),
+                  child: InkWell(
+                    onTap: onToggleOnlyMine,
+                    borderRadius: BorderRadius.circular(16),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            onlyMine
+                                ? Icons.person
+                                : Icons.person_outline,
+                            size: 15,
+                            color: onlyMine
+                                ? Colors.white
+                                : const Color(0xFF0057C0),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Minhas vistorias',
+                            style: TextStyle(
+                              color: onlyMine
+                                  ? Colors.white
+                                  : const Color(0xFF0057C0),
+                              fontWeight: FontWeight.w800,
+                              fontSize: 12.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
           const SizedBox(height: 12),
@@ -3095,36 +3118,47 @@ class _InspectionFilterCard extends StatelessWidget {
   }
 }
 
-class _InspectionCard extends StatelessWidget {
+class _InspectionCard extends StatefulWidget {
   final InspectionCase inspection;
   final VoidCallback onTap;
 
-  const _InspectionCard({required this.inspection, required this.onTap});
+  const _InspectionCard({
+    super.key,
+    required this.inspection,
+    required this.onTap,
+  });
 
-  Stream<QuerySnapshot<Map<String, dynamic>>> _linkedVistoriaStream() {
-    return FirebaseFirestore.instance
-        .collection('vistorias')
-        .where('sinistroId', isEqualTo: inspection.id)
-        .limit(6)
-        .snapshots();
-  }
+  @override
+  State<_InspectionCard> createState() => _InspectionCardState();
+}
+
+class _InspectionCardState extends State<_InspectionCard> {
+  // Criado uma única vez por card (não a cada build), evitando reabrir um
+  // novo listener do Firestore a cada rebuild da lista de vistorias.
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _linkedVistoriaStream =
+      FirebaseFirestore.instance
+          .collection('vistorias')
+          .where('sinistroId', isEqualTo: widget.inspection.id)
+          .limit(6)
+          .snapshots();
 
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: _linkedVistoriaStream(),
+      stream: _linkedVistoriaStream,
       builder: (context, snapshot) {
         final linkedVistoria = snapshot.hasData
             ? _latestLinkedVistoriaFromSnapshot(snapshot.data!)
             : null;
-        final hasLinkedVistoria = inspection.vistoriaAtualId.trim().isNotEmpty ||
-            linkedVistoria != null;
+        final hasLinkedVistoria =
+            widget.inspection.vistoriaAtualId.trim().isNotEmpty ||
+                linkedVistoria != null;
 
         return _InspectionCardContent(
-          inspection: inspection,
+          inspection: widget.inspection,
           linkedVistoria: linkedVistoria,
           hasLinkedVistoria: hasLinkedVistoria,
-          onTap: onTap,
+          onTap: widget.onTap,
         );
       },
     );
@@ -3660,19 +3694,29 @@ class _ViewerAvatarStack extends StatelessWidget {
   }
 }
 
-class _LinkedVistoriaSummaryForInspection extends StatelessWidget {
+class _LinkedVistoriaSummaryForInspection extends StatefulWidget {
   final String sinistroId;
 
   const _LinkedVistoriaSummaryForInspection({required this.sinistroId});
 
   @override
+  State<_LinkedVistoriaSummaryForInspection> createState() =>
+      _LinkedVistoriaSummaryForInspectionState();
+}
+
+class _LinkedVistoriaSummaryForInspectionState
+    extends State<_LinkedVistoriaSummaryForInspection> {
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _stream =
+      FirebaseFirestore.instance
+          .collection('vistorias')
+          .where('sinistroId', isEqualTo: widget.sinistroId)
+          .limit(1)
+          .snapshots();
+
+  @override
   Widget build(BuildContext context) {
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: FirebaseFirestore.instance
-          .collection('vistorias')
-          .where('sinistroId', isEqualTo: sinistroId)
-          .limit(1)
-          .snapshots(),
+      stream: _stream,
       builder: (context, snapshot) {
         if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
           return const SizedBox.shrink();
@@ -4874,789 +4918,11 @@ class _SkeletonBox extends StatelessWidget {
   }
 }
 
-class InspectionCase {
-  final String id;
-  final String protocol;
-  final InspectionStatus status;
-  final InspectionPriority priority;
-  final String insurer;
-  final String claimType;
-  final DateTime scheduledDate;
-  final DateTime? checkInAt;
-  final VehicleInfo vehicle;
-  final OwnerInfo owner;
-  final WorkshopInfo workshop;
-  final String damageDescription;
-  final String observations;
-  final String assignedToUid;
-  final String assignedToName;
-  final String assignedToEmail;
-  final String assignedToPhotoURL;
-  final DateTime? assignedAt;
-  final List<SinistroViewer> activeViewers;
-  final String vistoriaAtualId;
-  final String vistoriaAtualStatus;
-  final String vistoriaAtualTipo;
-  final String vistoriaAtualOrigemId;
-  final String retificacaoAtualId;
-
-  const InspectionCase({
-    required this.id,
-    required this.protocol,
-    required this.status,
-    required this.priority,
-    required this.insurer,
-    required this.claimType,
-    required this.scheduledDate,
-    this.checkInAt,
-    required this.vehicle,
-    required this.owner,
-    required this.workshop,
-    required this.damageDescription,
-    required this.observations,
-    this.assignedToUid = '',
-    this.assignedToName = '',
-    this.assignedToEmail = '',
-    this.assignedToPhotoURL = '',
-    this.assignedAt,
-    this.activeViewers = const [],
-    this.vistoriaAtualId = '',
-    this.vistoriaAtualStatus = '',
-    this.vistoriaAtualTipo = '',
-    this.vistoriaAtualOrigemId = '',
-    this.retificacaoAtualId = '',
-  });
-
-  factory InspectionCase.fromFirestore(
-    DocumentSnapshot<Map<String, dynamic>> doc,
-  ) {
-    final data = doc.data() ?? <String, dynamic>{};
-
-    final clienteSnapshot = _asStringMap(data['clienteSnapshot']);
-    final veiculoSnapshot = _asStringMap(data['veiculoSnapshot']);
-    final credenciadoSnapshot = _asStringMap(data['credenciadoSnapshot']);
-    final seguradoraSnapshot = _asStringMap(data['seguradoraSnapshot']);
-
-    final scheduledDate =
-        _parseDateTime(data['scheduledDate']) ??
-        _parseDateTime(data['entryDate']) ??
-        DateTime.now();
-
-    return InspectionCase(
-      id: doc.id,
-      protocol: _stringValue(data['protocol'], fallback: doc.id),
-      status: InspectionStatusX.fromFirestore(data['status']),
-      priority: InspectionPriorityX.fromFirestore(data['priority']),
-      insurer: _stringValue(
-        seguradoraSnapshot['name'],
-        fallback: _stringValue(data['insurer']),
-      ),
-      claimType: _stringValue(data['claimType'], fallback: 'Sinistro'),
-      scheduledDate: scheduledDate,
-      checkInAt: _parseDateTime(data['checkInAt']),
-      vehicle: VehicleInfo.fromSnapshot(veiculoSnapshot, data),
-      owner: OwnerInfo.fromSnapshot(clienteSnapshot, data),
-      workshop: WorkshopInfo.fromSnapshot(credenciadoSnapshot, data),
-      damageDescription: _stringValue(data['damageDescription']),
-      observations: _stringValue(data['observations']),
-      assignedToUid: _stringValue(data['assignedToUid']),
-      assignedToName: _stringValue(data['assignedToName']),
-      assignedToEmail: _stringValue(data['assignedToEmail']),
-      assignedToPhotoURL: _stringValue(data['assignedToPhotoURL']),
-      assignedAt: _parseDateTime(data['assignedAt']),
-      activeViewers: _parseSinistroViewers(data['activeViewers']),
-      vistoriaAtualId: _stringValue(data['vistoriaAtualId']),
-      vistoriaAtualStatus: _stringValue(data['vistoriaAtualStatus']),
-      vistoriaAtualTipo: _stringValue(data['vistoriaAtualTipo']),
-      vistoriaAtualOrigemId: _stringValue(data['vistoriaAtualOrigemId']),
-      retificacaoAtualId: _stringValue(data['retificacaoAtualId']),
-    );
-  }
-
-  bool get hasAssignedUser => assignedToUid.trim().isNotEmpty;
-
-  bool get isAssignedToCurrentUser {
-    final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
-
-    return currentUid.isNotEmpty && assignedToUid.trim() == currentUid;
-  }
-
-  bool get isAssignedToAnotherUser {
-    final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
-    final assignedUid = assignedToUid.trim();
-
-    return assignedUid.isNotEmpty && assignedUid != currentUid;
-  }
-
-  bool get isCompletedCategory {
-    final vistoriaStatus = _normalizeStatus(vistoriaAtualStatus);
-
-    return status == InspectionStatus.approved ||
-        status == InspectionStatus.finalized ||
-        vistoriaStatus.contains('aprovada') ||
-        vistoriaStatus.contains('aprovado') ||
-        vistoriaStatus.contains('approved');
-  }
-
-  bool get isAiAnalysisCategory {
-    final vistoriaStatus = _normalizeStatus(vistoriaAtualStatus);
-
-    return status == InspectionStatus.submitted ||
-        (vistoriaStatus.isNotEmpty &&
-            !vistoriaStatus.contains('em_andamento') &&
-            !vistoriaStatus.contains('andamento') &&
-            !isCompletedCategory &&
-            !isRevisionCategory &&
-            !isCancelledCategory) ||
-        vistoriaStatus.contains('analise') ||
-        vistoriaStatus.contains('análise') ||
-        vistoriaStatus.contains('finalizada') ||
-        vistoriaStatus.contains('finalizado') ||
-        vistoriaStatus.contains('finalized') ||
-        vistoriaStatus.contains('em_analise_operacional') ||
-        vistoriaStatus.contains('review') ||
-        vistoriaStatus.contains('submitted');
-  }
-
-  bool get isRevisionCategory {
-    final tipo = _normalizeStatus(vistoriaAtualTipo);
-    final vistoriaStatus = _normalizeStatus(vistoriaAtualStatus);
-    final origemId = vistoriaAtualOrigemId.trim();
-    final retificacaoId = retificacaoAtualId.trim();
-
-    // Retificação/revisão deve ser identificada pela modelagem nova:
-    // - a vistoria atual é RETIFICACAO/REVISAO;
-    // - ou a vistoria atual nasceu de uma vistoria original (vistoriaAtualOrigemId);
-    // - ou este sinistro/original aponta para uma retificação atual (retificacaoAtualId).
-    // Status REJEITADA sozinho não é usado aqui, porque rejeição e retificação
-    // são conceitos diferentes no novo fluxo operacional.
-    return status == InspectionStatus.rejected ||
-        tipo.contains('retificacao') ||
-        tipo.contains('retificação') ||
-        tipo.contains('revisao') ||
-        tipo.contains('revisão') ||
-        origemId.isNotEmpty ||
-        retificacaoId.isNotEmpty ||
-        vistoriaStatus.contains('rejeitada') ||
-        vistoriaStatus.contains('rejeitado') ||
-        vistoriaStatus.contains('rejected') ||
-        vistoriaStatus.contains('retificar') ||
-        vistoriaStatus.contains('retificacao') ||
-        vistoriaStatus.contains('retificação') ||
-        vistoriaStatus.contains('revisao') ||
-        vistoriaStatus.contains('revisão');
-  }
-
-  bool get isCancelledCategory {
-    final vistoriaStatus = _normalizeStatus(vistoriaAtualStatus);
-
-    return status == InspectionStatus.cancelled ||
-        vistoriaStatus.contains('cancelada') ||
-        vistoriaStatus.contains('cancelado') ||
-        vistoriaStatus.contains('cancelled') ||
-        vistoriaStatus.contains('expirada') ||
-        vistoriaStatus.contains('expirado') ||
-        vistoriaStatus.contains('expired') ||
-        vistoriaStatus.contains('abandonada') ||
-        vistoriaStatus.contains('abandonado');
-  }
-
-  bool get isInProgressCategory {
-    return checkInAt != null &&
-        !isAiAnalysisCategory &&
-        !isRevisionCategory &&
-        !isCancelledCategory &&
-        !isCompletedCategory;
-  }
-
-  bool get isPendingCategory {
-    return checkInAt == null &&
-        !isAiAnalysisCategory &&
-        !isRevisionCategory &&
-        !isCancelledCategory &&
-        !isCompletedCategory;
-  }
-
-  InspectionCase copyWith({
-    InspectionStatus? status,
-    DateTime? checkInAt,
-    String? assignedToUid,
-    String? assignedToName,
-    String? assignedToEmail,
-    String? assignedToPhotoURL,
-    DateTime? assignedAt,
-    List<SinistroViewer>? activeViewers,
-    String? vistoriaAtualId,
-    String? vistoriaAtualStatus,
-    String? vistoriaAtualTipo,
-    String? vistoriaAtualOrigemId,
-    String? retificacaoAtualId,
-  }) {
-    return InspectionCase(
-      id: id,
-      protocol: protocol,
-      status: status ?? this.status,
-      priority: priority,
-      insurer: insurer,
-      claimType: claimType,
-      scheduledDate: scheduledDate,
-      checkInAt: checkInAt ?? this.checkInAt,
-      vehicle: vehicle,
-      owner: owner,
-      workshop: workshop,
-      damageDescription: damageDescription,
-      observations: observations,
-      assignedToUid: assignedToUid ?? this.assignedToUid,
-      assignedToName: assignedToName ?? this.assignedToName,
-      assignedToEmail: assignedToEmail ?? this.assignedToEmail,
-      assignedToPhotoURL: assignedToPhotoURL ?? this.assignedToPhotoURL,
-      assignedAt: assignedAt ?? this.assignedAt,
-      activeViewers: activeViewers ?? this.activeViewers,
-      vistoriaAtualId: vistoriaAtualId ?? this.vistoriaAtualId,
-      vistoriaAtualStatus: vistoriaAtualStatus ?? this.vistoriaAtualStatus,
-      vistoriaAtualTipo: vistoriaAtualTipo ?? this.vistoriaAtualTipo,
-      vistoriaAtualOrigemId: vistoriaAtualOrigemId ?? this.vistoriaAtualOrigemId,
-      retificacaoAtualId: retificacaoAtualId ?? this.retificacaoAtualId,
-    );
-  }
-}
-
-class VehicleInfo {
-  final String plate;
-  final String model;
-  final String brand;
-  final String year;
-  final String color;
-  final String chassis;
-  final String renavam;
-  final String fuel;
-
-  const VehicleInfo({
-    required this.plate,
-    required this.model,
-    required this.brand,
-    required this.year,
-    required this.color,
-    required this.chassis,
-    required this.renavam,
-    required this.fuel,
-  });
-
-  factory VehicleInfo.fromSnapshot(
-    Map<String, dynamic> snapshot,
-    Map<String, dynamic> root,
-  ) {
-    final brand = _stringValue(snapshot['marca']);
-    final modelBase = _stringValue(
-      snapshot['modelo'],
-      fallback: _stringValue(root['vehicle']),
-    );
-
-    final model = _buildVehicleModel(brand, modelBase);
-
-    return VehicleInfo(
-      plate: _stringValue(
-        snapshot['placa'],
-        fallback: _stringValue(root['plate']),
-      ),
-      model: model,
-      brand: brand,
-      year: _stringValue(
-        snapshot['anoFabricacao'],
-        fallback: _stringValue(snapshot['ano']),
-      ),
-      color: _stringValue(snapshot['cor']),
-      chassis: _stringValue(snapshot['chassi']),
-      renavam: _stringValue(snapshot['renavam']),
-      fuel: _stringValue(snapshot['combustivel']),
-    );
-  }
-}
-
-class OwnerInfo {
-  final String name;
-  final String document;
-  final String phone;
-  final String email;
-
-  const OwnerInfo({
-    required this.name,
-    required this.document,
-    required this.phone,
-    required this.email,
-  });
-
-  factory OwnerInfo.fromSnapshot(
-    Map<String, dynamic> snapshot,
-    Map<String, dynamic> root,
-  ) {
-    return OwnerInfo(
-      name: _stringValue(
-        snapshot['nomeCompleto'],
-        fallback: _stringValue(root['owner']),
-      ),
-      document: _stringValue(snapshot['cpfCnpj']),
-      phone: _stringValue(snapshot['telefone']),
-      email: _stringValue(snapshot['email']),
-    );
-  }
-}
-
-class WorkshopInfo {
-  final String name;
-  final String address;
-  final String phone;
-  final String email;
-
-  const WorkshopInfo({
-    required this.name,
-    required this.address,
-    required this.phone,
-    required this.email,
-  });
-
-  factory WorkshopInfo.fromSnapshot(
-    Map<String, dynamic> snapshot,
-    Map<String, dynamic> root,
-  ) {
-    final address = _formatWorkshopAddress(snapshot);
-
-    return WorkshopInfo(
-      name: _stringValue(
-        snapshot['name'],
-        fallback: _stringValue(root['workshop']),
-      ),
-      address: address,
-      phone: _stringValue(snapshot['phone']),
-      email: _stringValue(snapshot['email']),
-    );
-  }
-}
-
-class LinkedVistoriaInfo {
-  final String docId;
-  final String idvistoria;
-  final String sinistroId;
-  final String status;
-  final int chatCount;
-  final int imageCount;
-  final int audioCount;
-  final bool hasLaudo;
-  final List<String> imageBase64Previews;
-  final List<AudioPreviewInfo> audioPreviews;
-  final List<ChatPreviewInfo> chatPreviews;
-  final String laudo;
-  final String observacoes;
-  final String placa;
-  final String veiculo;
-  final String cliente;
-  final String credenciado;
-  final String tipoVistoria;
-  final String inspectorId;
-  final String inspectorName;
-  final String inspectorEmail;
-  final DateTime? createdAt;
-  final DateTime? updatedAt;
-
-  const LinkedVistoriaInfo({
-    required this.docId,
-    required this.idvistoria,
-    required this.sinistroId,
-    required this.status,
-    required this.chatCount,
-    required this.imageCount,
-    required this.audioCount,
-    required this.hasLaudo,
-    required this.imageBase64Previews,
-    required this.audioPreviews,
-    required this.chatPreviews,
-    required this.laudo,
-    required this.observacoes,
-    required this.placa,
-    required this.veiculo,
-    required this.cliente,
-    required this.credenciado,
-    required this.tipoVistoria,
-    required this.inspectorId,
-    required this.inspectorName,
-    required this.inspectorEmail,
-    required this.createdAt,
-    required this.updatedAt,
-  });
-
-  factory LinkedVistoriaInfo.fromFirestore(
-    DocumentSnapshot<Map<String, dynamic>> doc,
-  ) {
-    final data = doc.data() ?? <String, dynamic>{};
-
-    final images = data['images'] is List ? data['images'] as List : const [];
-    final audios = data['audios'] is List ? data['audios'] as List : const [];
-    final chatmessages =
-        data['chatmessages'] is List ? data['chatmessages'] as List : const [];
-
-    final lastAudioNumber = data['lastAudioNumber'] is int
-        ? data['lastAudioNumber'] as int
-        : int.tryParse('${data['lastAudioNumber']}') ?? 0;
-
-    final extractedAudioPreviewList = _extractAudioPreviews(audios);
-    final audioPreviewList = extractedAudioPreviewList.isNotEmpty
-        ? extractedAudioPreviewList
-        : List<AudioPreviewInfo>.generate(
-            lastAudioNumber > 6 ? 6 : lastAudioNumber,
-            (index) => AudioPreviewInfo(label: 'Áudio ${index + 1}'),
-          );
-    final resolvedAudioCount = audios.length > lastAudioNumber
-        ? audios.length
-        : lastAudioNumber;
-
-    final laudo = _stringValue(data['laudo']);
-    final pdfLaudoUrl = _stringValue(data['pdfLaudoUrl']);
-
-    return LinkedVistoriaInfo(
-      docId: doc.id,
-      idvistoria: _stringValue(data['idvistoria'], fallback: doc.id),
-      sinistroId: _stringValue(data['sinistroId']),
-      status: _stringValue(data['status'], fallback: 'em_andamento'),
-      chatCount: chatmessages.length,
-      imageCount: images.length,
-      audioCount: resolvedAudioCount,
-      hasLaudo: laudo.isNotEmpty || pdfLaudoUrl.isNotEmpty,
-      imageBase64Previews: _extractImageBase64Previews(images),
-      audioPreviews: audioPreviewList,
-      chatPreviews: _extractChatPreviews(chatmessages),
-      laudo: laudo,
-      observacoes: _stringValue(data['observacoes']),
-      placa: _stringValue(data['placa']),
-      veiculo: _stringValue(data['veiculo']),
-      cliente: _stringValue(data['cliente']),
-      credenciado: _stringValue(data['credenciado']),
-      tipoVistoria: _stringValue(data['tipoVistoria'], fallback: 'ORIGINAL'),
-      inspectorId: _stringValue(data['inspectorId']),
-      inspectorName: _stringValue(
-        data['inspectorName'],
-        fallback: _stringValue(
-          data['inspectorNome'],
-          fallback: _stringValue(data['inspectorEmail']),
-        ),
-      ),
-      inspectorEmail: _stringValue(data['inspectorEmail']),
-      createdAt: _parseDateTime(data['createdAt']),
-      updatedAt: _parseDateTime(data['updatedAt']),
-    );
-  }
-
-  bool get isRetificacao {
-    final normalized = _normalizeStatus(tipoVistoria);
-
-    return normalized.contains('retificacao') ||
-        normalized.contains('retificação') ||
-        normalized.contains('revisao') ||
-        normalized.contains('revisão') ||
-        normalized.contains('retificacao');
-  }
-
-  String get tipoLabel => isRetificacao ? 'Retificação' : 'Original';
-
-  String get responsibleLabel {
-    final name = inspectorName.trim();
-    final email = inspectorEmail.trim();
-
-    if (name.isNotEmpty) return name;
-    if (email.isNotEmpty) return email;
-    return 'Mecânico não informado';
-  }
-
-  String get statusLabel {
-    final normalized = _normalizeStatus(status);
-
-    if (normalized.contains('abandonada') ||
-        normalized.contains('abandonado')) return 'Abandonada';
-    if (normalized.contains('expirada') ||
-        normalized.contains('expirado')) return 'Expirada';
-    if (normalized.contains('cancelada') ||
-        normalized.contains('cancelado')) return 'Cancelada';
-    if (normalized.contains('rejeitada') ||
-        normalized.contains('rejeitado')) return 'Rejeitada';
-    if (normalized.contains('encerrada') ||
-        normalized.contains('encerrado')) return 'Encerrada';
-    if (normalized.contains('analise') ||
-        normalized.contains('análise') ||
-        normalized.contains('finalizada') ||
-        normalized.contains('finalizado') ||
-        normalized.contains('finalized')) return 'Em analise';
-
-    return 'Em andamento';
-  }
-
-  Color get statusColor {
-    final normalized = _normalizeStatus(status);
-
-    if (normalized.contains('abandonada') ||
-        normalized.contains('abandonado')) return Colors.grey;
-    if (normalized.contains('expirada') ||
-        normalized.contains('expirado')) return Colors.deepOrange;
-    if (normalized.contains('cancelada') ||
-        normalized.contains('cancelado')) return Colors.redAccent;
-    if (normalized.contains('rejeitada') ||
-        normalized.contains('rejeitado')) return Colors.redAccent;
-    if (normalized.contains('encerrada') ||
-        normalized.contains('encerrado')) return Colors.green;
-    if (normalized.contains('analise') ||
-        normalized.contains('análise') ||
-        normalized.contains('finalizada') ||
-        normalized.contains('finalizado') ||
-        normalized.contains('finalized')) return Colors.purple;
-
-    return const Color(0xFF0057C0);
-  }
-
-  IconData get statusIcon {
-    final normalized = _normalizeStatus(status);
-
-    if (normalized.contains('abandonada') ||
-        normalized.contains('abandonado')) return Icons.block_outlined;
-    if (normalized.contains('expirada') ||
-        normalized.contains('expirado')) return Icons.timer_off_outlined;
-    if (normalized.contains('cancelada') ||
-        normalized.contains('cancelado')) return Icons.cancel_outlined;
-    if (normalized.contains('rejeitada') ||
-        normalized.contains('rejeitado')) return Icons.rate_review_outlined;
-    if (normalized.contains('encerrada') ||
-        normalized.contains('encerrado')) return Icons.task_alt_outlined;
-    if (normalized.contains('analise') ||
-        normalized.contains('análise') ||
-        normalized.contains('finalizada') ||
-        normalized.contains('finalizado') ||
-        normalized.contains('finalized')) {
-      return Icons.manage_search_outlined;
-    }
-
-    return Icons.pending_actions_outlined;
-  }
-}
-
-class AudioPreviewInfo {
-  final String label;
-  final String storagePath;
-  final String downloadUrl;
-
-  const AudioPreviewInfo({
-    required this.label,
-    this.storagePath = '',
-    this.downloadUrl = '',
-  });
-
-  bool get canPlay => storagePath.trim().isNotEmpty || downloadUrl.trim().isNotEmpty;
-}
-
-enum ChatPreviewKind { text, image, audio }
-
-class ChatPreviewInfo {
-  final String role;
-  final String text;
-  final ChatPreviewKind kind;
-
-  const ChatPreviewInfo({
-    required this.role,
-    required this.text,
-    this.kind = ChatPreviewKind.text,
-  });
-}
-
-List<String> _extractImageBase64Previews(List<dynamic> images) {
-  final previews = <String>[];
-
-  for (final item in images) {
-    if (item is String && item.trim().isNotEmpty) {
-      previews.add(item.trim());
-      continue;
-    }
-
-    if (item is Map) {
-      final directImage = _stringValue(
-        item['url'],
-        fallback: _stringValue(
-          item['downloadUrl'],
-          fallback: _stringValue(
-            item['imageUrl'],
-            fallback: _stringValue(item['imagePath']),
-          ),
-        ),
-      );
-
-      if (directImage.isNotEmpty) {
-        previews.add(directImage);
-        continue;
-      }
-
-      for (final entry in item.entries) {
-        final key = entry.key.toString();
-        final value = entry.value;
-
-        if (key.startsWith('vistoria_') &&
-            value is String &&
-            value.trim().isNotEmpty) {
-          previews.add(value.trim());
-          break;
-        }
-      }
-    }
-  }
-
-  return previews;
-}
-
 bool _isRemoteImageValue(String value) {
   final normalized = value.trim().toLowerCase();
 
   return normalized.startsWith('http://') ||
       normalized.startsWith('https://');
-}
-
-List<AudioPreviewInfo> _extractAudioPreviews(List<dynamic> audios) {
-  final previews = <AudioPreviewInfo>[];
-
-  for (var index = 0; index < audios.length; index++) {
-    final item = audios[index];
-    String label = 'Áudio ${index + 1}';
-    String storagePath = '';
-    String downloadUrl = '';
-
-    if (item is Map) {
-      final audioId = _stringValue(item['audioId']);
-      final fileName = _stringValue(item['fileName']);
-      storagePath = _stringValue(item['storagePath']);
-      downloadUrl = _stringValue(
-        item['mp3DownloadUrl'],
-        fallback: _stringValue(
-          item['downloadUrl'],
-          fallback: _stringValue(
-            item['audioUrl'],
-            fallback: _stringValue(item['url']),
-          ),
-        ),
-      );
-      final sizeBytes = item['sizeBytes'];
-
-      if (audioId.isNotEmpty) {
-        label = audioId;
-      } else if (fileName.isNotEmpty) {
-        label = fileName;
-      } else if (storagePath.isNotEmpty) {
-        label = storagePath.split('/').last.replaceAll('.mp3', '');
-      } else if (sizeBytes is num && sizeBytes > 0) {
-        label = 'Áudio ${index + 1} • ${_formatFileSize(sizeBytes.toInt())}';
-      }
-    }
-
-    previews.add(
-      AudioPreviewInfo(
-        label: label,
-        storagePath: storagePath,
-        downloadUrl: downloadUrl,
-      ),
-    );
-  }
-
-  return previews;
-}
-
-List<ChatPreviewInfo> _extractChatPreviews(List<dynamic> messages) {
-  final previews = <ChatPreviewInfo>[];
-  final source = messages.length > 1 ? messages.skip(1) : messages;
-
-  for (final item in source) {
-    if (item is String && item.trim().isNotEmpty) {
-      previews.add(
-        ChatPreviewInfo(
-          role: 'user',
-          text: item.trim(),
-        ),
-      );
-      continue;
-    }
-
-    if (item is Map) {
-      final role = _stringValue(
-        item['role'],
-        fallback: _stringValue(item['sender'], fallback: 'user'),
-      );
-
-      final rawType = _stringValue(item['type']).toLowerCase();
-      final hasAudio = rawType.contains('audio') ||
-          _stringValue(item['audioPath']).isNotEmpty ||
-          _stringValue(item['audioId']).isNotEmpty ||
-          _stringValue(item['mp3DownloadUrl']).isNotEmpty ||
-          _stringValue(item['storagePath']).toLowerCase().contains('/audio/');
-      final hasImage = rawType.contains('image') ||
-          rawType.contains('foto') ||
-          _stringValue(item['imagePath']).isNotEmpty ||
-          _stringValue(item['imageUrl']).isNotEmpty;
-
-      if (hasAudio) {
-        previews.add(
-          ChatPreviewInfo(
-            role: role,
-            text: 'Áudio enviado',
-            kind: ChatPreviewKind.audio,
-          ),
-        );
-        continue;
-      }
-
-      if (hasImage) {
-        previews.add(
-          ChatPreviewInfo(
-            role: role,
-            text: 'Foto enviada',
-            kind: ChatPreviewKind.image,
-          ),
-        );
-        continue;
-      }
-
-      final text = _stringValue(
-        item['text'],
-        fallback: _stringValue(
-          item['message'],
-          fallback: _stringValue(item['originalText']),
-        ),
-      );
-
-      if (text.trim().isEmpty) continue;
-
-      previews.add(
-        ChatPreviewInfo(
-          role: role,
-          text: text.trim(),
-        ),
-      );
-    }
-  }
-
-  return previews;
-}
-
-String _formatFileSize(int bytes) {
-  if (bytes < 1024) return '$bytes B';
-
-  final kb = bytes / 1024;
-  if (kb < 1024) return '${kb.toStringAsFixed(1)} KB';
-
-  final mb = kb / 1024;
-  return '${mb.toStringAsFixed(1)} MB';
-}
-
-
-
-List<SinistroViewer> _parseSinistroViewers(dynamic value) {
-  if (value is! List) return const [];
-
-  return value
-      .whereType<Map>()
-      .map((item) => item.map((key, value) => MapEntry(key.toString(), value)))
-      .map((item) => SinistroViewer.fromMap(item['uid']?.toString() ?? '', item))
-      .toList();
 }
 
 class _CredenciadoContext {
@@ -5679,263 +4945,6 @@ class _InspectionAccessException implements Exception {
     required this.title,
     required this.message,
   });
-}
-
-enum InspectionStatus {
-  pending,
-  inProgress,
-  submitted,
-  approved,
-  rejected,
-  finalized,
-  cancelled,
-}
-
-extension InspectionStatusX on InspectionStatus {
-  static InspectionStatus fromFirestore(dynamic value) {
-    final normalized = _normalizeStatus(value);
-
-    if (normalized.contains('andamento') ||
-        normalized.contains('checkin') ||
-        normalized.contains('check_in') ||
-        normalized.contains('check in') ||
-        normalized.contains('in progress') ||
-        normalized.contains('in_progress')) {
-      return InspectionStatus.inProgress;
-    }
-
-    if (normalized.contains('enviada') ||
-        normalized.contains('evidencia') ||
-        normalized.contains('submitted') ||
-        normalized.contains('analise') ||
-        normalized.contains('aguardando_ia') ||
-        normalized.contains('processando_ia') ||
-        normalized.contains('aguardando ia') ||
-        normalized.contains('processando ia') ||
-        normalized.contains('review')) {
-      return InspectionStatus.submitted;
-    }
-
-    if (normalized.contains('aprovada') ||
-        normalized.contains('aprovado') ||
-        normalized.contains('approved')) {
-      return InspectionStatus.approved;
-    }
-
-    if (normalized.contains('finalizada') ||
-        normalized.contains('finalizado') ||
-        normalized.contains('finalized')) {
-      return InspectionStatus.finalized;
-    }
-
-    if (normalized.contains('rejeitada') ||
-        normalized.contains('rejeitado') ||
-        normalized.contains('negada') ||
-        normalized.contains('negado') ||
-        normalized.contains('reprovada') ||
-        normalized.contains('reprovado') ||
-        normalized.contains('rejected')) {
-      return InspectionStatus.rejected;
-    }
-
-    if (normalized.contains('cancelada') ||
-        normalized.contains('cancelado') ||
-        normalized.contains('cancelled')) {
-      return InspectionStatus.cancelled;
-    }
-
-    return InspectionStatus.pending;
-  }
-
-  String get label {
-    switch (this) {
-      case InspectionStatus.pending:
-        return 'Pendente';
-      case InspectionStatus.inProgress:
-        return 'Em andamento';
-      case InspectionStatus.submitted:
-        return 'Em analise';
-      case InspectionStatus.approved:
-        return 'Aprovada';
-      case InspectionStatus.rejected:
-        return 'Rejeitada';
-      case InspectionStatus.finalized:
-        return 'Finalizada';
-      case InspectionStatus.cancelled:
-        return 'Cancelada';
-    }
-  }
-
-  Color get color {
-    switch (this) {
-      case InspectionStatus.pending:
-        return Colors.orange;
-      case InspectionStatus.inProgress:
-        return const Color(0xFF0057C0);
-      case InspectionStatus.submitted:
-        return Colors.purple;
-      case InspectionStatus.approved:
-        return Colors.green;
-      case InspectionStatus.rejected:
-        return Colors.redAccent;
-      case InspectionStatus.finalized:
-        return Colors.green;
-      case InspectionStatus.cancelled:
-        return Colors.grey;
-    }
-  }
-}
-
-enum InspectionPriority { low, medium, high }
-
-extension InspectionPriorityX on InspectionPriority {
-  static InspectionPriority fromFirestore(dynamic value) {
-    final normalized = _normalizeStatus(value);
-
-    if (normalized.contains('alta') || normalized.contains('high')) {
-      return InspectionPriority.high;
-    }
-
-    if (normalized.contains('media') ||
-        normalized.contains('média') ||
-        normalized.contains('medium')) {
-      return InspectionPriority.medium;
-    }
-
-    return InspectionPriority.low;
-  }
-
-  String get label {
-    switch (this) {
-      case InspectionPriority.low:
-        return 'Baixa';
-      case InspectionPriority.medium:
-        return 'Média';
-      case InspectionPriority.high:
-        return 'Alta';
-    }
-  }
-
-  Color get color {
-    switch (this) {
-      case InspectionPriority.low:
-        return Colors.green;
-      case InspectionPriority.medium:
-        return Colors.orange;
-      case InspectionPriority.high:
-        return Colors.redAccent;
-    }
-  }
-}
-
-Map<String, dynamic> _asStringMap(dynamic value) {
-  if (value is Map<String, dynamic>) {
-    return value;
-  }
-
-  if (value is Map) {
-    return value.map((key, item) => MapEntry(key.toString(), item));
-  }
-
-  return <String, dynamic>{};
-}
-
-String _stringValue(dynamic value, {String fallback = ''}) {
-  if (value == null) return fallback;
-
-  final text = value.toString().trim();
-
-  if (text.isEmpty) return fallback;
-
-  return text;
-}
-
-DateTime? _parseDateTime(dynamic value) {
-  if (value == null) return null;
-
-  if (value is Timestamp) {
-    return value.toDate();
-  }
-
-  if (value is DateTime) {
-    return value;
-  }
-
-  final text = value.toString().trim();
-
-  if (text.isEmpty || text.toLowerCase() == 'null') {
-    return null;
-  }
-
-  return DateTime.tryParse(text);
-}
-
-String _buildVehicleModel(String brand, String model) {
-  final cleanBrand = brand.trim();
-  final cleanModel = model.trim();
-
-  if (cleanBrand.isEmpty) {
-    return cleanModel.isEmpty ? 'Veículo não informado' : cleanModel;
-  }
-
-  if (cleanModel.isEmpty) {
-    return cleanBrand;
-  }
-
-  if (cleanModel.toLowerCase().contains(cleanBrand.toLowerCase())) {
-    return cleanModel;
-  }
-
-  return '$cleanBrand $cleanModel';
-}
-
-String _formatWorkshopAddress(Map<String, dynamic> snapshot) {
-  final address = _stringValue(snapshot['address']);
-  final city = _stringValue(snapshot['city']);
-  final uf = _stringValue(snapshot['uf']);
-
-  if (address.isEmpty && city.isEmpty && uf.isEmpty) {
-    return '';
-  }
-
-  final cityUf = [city, uf].where((item) => item.trim().isNotEmpty).join('/');
-
-  if (address.isEmpty) return cityUf;
-  if (cityUf.isEmpty) return address;
-
-  return '$address - $cityUf';
-}
-
-String _normalizeStatus(dynamic value) {
-  return _stringValue(value)
-      .toLowerCase()
-      .replaceAll('_', ' ')
-      .replaceAll('-', ' ')
-      .replaceAll('ã', 'a')
-      .replaceAll('á', 'a')
-      .replaceAll('à', 'a')
-      .replaceAll('â', 'a')
-      .replaceAll('é', 'e')
-      .replaceAll('ê', 'e')
-      .replaceAll('í', 'i')
-      .replaceAll('ó', 'o')
-      .replaceAll('ô', 'o')
-      .replaceAll('õ', 'o')
-      .replaceAll('ú', 'u')
-      .replaceAll('ç', 'c')
-      .replaceAll('ã', 'a')
-      .replaceAll('á', 'a')
-      .replaceAll('à', 'a')
-      .replaceAll('â', 'a')
-      .replaceAll('é', 'e')
-      .replaceAll('ê', 'e')
-      .replaceAll('í', 'i')
-      .replaceAll('ó', 'o')
-      .replaceAll('ô', 'o')
-      .replaceAll('õ', 'o')
-      .replaceAll('ú', 'u')
-      .replaceAll('ç', 'c')
-      .trim();
 }
 
 String _formatDateTime(DateTime dateTime) {

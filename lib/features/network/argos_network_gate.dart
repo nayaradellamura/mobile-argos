@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-enum _NetworkState { checking, online, offline }
+enum _NetworkState { online, offline }
 
 class ArgosNetworkGate extends StatefulWidget {
   final Widget child;
@@ -105,66 +105,6 @@ class _ArgosNetworkGateState extends State<ArgosNetworkGate> {
     }
 
     return widget.child;
-  }
-}
-
-// ignore: unused_element
-class _ArgosCheckingScreen extends StatelessWidget {
-  const _ArgosCheckingScreen();
-
-  @override
-  Widget build(BuildContext context) {
-    final media = MediaQuery.of(context);
-
-    return MediaQuery(
-      data: media.copyWith(textScaler: const TextScaler.linear(1.0)),
-      child: Material(
-        color: const Color(0xFFF3FBFF),
-        child: Center(
-          child: Container(
-            width: 240,
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(.95),
-              borderRadius: BorderRadius.circular(28),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(.05),
-                  blurRadius: 24,
-                  offset: const Offset(0, 12),
-                ),
-              ],
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const _CheckingLogo(),
-                const SizedBox(height: 18),
-                Text(
-                  'Chamando o Argos...',
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.spaceGrotesk(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: const Color(0xFF0057C0),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Verificando se a internet está disponível.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Color(0xFF414755),
-                    fontWeight: FontWeight.w600,
-                    height: 1.3,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
   }
 }
 
@@ -369,35 +309,6 @@ class _ArgosOfflineScreen extends StatelessWidget {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _CheckingLogo extends StatelessWidget {
-  const _CheckingLogo();
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 46,
-      height: 46,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          const CircularProgressIndicator(
-            strokeWidth: 3,
-            color: Color(0xFF0057C0),
-          ),
-          SvgPicture.asset(
-            'assets/images/display_argos.svg',
-            width: 24,
-            colorFilter: const ColorFilter.mode(
-              Color(0xFF0057C0),
-              BlendMode.srcIn,
-            ),
-          ),
-        ],
       ),
     );
   }
