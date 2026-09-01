@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -11,6 +12,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import '../../services/argos_push_notification_service.dart';
+import '../../services/session_context_service.dart';
 
 class ProfilePage extends StatefulWidget {
   final User user;
@@ -668,6 +670,11 @@ class _ProfilePageState extends State<ProfilePage> {
 
       await _cacheProfilePhoto(uploadedPhotoURL);
 
+      // O cadastro pode ter mudado nome/credenciadoId — força o
+      // SessionContextService a buscar de novo em vez de continuar
+      // servindo o contexto antigo do cache para as outras telas.
+      unawaited(SessionContextService.instance.resolve(forceRefresh: true));
+
       if (!mounted) return;
 
       setState(() {
@@ -715,6 +722,12 @@ class _ProfilePageState extends State<ProfilePage> {
       await FirebaseAuth.instance.signOut();
     } catch (_) {
       await FirebaseAuth.instance.signOut();
+    } finally {
+      // SessionContextService já invalida sozinho quando o uid autenticado
+      // muda, mas limpar explicitamente no logout evita segurar o
+      // contexto do usuário anterior em memória por mais tempo que
+      // necessário.
+      SessionContextService.instance.clear();
     }
   }
 

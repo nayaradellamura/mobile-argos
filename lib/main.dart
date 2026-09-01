@@ -304,14 +304,21 @@ class _StartupGateState extends State<StartupGate> {
     try {
       final db = FirebaseFirestore.instance;
 
-      final byEmail = await db.collection('users').doc(email).get();
+      // Tenta o cache local do Firestore primeiro: em aberturas mornas do
+      // app (usuário já logou antes neste aparelho), isso resolve quase
+      // instantaneamente, sem esperar a rede, encurtando a splash.
+      final byEmail = await _getUserDocCacheFirst(
+        db.collection('users').doc(email),
+      );
 
       if (byEmail.exists) {
         final data = byEmail.data() ?? {};
         return data['cadastroCompleto'] != true;
       }
 
-      final byUid = await db.collection('users').doc(user.uid).get();
+      final byUid = await _getUserDocCacheFirst(
+        db.collection('users').doc(user.uid),
+      );
 
       if (byUid.exists) {
         final data = byUid.data() ?? {};
@@ -334,6 +341,22 @@ class _StartupGateState extends State<StartupGate> {
       debugPrint('Startup profile completion check error: $error');
       return true;
     }
+  }
+
+  /// Lê um documento tentando primeiro o cache local do Firestore, caindo
+  /// para o servidor apenas se não houver nada em cache ainda.
+  Future<DocumentSnapshot<Map<String, dynamic>>> _getUserDocCacheFirst(
+    DocumentReference<Map<String, dynamic>> ref,
+  ) async {
+    try {
+      final cached = await ref.get(const GetOptions(source: Source.cache));
+
+      if (cached.exists) return cached;
+    } catch (_) {
+      // Sem cache local ainda — segue para a leitura normal (servidor).
+    }
+
+    return ref.get();
   }
 
   void _finishSplash() {

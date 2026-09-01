@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
@@ -79,17 +81,65 @@ class MechanicPerformanceRepository {
   /// Monta o ranking de desempenho de todos os mecânicos que já tiveram
   /// pelo menos um chamado atribuído nesta oficina, com as métricas
   /// recalculadas apenas para o [period] selecionado.
+  ///
+  /// Tenta primeiro o cache local do Firestore para pintar a tela sem
+  /// esperar rede; se achar algo em cache, devolve na hora e, em paralelo,
+  /// busca do servidor — chamando [onBackgroundRefresh] com o resultado
+  /// atualizado se ele vier diferente. Sem cache local ainda (ex.: nunca
+  /// abriu essa tela neste aparelho), busca do servidor normalmente.
   Future<List<MechanicPerformance>> loadRanking({
     required String credenciadoId,
     required MetricsPeriod period,
     DateTime? customStart,
     DateTime? customEnd,
+    void Function(List<MechanicPerformance> refreshed)? onBackgroundRefresh,
   }) async {
-    final snapshot = await FirebaseFirestore.instance
+    final query = FirebaseFirestore.instance
         .collection('sinistro')
-        .where('credenciadoId', isEqualTo: credenciadoId)
-        .get();
+        .where('credenciadoId', isEqualTo: credenciadoId);
 
+    QuerySnapshot<Map<String, dynamic>>? cachedSnapshot;
+
+    try {
+      final cached = await query.get(const GetOptions(source: Source.cache));
+
+      if (cached.docs.isNotEmpty) {
+        cachedSnapshot = cached;
+      }
+    } catch (_) {
+      // Sem cache local ainda — segue para a leitura normal (servidor).
+    }
+
+    if (cachedSnapshot != null) {
+      if (onBackgroundRefresh != null) {
+        unawaited(
+          query
+              .get()
+              .then((serverSnapshot) {
+                onBackgroundRefresh(
+                  _buildRanking(serverSnapshot, period, customStart, customEnd),
+                );
+              })
+              .catchError((Object _) {
+                // Falha silenciosa: a tela já está mostrando o dado do cache.
+              }),
+        );
+      }
+
+      return _buildRanking(cachedSnapshot, period, customStart, customEnd);
+    }
+
+    final snapshot = await query.get();
+
+    return _buildRanking(snapshot, period, customStart, customEnd);
+  }
+
+  List<MechanicPerformance> _buildRanking(
+    QuerySnapshot<Map<String, dynamic>> snapshot,
+    MetricsPeriod period,
+    DateTime? customStart,
+    DateTime? customEnd,
+  ) {
     final allInspections = snapshot.docs
         .map(InspectionCase.fromFirestore)
         .toList();

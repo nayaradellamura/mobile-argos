@@ -1,6 +1,7 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shimmer/shimmer.dart';
 
 import 'data/mechanic_performance.dart';
 
@@ -18,6 +19,11 @@ class _MetricsPageState extends State<MetricsPage> {
   DateTimeRange? _customRange;
   late Future<List<MechanicPerformance>> _rankingFuture;
 
+  // Incrementado a cada novo carregamento, para que uma atualização em
+  // segundo plano de um pedido antigo (ex.: período trocado antes dela
+  // voltar) seja ignorada em vez de sobrescrever a tela com dado errado.
+  int _loadToken = 0;
+
   @override
   void initState() {
     super.initState();
@@ -25,11 +31,20 @@ class _MetricsPageState extends State<MetricsPage> {
   }
 
   Future<List<MechanicPerformance>> _load() {
+    final token = ++_loadToken;
+
     return MechanicPerformanceRepository.instance.loadRanking(
       credenciadoId: widget.credenciadoId,
       period: _period,
       customStart: _customRange?.start,
       customEnd: _customRange?.end,
+      onBackgroundRefresh: (refreshed) {
+        if (!mounted || token != _loadToken) return;
+
+        setState(() {
+          _rankingFuture = Future.value(refreshed);
+        });
+      },
     );
   }
 
@@ -115,11 +130,7 @@ class _MetricsPageState extends State<MetricsPage> {
                 future: _rankingFuture,
                 builder: (context, snapshot) {
                   if (snapshot.connectionState == ConnectionState.waiting) {
-                    return const Center(
-                      child: CircularProgressIndicator(
-                        color: Color(0xFF0057C0),
-                      ),
-                    );
+                    return const _MetricsSkeleton();
                   }
 
                   if (snapshot.hasError) {
@@ -187,6 +198,168 @@ class _MetricsPageState extends State<MetricsPage> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _MetricsSkeleton extends StatelessWidget {
+  const _MetricsSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return Shimmer.fromColors(
+      baseColor: const Color(0xFFE5EEF5),
+      highlightColor: Colors.white,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+        children: const [
+          _MetricsOverviewSkeleton(),
+          SizedBox(height: 16),
+          _MetricsRankingCardSkeleton(),
+          SizedBox(height: 12),
+          _MetricsRankingCardSkeleton(),
+          SizedBox(height: 12),
+          _MetricsRankingCardSkeleton(),
+        ],
+      ),
+    );
+  }
+}
+
+class _MetricsOverviewSkeleton extends StatelessWidget {
+  const _MetricsOverviewSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: Colors.black.withOpacity(.04)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _SkeletonBox(width: 170, height: 16),
+          const SizedBox(height: 14),
+          const Row(
+            children: [
+              Expanded(child: _SkeletonBox(width: double.infinity, height: 56)),
+              SizedBox(width: 10),
+              Expanded(child: _SkeletonBox(width: double.infinity, height: 56)),
+              SizedBox(width: 10),
+              Expanded(child: _SkeletonBox(width: double.infinity, height: 56)),
+            ],
+          ),
+          const SizedBox(height: 20),
+          for (var i = 0; i < 6; i++) ...[
+            Row(
+              children: [
+                const _SkeletonBox(
+                  width: 92,
+                  height: 12,
+                  borderRadius: BorderRadius.all(Radius.circular(4)),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _SkeletonBox(
+                    width: double.infinity,
+                    height: 18,
+                    borderRadius: const BorderRadius.all(Radius.circular(999)),
+                  ),
+                ),
+              ],
+            ),
+            if (i != 5) const SizedBox(height: 10),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _MetricsRankingCardSkeleton extends StatelessWidget {
+  const _MetricsRankingCardSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: Colors.black.withOpacity(.04)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const _SkeletonBox(width: 30, height: 30),
+              const SizedBox(width: 10),
+              const _SkeletonBox(width: 48, height: 48),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const _SkeletonBox(width: 140, height: 15),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        const _SkeletonBox(width: 88, height: 20),
+                        const SizedBox(width: 8),
+                        const _SkeletonBox(width: 88, height: 20),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: const [
+                  _SkeletonBox(width: 40, height: 18),
+                  SizedBox(height: 6),
+                  _SkeletonBox(width: 48, height: 10),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _SkeletonBox(
+            width: double.infinity,
+            height: 8,
+            borderRadius: BorderRadius.circular(999),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SkeletonBox extends StatelessWidget {
+  final double width;
+  final double height;
+  final BorderRadius? borderRadius;
+
+  const _SkeletonBox({
+    required this.width,
+    required this.height,
+    this.borderRadius,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: width == double.infinity ? null : width,
+      height: height,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: borderRadius ?? BorderRadius.circular(999),
       ),
     );
   }

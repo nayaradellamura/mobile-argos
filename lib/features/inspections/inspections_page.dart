@@ -9,6 +9,7 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shimmer/shimmer.dart';
+import '../../services/session_context_service.dart';
 import '../../services/sinistro_presence_service.dart';
 import '../metrics/metrics_page.dart';
 import 'data/inspection_case.dart';
@@ -44,6 +45,10 @@ class _InspectionsPageState extends State<InspectionsPage> {
   bool _onlyMine = false;
   final ScrollController _filterScrollController = ScrollController();
 
+  bool _isSearching = false;
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = '';
+
   Stream<List<InspectionCase>>? _cachedInspectionStream;
   String? _cachedInspectionCredenciadoId;
   final Set<String> _precachedAvatarUrls = <String>{};
@@ -60,6 +65,49 @@ class _InspectionsPageState extends State<InspectionsPage> {
         oldWidget.notificationSinistroIdToOpen) {
       _lastOpenedNotificationSinistroId = null;
     }
+  }
+
+  void _toggleSearch() {
+    setState(() {
+      _isSearching = !_isSearching;
+
+      if (!_isSearching) {
+        _searchController.clear();
+        _searchQuery = '';
+      }
+    });
+  }
+
+  void _closeSearch() {
+    setState(() {
+      _isSearching = false;
+      _searchController.clear();
+      _searchQuery = '';
+    });
+  }
+
+  void _onSearchChanged(String value) {
+    setState(() {
+      _searchQuery = value;
+    });
+  }
+
+  String _normalizeSearchText(String value) {
+    return value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+  }
+
+  bool _matchesSearch(InspectionCase inspection) {
+    final query = _normalizeSearchText(_searchQuery);
+
+    if (query.isEmpty) return true;
+
+    final plate = _normalizeSearchText(inspection.vehicle.plate);
+    final model = _normalizeSearchText(inspection.vehicle.model);
+    final protocol = _normalizeSearchText(inspection.protocol);
+
+    return plate.contains(query) ||
+        model.contains(query) ||
+        protocol.contains(query);
   }
 
   Set<String> _collectPeoplePhotoUrls(List<InspectionCase> inspections) {
@@ -142,6 +190,7 @@ class _InspectionsPageState extends State<InspectionsPage> {
   @override
   void dispose() {
     _filterScrollController.dispose();
+    _searchController.dispose();
     super.dispose();
   }
   Stream<List<InspectionCase>> _getInspectionStream(String credenciadoId) {
@@ -201,74 +250,31 @@ void _scrollFilterCarouselTo(InspectionFilter filter) {
   }
 
   Future<_CredenciadoContext> _loadCredenciadoContext() async {
-    final user = FirebaseAuth.instance.currentUser;
-
-    if (user == null) {
+    if (FirebaseAuth.instance.currentUser == null) {
       throw const _InspectionAccessException(
         title: 'Usuário não autenticado',
         message: 'Faça login novamente para carregar as vistorias.',
       );
     }
 
-    final uid = user.uid;
-    final email = user.email?.trim().toLowerCase() ?? '';
+    try {
+      // Resolvido (e cacheado em memória para a sessão) pelo
+      // SessionContextService — evita refazer essas leituras toda vez que
+      // esta tela é reaberta.
+      final session = await SessionContextService.instance.resolve();
 
-    final usersCollection = FirebaseFirestore.instance.collection('users');
-
-    final userByUidSnap = await usersCollection.doc(uid).get();
-    final userByUidData = userByUidSnap.data();
-
-    final credenciadoIdByUid =
-        userByUidData?['credenciadoId']?.toString().trim() ?? '';
-
-    if (credenciadoIdByUid.isNotEmpty) {
       return _CredenciadoContext(
-        uid: uid,
-        credenciadoId: credenciadoIdByUid,
-        credenciadoName:
-            userByUidData?['credenciadoNome']?.toString().trim() ?? '',
+        uid: session.uid,
+        credenciadoId: session.credenciadoId,
+        credenciadoName: session.credenciadoNome,
       );
-    }
-
-    if (email.isNotEmpty) {
-      final userByEmailSnap = await usersCollection.doc(email).get();
-      final userByEmailData = userByEmailSnap.data();
-
-      final credenciadoIdByEmail =
-          userByEmailData?['credenciadoId']?.toString().trim() ?? '';
-
-      if (credenciadoIdByEmail.isNotEmpty) {
-        return _CredenciadoContext(
-          uid: uid,
-          credenciadoId: credenciadoIdByEmail,
-          credenciadoName:
-              userByEmailData?['credenciadoNome']?.toString().trim() ?? '',
-        );
-      }
-    }
-
-    final credenciadoQuery = await FirebaseFirestore.instance
-        .collection('credenciados')
-        .where('funcionariosUids', arrayContains: uid)
-        .limit(1)
-        .get();
-
-    if (credenciadoQuery.docs.isEmpty) {
+    } on NoCredenciadoLinkedException {
       throw const _InspectionAccessException(
         title: 'Nenhuma oficina vinculada',
         message:
             'Seu usuário ainda não está vinculado a uma oficina credenciada.',
       );
     }
-
-    final credenciadoDoc = credenciadoQuery.docs.first;
-    final credenciadoData = credenciadoDoc.data();
-
-    return _CredenciadoContext(
-      uid: uid,
-      credenciadoId: credenciadoDoc.id,
-      credenciadoName: credenciadoData['name']?.toString().trim() ?? '',
-    );
   }
 
 Stream<List<InspectionCase>> _inspectionStream(String credenciadoId) {
@@ -453,11 +459,12 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
 
     final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
 
-    final scopedInspections = _onlyMine
-        ? inspections
-            .where((inspection) => inspection.assignedToUid.trim() == currentUid)
-            .toList()
-        : inspections;
+    final scopedInspections = inspections.where((inspection) {
+      final matchesOwner =
+          !_onlyMine || inspection.assignedToUid.trim() == currentUid;
+
+      return matchesOwner && _matchesSearch(inspection);
+    }).toList();
 
     final counts = {
       for (final filter in InspectionFilter.values)
@@ -477,12 +484,17 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
             filterController: _filterScrollController,
             onFilterChanged: _changeFilter,
             onlyMine: _onlyMine,
-            onToggleOnlyMine: () {
+            onToggleOnlyMine: (value) {
               setState(() {
-                _onlyMine = !_onlyMine;
+                _onlyMine = value;
               });
             },
             onOpenRanking: () => _openTeamRanking(credenciadoId),
+            isSearching: _isSearching,
+            onToggleSearch: _toggleSearch,
+            onCloseSearch: _closeSearch,
+            searchController: _searchController,
+            onSearchChanged: _onSearchChanged,
           ),
           Expanded(
             child: inspections.isEmpty
@@ -493,12 +505,21 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
                         'Não há sinistros atribuídos para esta oficina no momento.',
                   )
                 : scopedInspections.isEmpty
-                    ? const _StateMessage(
-                        icon: Icons.person_search_outlined,
-                        title: 'Nenhuma vistoria sua',
-                        message:
-                            'Você ainda não tem sinistros atribuídos. Desative "Minhas vistorias" para ver todas as da oficina.',
-                      )
+                    ? (_searchQuery.trim().isNotEmpty
+                        ? _StateMessage(
+                            icon: Icons.search_off_rounded,
+                            title: 'Nenhum resultado',
+                            message:
+                                'Nenhuma vistoria encontrada para "${_searchController.text.trim()}".',
+                            actionLabel: 'Limpar busca',
+                            onAction: _closeSearch,
+                          )
+                        : const _StateMessage(
+                            icon: Icons.person_search_outlined,
+                            title: 'Nenhuma vistoria sua',
+                            message:
+                                'Você ainda não tem sinistros atribuídos. Toque em "Oficina" para ver todas as da oficina.',
+                          ))
                     : filteredInspections.isEmpty
                         ? _StateMessage(
                             icon: _selectedFilter.icon,
@@ -2847,8 +2868,13 @@ class _InspectionsHeader extends StatelessWidget {
   final ValueChanged<InspectionFilter>? onFilterChanged;
   final ScrollController? filterController;
   final bool onlyMine;
-  final VoidCallback? onToggleOnlyMine;
+  final ValueChanged<bool>? onToggleOnlyMine;
   final VoidCallback? onOpenRanking;
+  final bool isSearching;
+  final VoidCallback? onToggleSearch;
+  final VoidCallback? onCloseSearch;
+  final TextEditingController? searchController;
+  final ValueChanged<String>? onSearchChanged;
 
   const _InspectionsHeader({
     required this.total,
@@ -2859,6 +2885,11 @@ class _InspectionsHeader extends StatelessWidget {
     this.onlyMine = false,
     this.onToggleOnlyMine,
     this.onOpenRanking,
+    this.isSearching = false,
+    this.onToggleSearch,
+    this.onCloseSearch,
+    this.searchController,
+    this.onSearchChanged,
   });
 
   int _countFor(InspectionFilter filter) {
@@ -2893,6 +2924,34 @@ class _InspectionsHeader extends StatelessWidget {
                   ),
                 ),
               ),
+              if (onToggleSearch != null)
+                Padding(
+                  padding: const EdgeInsets.only(left: 8),
+                  child: Tooltip(
+                    message: isSearching ? 'Fechar busca' : 'Buscar vistorias',
+                    child: Material(
+                      color: isSearching
+                          ? const Color(0xFF0057C0)
+                          : const Color(0xFFE5F6FF),
+                      borderRadius: BorderRadius.circular(12),
+                      child: InkWell(
+                        onTap: onToggleSearch,
+                        borderRadius: BorderRadius.circular(12),
+                        child: SizedBox(
+                          width: 36,
+                          height: 36,
+                          child: Icon(
+                            isSearching ? Icons.close : Icons.search,
+                            color: isSearching
+                                ? Colors.white
+                                : const Color(0xFF0057C0),
+                            size: 19,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               if (onOpenRanking != null)
                 Padding(
                   padding: const EdgeInsets.only(left: 8),
@@ -2919,104 +2978,215 @@ class _InspectionsHeader extends StatelessWidget {
                 ),
             ],
           ),
-          const SizedBox(height: 2),
-          const Text(
-            'Toque em uma categoria para filtrar',
-            style: TextStyle(
-              color: Color(0xFF414755),
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
+          if (!isSearching) ...[
+            const SizedBox(height: 2),
+            const Text(
+              'Toque em uma categoria para filtrar',
+              style: TextStyle(
+                color: Color(0xFF414755),
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+          const SizedBox(height: 10),
+          if (isSearching && searchController != null)
+            // Com o teclado aberto, sobra pouco espaço na tela — esconde o
+            // seletor Oficina/Minhas e o carrossel de categorias enquanto
+            // busca (eles continuam aplicados, só somem da tela) para
+            // deixar o máximo de espaço para os resultados.
+            _SearchField(
+              controller: searchController!,
+              onChanged: onSearchChanged,
+              onClear: onCloseSearch,
+            )
+          else ...[
+            if (onToggleOnlyMine != null) ...[
+              _OwnerScopeToggle(
+                onlyMine: onlyMine,
+                onChanged: onToggleOnlyMine!,
+              ),
+              const SizedBox(height: 12),
+            ],
+            SizedBox(
+              height: 92,
+              child: ListView.separated(
+                controller: filterController,
+                scrollDirection: Axis.horizontal,
+                itemCount: filters.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 10),
+                itemBuilder: (context, index) {
+                  final filter = filters[index];
+
+                  return _InspectionFilterCard(
+                    filter: filter,
+                    count: _countFor(filter),
+                    isSelected: selectedFilter == filter,
+                    onTap: onFilterChanged == null
+                        ? null
+                        : () => onFilterChanged!(filter),
+                  );
+                },
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _SearchField extends StatelessWidget {
+  final TextEditingController controller;
+  final ValueChanged<String>? onChanged;
+  final VoidCallback? onClear;
+
+  const _SearchField({
+    required this.controller,
+    this.onChanged,
+    this.onClear,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: controller,
+      autofocus: true,
+      textInputAction: TextInputAction.search,
+      onChanged: onChanged,
+      style: const TextStyle(
+        fontSize: 14,
+        fontWeight: FontWeight.w700,
+        color: Color(0xFF1F2937),
+      ),
+      decoration: InputDecoration(
+        isDense: true,
+        hintText: 'Placa, modelo ou protocolo',
+        hintStyle: const TextStyle(
+          color: Color(0xFF6B7280),
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        ),
+        prefixIcon: const Icon(
+          Icons.search,
+          color: Color(0xFF0057C0),
+          size: 20,
+        ),
+        suffixIcon: ValueListenableBuilder<TextEditingValue>(
+          valueListenable: controller,
+          builder: (context, value, _) {
+            if (value.text.isEmpty) return const SizedBox.shrink();
+
+            return IconButton(
+              icon: const Icon(
+                Icons.close,
+                size: 18,
+                color: Color(0xFF6B7280),
+              ),
+              onPressed: () {
+                controller.clear();
+                onChanged?.call('');
+              },
+            );
+          },
+        ),
+        filled: true,
+        fillColor: const Color(0xFFE5F6FF),
+        contentPadding: const EdgeInsets.symmetric(vertical: 12),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: BorderSide.none,
+        ),
+      ),
+    );
+  }
+}
+
+class _OwnerScopeToggle extends StatelessWidget {
+  final bool onlyMine;
+  final ValueChanged<bool> onChanged;
+
+  const _OwnerScopeToggle({required this.onlyMine, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE5F6FF),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _ScopeSegment(
+              label: 'Oficina',
+              icon: Icons.groups_outlined,
+              isSelected: !onlyMine,
+              onTap: () => onChanged(false),
             ),
           ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFE5F6FF),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Text(
-                  '$total casos',
-                  style: const TextStyle(
-                    color: Color(0xFF0057C0),
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-              if (onToggleOnlyMine != null) ...[
-                const SizedBox(width: 8),
-                Material(
-                  color: onlyMine
-                      ? const Color(0xFF0057C0)
-                      : const Color(0xFFE5F6FF),
-                  borderRadius: BorderRadius.circular(16),
-                  child: InkWell(
-                    onTap: onToggleOnlyMine,
-                    borderRadius: BorderRadius.circular(16),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 8,
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            onlyMine
-                                ? Icons.person
-                                : Icons.person_outline,
-                            size: 15,
-                            color: onlyMine
-                                ? Colors.white
-                                : const Color(0xFF0057C0),
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            'Minhas vistorias',
-                            style: TextStyle(
-                              color: onlyMine
-                                  ? Colors.white
-                                  : const Color(0xFF0057C0),
-                              fontWeight: FontWeight.w800,
-                              fontSize: 12.5,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
-          const SizedBox(height: 12),
-          SizedBox(
-            height: 92,
-            child: ListView.separated(
-              controller: filterController,
-              scrollDirection: Axis.horizontal,
-              itemCount: filters.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 10),
-              itemBuilder: (context, index) {
-                final filter = filters[index];
-
-                return _InspectionFilterCard(
-                  filter: filter,
-                  count: _countFor(filter),
-                  isSelected: selectedFilter == filter,
-                  onTap: onFilterChanged == null
-                      ? null
-                      : () => onFilterChanged!(filter),
-                );
-              },
+          Expanded(
+            child: _ScopeSegment(
+              label: 'Minhas vistorias',
+              icon: Icons.person,
+              isSelected: onlyMine,
+              onTap: () => onChanged(true),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ScopeSegment extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _ScopeSegment({
+    required this.label,
+    required this.icon,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: isSelected ? const Color(0xFF0057C0) : Colors.transparent,
+      borderRadius: BorderRadius.circular(11),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(11),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 9),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                size: 15,
+                color: isSelected ? Colors.white : const Color(0xFF0057C0),
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: isSelected ? Colors.white : const Color(0xFF0057C0),
+                    fontWeight: FontWeight.w800,
+                    fontSize: 12.5,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -4802,12 +4972,26 @@ class _StateMessage extends StatelessWidget {
 class _InspectionsSkeleton extends StatelessWidget {
   const _InspectionsSkeleton();
 
+  // Callbacks vazios de propósito: nesta fase de carregamento o
+  // credenciadoId ainda não foi resolvido, então os toques não fazem
+  // nada — mas o cabeçalho continua com exatamente a mesma estrutura do
+  // cabeçalho real (busca, ranking, seletor Oficina/Minhas), evitando o
+  // "pulo" visual quando os dados terminam de carregar.
+  static void _noop() {}
+  static void _noopBool(bool _) {}
+
   @override
   Widget build(BuildContext context) {
     return SafeArea(
       child: Column(
         children: [
-          const _InspectionsHeader(total: 0),
+          _InspectionsHeader(
+            total: 0,
+            onlyMine: false,
+            onToggleOnlyMine: _noopBool,
+            onOpenRanking: _noop,
+            onToggleSearch: _noop,
+          ),
           Expanded(
             child: ListView.separated(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),

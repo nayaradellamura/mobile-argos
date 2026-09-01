@@ -4,6 +4,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 
+import 'session_context_service.dart';
+
 class VistoriaChatSessionService {
   VistoriaChatSessionService._();
 
@@ -29,12 +31,6 @@ class VistoriaChatSessionService {
 
   CollectionReference<Map<String, dynamic>> get _sinistros =>
       _db.collection('sinistro');
-
-  CollectionReference<Map<String, dynamic>> get _users =>
-      _db.collection('users');
-
-  CollectionReference<Map<String, dynamic>> get _credenciados =>
-      _db.collection('credenciados');
 
   Stream<VistoriaChatCompletionState> watchCompletionState({
     required String vistoriaDocId,
@@ -799,56 +795,38 @@ class VistoriaChatSessionService {
   Future<_CurrentContext> _currentContext() async {
     final user = _auth.currentUser;
 
-    if (user == null) throw Exception('Usuário não autenticado.');
-
-    final uid = user.uid;
-    final email = (user.email ?? '').trim().toLowerCase();
-
-    Map<String, dynamic> userData = {};
-
-    if (email.isNotEmpty) {
-      final byEmail = await _users.doc(email).get();
-      userData = byEmail.data() ?? {};
+    if (user == null) {
+      throw Exception('Usuário não autenticado.');
     }
 
-    if (userData.isEmpty) {
-      final byUid = await _users.doc(uid).get();
-      userData = byUid.data() ?? {};
+    try {
+      // Resolvido (e cacheado em memória para a sessão) pelo
+      // SessionContextService — evita refazer estas leituras toda vez que
+      // um método deste service precisa do contexto do usuário.
+      final session = await SessionContextService.instance.resolve();
+
+      return _CurrentContext(
+        uid: session.uid,
+        email: session.email,
+        nome: session.nome,
+        credenciadoId: session.credenciadoId,
+        credenciadoNome: session.credenciadoNome,
+      );
+    } on NoCredenciadoLinkedException {
+      // Diferente de InspectionsPage, este service historicamente não trata
+      // "sem credenciado vinculado" como erro — quem chama (ex.:
+      // listCheckedInSinistrosForCurrentUser) já sabe lidar com
+      // credenciadoId vazio. Mantém esse comportamento.
+      final email = (user.email ?? '').trim().toLowerCase();
+
+      return _CurrentContext(
+        uid: user.uid,
+        email: email,
+        nome: email.isEmpty ? user.uid : email,
+        credenciadoId: '',
+        credenciadoNome: '',
+      );
     }
-
-    String credenciadoId = _str(userData['credenciadoId']);
-    String credenciadoNome = _str(userData['credenciadoNome']);
-    String nome = _str(
-      userData['displayName'],
-      fallback: _str(userData['nome'], fallback: email),
-    );
-
-    if (credenciadoId.isEmpty) {
-      final credSnap = await _credenciados
-          .where('funcionariosUids', arrayContains: uid)
-          .limit(1)
-          .get();
-
-      if (credSnap.docs.isNotEmpty) {
-        final doc = credSnap.docs.first;
-        final data = doc.data();
-
-        credenciadoId = doc.id;
-        credenciadoNome = _str(data['name']);
-      }
-    }
-
-    if (nome.isEmpty) {
-      nome = email.isEmpty ? uid : email;
-    }
-
-    return _CurrentContext(
-      uid: uid,
-      email: email,
-      nome: nome,
-      credenciadoId: credenciadoId,
-      credenciadoNome: credenciadoNome,
-    );
   }
 
   Future<String> _createVistoriaId() async {
