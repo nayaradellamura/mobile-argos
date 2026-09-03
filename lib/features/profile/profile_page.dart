@@ -8,10 +8,8 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
-import '../../services/argos_push_notification_service.dart';
 import '../../services/session_context_service.dart';
 
 class ProfilePage extends StatefulWidget {
@@ -715,20 +713,7 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   Future<void> _logout() async {
-    try {
-      await ArgosPushNotificationService.instance
-          .unregisterCurrentDeviceToken();
-      await GoogleSignIn().signOut();
-      await FirebaseAuth.instance.signOut();
-    } catch (_) {
-      await FirebaseAuth.instance.signOut();
-    } finally {
-      // SessionContextService já invalida sozinho quando o uid autenticado
-      // muda, mas limpar explicitamente no logout evita segurar o
-      // contexto do usuário anterior em memória por mais tempo que
-      // necessário.
-      SessionContextService.instance.clear();
-    }
+    await SessionContextService.instance.logout();
   }
 
 

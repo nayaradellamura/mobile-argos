@@ -42,7 +42,7 @@ class InspectionsPage extends StatefulWidget {
 class _InspectionsPageState extends State<InspectionsPage> {
   late Future<_CredenciadoContext> _credenciadoFuture;
   InspectionFilter _selectedFilter = InspectionFilter.all;
-  bool _onlyMine = false;
+  bool _onlyMine = true;
   final ScrollController _filterScrollController = ScrollController();
 
   bool _isSearching = false;
@@ -52,9 +52,6 @@ class _InspectionsPageState extends State<InspectionsPage> {
   Stream<List<InspectionCase>>? _cachedInspectionStream;
   String? _cachedInspectionCredenciadoId;
   final Set<String> _precachedAvatarUrls = <String>{};
-  Future<void>? _initialAvatarPreloadFuture;
-  String _initialAvatarPreloadSignature = '';
-  bool _hasCompletedInitialAvatarPreload = false;
   String? _lastOpenedNotificationSinistroId;
 
   @override
@@ -132,11 +129,6 @@ class _InspectionsPageState extends State<InspectionsPage> {
     return urls;
   }
 
-  String _peoplePhotoSignature(List<InspectionCase> inspections) {
-    final urls = _collectPeoplePhotoUrls(inspections).toList()..sort();
-    return urls.join('|');
-  }
-
   Future<void> _precachePeoplePhotosNow(List<InspectionCase> inspections) async {
     if (!mounted) return;
 
@@ -169,22 +161,6 @@ class _InspectionsPageState extends State<InspectionsPage> {
 
       unawaited(_precachePeoplePhotosNow(inspections));
     });
-  }
-
-  Future<void> _precachePeoplePhotosBeforeFirstRender(
-    List<InspectionCase> inspections,
-  ) {
-    final signature = _peoplePhotoSignature(inspections);
-
-    if (_initialAvatarPreloadFuture != null &&
-        _initialAvatarPreloadSignature == signature) {
-      return _initialAvatarPreloadFuture!;
-    }
-
-    _initialAvatarPreloadSignature = signature;
-    _initialAvatarPreloadFuture = _precachePeoplePhotosNow(inspections);
-
-    return _initialAvatarPreloadFuture!;
   }
 
   @override
@@ -418,29 +394,14 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
     List<InspectionCase> inspections,
     String credenciadoId,
   ) {
-    if (_hasCompletedInitialAvatarPreload) {
-      unawaited(_precachePeoplePhotosAfterFrame(inspections));
-      return _buildBodyForInspections(inspections, credenciadoId);
-    }
+    // Os avatares são pré-carregados em segundo plano (não bloqueiam o
+    // primeiro render): esperar o download de todas as fotos antes de
+    // mostrar os cards deixava a tela de vistorias visivelmente lenta para
+    // abrir. Cada CircleAvatar/Image já lida com seu próprio placeholder
+    // enquanto a foto chega.
+    unawaited(_precachePeoplePhotosAfterFrame(inspections));
 
-    return FutureBuilder<void>(
-      future: _precachePeoplePhotosBeforeFirstRender(inspections),
-      builder: (context, preloadSnapshot) {
-        if (preloadSnapshot.connectionState != ConnectionState.done) {
-          return const _InspectionsSkeleton();
-        }
-
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted || _hasCompletedInitialAvatarPreload) return;
-
-          setState(() {
-            _hasCompletedInitialAvatarPreload = true;
-          });
-        });
-
-        return _buildBodyForInspections(inspections, credenciadoId);
-      },
-    );
+    return _buildBodyForInspections(inspections, credenciadoId);
   }
 
   void _openTeamRanking(String credenciadoId) {
@@ -534,10 +495,13 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
                             itemBuilder: (context, index) {
                               final inspection = filteredInspections[index];
 
-                              return _InspectionCard(
+                              return _StaggeredEntrance(
                                 key: ValueKey(inspection.id),
-                                inspection: inspection,
-                                onTap: () => _openInspectionSummary(inspection),
+                                index: index,
+                                child: _InspectionCard(
+                                  inspection: inspection,
+                                  onTap: () => _openInspectionSummary(inspection),
+                                ),
                               );
                             },
                           ),
@@ -3120,18 +3084,18 @@ class _OwnerScopeToggle extends StatelessWidget {
         children: [
           Expanded(
             child: _ScopeSegment(
-              label: 'Oficina',
-              icon: Icons.groups_outlined,
-              isSelected: !onlyMine,
-              onTap: () => onChanged(false),
-            ),
-          ),
-          Expanded(
-            child: _ScopeSegment(
               label: 'Minhas vistorias',
               icon: Icons.person,
               isSelected: onlyMine,
               onTap: () => onChanged(true),
+            ),
+          ),
+          Expanded(
+            child: _ScopeSegment(
+              label: 'Oficina',
+              icon: Icons.groups_outlined,
+              isSelected: !onlyMine,
+              onTap: () => onChanged(false),
             ),
           ),
         ],
@@ -3288,6 +3252,150 @@ class _InspectionFilterCard extends StatelessWidget {
   }
 }
 
+/// Entrada animada (fade + slide) para cada card da lista, escalonada pelo
+/// índice — dá vida ao primeiro carregamento da tela sem depender de
+/// nenhum dado extra.
+class _StaggeredEntrance extends StatefulWidget {
+  final int index;
+  final Widget child;
+
+  const _StaggeredEntrance({
+    super.key,
+    required this.index,
+    required this.child,
+  });
+
+  @override
+  State<_StaggeredEntrance> createState() => _StaggeredEntranceState();
+}
+
+class _StaggeredEntranceState extends State<_StaggeredEntrance> {
+  bool _visible = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    final delay = Duration(milliseconds: 60 * widget.index.clamp(0, 8));
+
+    Future.delayed(delay, () {
+      if (mounted) setState(() => _visible = true);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSlide(
+      duration: const Duration(milliseconds: 380),
+      curve: Curves.easeOutCubic,
+      offset: _visible ? Offset.zero : const Offset(0, .05),
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 380),
+        curve: Curves.easeOut,
+        opacity: _visible ? 1 : 0,
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+/// Pisca suavemente em loop — usado tanto para sinalizar "alguém está
+/// vendo isso agora" quanto para chamar atenção em urgências críticas.
+class _PulseDot extends StatefulWidget {
+  final Color color;
+  final double size;
+
+  const _PulseDot({required this.color, this.size = 7});
+
+  @override
+  State<_PulseDot> createState() => _PulseDotState();
+}
+
+class _PulseDotState extends State<_PulseDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final haloSize = widget.size * 2.4;
+
+    return SizedBox(
+      width: haloSize,
+      height: haloSize,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, child) {
+          final t = _controller.value;
+
+          return Stack(
+            alignment: Alignment.center,
+            children: [
+              Opacity(
+                opacity: (1 - t).clamp(0, 1) * .55,
+                child: Transform.scale(
+                  scale: .5 + t,
+                  child: Container(
+                    width: haloSize,
+                    height: haloSize,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: widget.color,
+                    ),
+                  ),
+                ),
+              ),
+              Container(
+                width: widget.size,
+                height: widget.size,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: widget.color,
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Cor de urgência do card: verde enquanto tudo está dentro do esperado,
+/// esquentando para laranja e vermelho conforme o tempo passa sem
+/// movimento — só um sinal visual, não aplica nenhuma regra de negócio.
+Color _inspectionUrgencyColor(InspectionCase inspection) {
+  if (inspection.isCompletedCategory || inspection.isCancelledCategory) {
+    return Colors.green;
+  }
+
+  final now = DateTime.now();
+
+  if (inspection.checkInAt != null) {
+    final elapsed = now.difference(inspection.checkInAt!);
+
+    if (elapsed <= const Duration(hours: 8)) return Colors.green;
+    if (elapsed <= const Duration(hours: 16)) return Colors.orange;
+
+    return Colors.redAccent;
+  }
+
+  final elapsed = now.difference(inspection.scheduledDate);
+
+  if (elapsed <= const Duration(hours: 24)) return Colors.orange;
+  if (elapsed <= const Duration(hours: 48)) return Colors.deepOrange;
+
+  return Colors.redAccent;
+}
+
 class _InspectionCard extends StatefulWidget {
   final InspectionCase inspection;
   final VoidCallback onTap;
@@ -3375,6 +3483,8 @@ class _InspectionCardContent extends StatelessWidget {
     final linkedStatusColor = linkedVistoria?.statusColor ?? Colors.teal;
     final linkedStatusIcon =
         linkedVistoria?.statusIcon ?? Icons.assignment_turned_in_outlined;
+    final urgencyColor = _inspectionUrgencyColor(inspection);
+    final isCritical = urgencyColor == Colors.redAccent;
 
     return Material(
       color: Colors.white,
@@ -3547,10 +3657,14 @@ class _InspectionCardContent extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 8),
+                  if (isCritical) ...[
+                    _PulseDot(color: urgencyColor, size: 6),
+                    const SizedBox(width: 5),
+                  ],
                   Icon(
                     hasCheckIn ? Icons.check_circle : Icons.schedule,
                     size: 15,
-                    color: hasCheckIn ? Colors.green : Colors.orange,
+                    color: urgencyColor,
                   ),
                   const SizedBox(width: 5),
                   Text(
@@ -3558,7 +3672,7 @@ class _InspectionCardContent extends StatelessWidget {
                         ? 'Check-in ${_formatTime(inspection.checkInAt!)}'
                         : _formatTime(inspection.scheduledDate),
                     style: TextStyle(
-                      color: hasCheckIn ? Colors.green : Colors.orange,
+                      color: urgencyColor,
                       fontWeight: FontWeight.w800,
                       fontSize: 11,
                     ),
@@ -3799,6 +3913,8 @@ class _ActiveViewersBadge extends StatelessWidget {
       ),
       child: Row(
         children: [
+          const _PulseDot(color: Color(0xFFB26B00), size: 6),
+          const SizedBox(width: 6),
           const Icon(Icons.visibility_outlined, size: 16, color: Color(0xFFB26B00)),
           const SizedBox(width: 7),
           _ViewerAvatarStack(viewers: viewers.take(3).toList(), small: true),
@@ -3847,14 +3963,10 @@ class _ViewerAvatarStack extends StatelessWidget {
               child: CircleAvatar(
                 radius: radius,
                 backgroundColor: Colors.white,
-                child: CircleAvatar(
+                child: _FastPersonAvatar(
+                  photoURL: viewers[i].photoURL,
                   radius: radius - 2,
-                  backgroundImage: viewers[i].photoURL.isNotEmpty
-                      ? NetworkImage(viewers[i].photoURL)
-                      : null,
-                  child: viewers[i].photoURL.isEmpty
-                      ? Icon(Icons.person, size: small ? 12 : 16)
-                      : null,
+                  icon: Icons.person,
                 ),
               ),
             ),
@@ -4906,7 +5018,7 @@ class _StatusChip extends StatelessWidget {
   }
 }
 
-class _StateMessage extends StatelessWidget {
+class _StateMessage extends StatefulWidget {
   final IconData icon;
   final String title;
   final String message;
@@ -4922,48 +5034,132 @@ class _StateMessage extends StatelessWidget {
   });
 
   @override
+  State<_StateMessage> createState() => _StateMessageState();
+}
+
+class _StateMessageState extends State<_StateMessage> {
+  bool _visible = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    // Um frame de respiro antes de entrar, para não competir com a troca
+    // de tela que trouxe esse estado vazio até aqui.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() => _visible = true);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(26),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 46, color: const Color(0xFF0057C0)),
-            const SizedBox(height: 14),
-            Text(
-              title,
-              textAlign: TextAlign.center,
-              style: GoogleFonts.spaceGrotesk(
-                fontSize: 21,
-                fontWeight: FontWeight.bold,
-                color: const Color(0xFF0057C0),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              message,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: Color(0xFF414755),
-                height: 1.35,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            if (actionLabel != null && onAction != null) ...[
-              const SizedBox(height: 18),
-              ElevatedButton.icon(
-                onPressed: onAction,
-                icon: const Icon(Icons.refresh),
-                label: Text(actionLabel!),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF0057C0),
-                  foregroundColor: Colors.white,
+        child: AnimatedScale(
+          duration: const Duration(milliseconds: 420),
+          curve: Curves.easeOutBack,
+          scale: _visible ? 1 : .85,
+          child: AnimatedOpacity(
+            duration: const Duration(milliseconds: 380),
+            curve: Curves.easeOut,
+            opacity: _visible ? 1 : 0,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _IllustratedBadge(icon: widget.icon),
+                const SizedBox(height: 20),
+                Text(
+                  widget.title,
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.spaceGrotesk(
+                    fontSize: 21,
+                    fontWeight: FontWeight.bold,
+                    color: const Color(0xFF0057C0),
+                  ),
                 ),
-              ),
-            ],
-          ],
+                const SizedBox(height: 8),
+                Text(
+                  widget.message,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xFF414755),
+                    height: 1.35,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (widget.actionLabel != null && widget.onAction != null) ...[
+                  const SizedBox(height: 18),
+                  ElevatedButton.icon(
+                    onPressed: widget.onAction,
+                    icon: const Icon(Icons.refresh),
+                    label: Text(widget.actionLabel!),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0057C0),
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
         ),
+      ),
+    );
+  }
+}
+
+/// Selo em camadas (círculos concêntricos + ícone) que substitui o ícone
+/// solto de antes — dá um ar mais "ilustrado" ao estado vazio sem precisar
+/// de nenhum asset novo.
+class _IllustratedBadge extends StatelessWidget {
+  final IconData icon;
+
+  const _IllustratedBadge({required this.icon});
+
+  @override
+  Widget build(BuildContext context) {
+    const brandColor = Color(0xFF0057C0);
+
+    return SizedBox(
+      width: 108,
+      height: 108,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Container(
+            width: 108,
+            height: 108,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: brandColor.withOpacity(.06),
+            ),
+          ),
+          Container(
+            width: 80,
+            height: 80,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: brandColor.withOpacity(.10),
+            ),
+          ),
+          Container(
+            width: 58,
+            height: 58,
+            decoration: const BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(
+                  color: Color(0x140057C0),
+                  blurRadius: 16,
+                  offset: Offset(0, 6),
+                ),
+              ],
+            ),
+            child: Icon(icon, size: 28, color: brandColor),
+          ),
+        ],
       ),
     );
   }
@@ -4987,7 +5183,7 @@ class _InspectionsSkeleton extends StatelessWidget {
         children: [
           _InspectionsHeader(
             total: 0,
-            onlyMine: false,
+            onlyMine: true,
             onToggleOnlyMine: _noopBool,
             onOpenRanking: _noop,
             onToggleSearch: _noop,
@@ -5189,6 +5385,19 @@ class _FastPersonAvatar extends StatelessWidget {
                 if (loadingProgress == null) return child;
 
                 return Icon(icon, size: radius, color: iconColor);
+              },
+              // Se a foto já estava no ImageCache (pré-carregada na
+              // splash), pinta na hora. Senão, entra com um fade em vez de
+              // "estourar" de repente por cima do círculo vazio.
+              frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+                if (wasSynchronouslyLoaded) return child;
+
+                return AnimatedOpacity(
+                  opacity: frame == null ? 0 : 1,
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOut,
+                  child: child,
+                );
               },
             ),
     );

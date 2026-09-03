@@ -1,5 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+
+import 'argos_push_notification_service.dart';
 
 /// Contexto do usuário logado: quem ele é e a qual oficina credenciada
 /// pertence.
@@ -85,6 +88,24 @@ class SessionContextService {
     });
 
     return future;
+  }
+
+  /// Encerra a sessão do usuário: desregistra o token de push, sai do
+  /// Google e do Firebase Auth, e limpa o cache. Ponto único de logout —
+  /// usado tanto pelo botão "Sair da conta" quanto por qualquer fluxo que
+  /// precise forçar o encerramento (ex.: conta bloqueada pelo admin
+  /// durante uma sessão já ativa).
+  Future<void> logout() async {
+    try {
+      await ArgosPushNotificationService.instance
+          .unregisterCurrentDeviceToken();
+      await GoogleSignIn().signOut();
+      await FirebaseAuth.instance.signOut();
+    } catch (_) {
+      await FirebaseAuth.instance.signOut();
+    } finally {
+      clear();
+    }
   }
 
   /// Descarta o cache. Chamar no logout, para não vazar o contexto de um

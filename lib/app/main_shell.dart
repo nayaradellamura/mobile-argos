@@ -1,11 +1,15 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import '../features/inspections/inspections_page.dart';
 import '../features/ai_chat/ai_chat_page.dart';
 import '../features/profile/profile_page.dart';
 import '../services/argos_push_notification_service.dart';
+import '../services/session_context_service.dart';
 
 class MainShell extends StatefulWidget {
   final User user;
@@ -30,6 +34,10 @@ class _MainShellState extends State<MainShell> {
   bool isLoadingProfile = true;
   bool profileCompletionRequired = false;
 
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
+      _accountStatusSubscription;
+  bool _accountBlockedDialogShown = false;
+
   /// Guarda o sinistro selecionado quando o usuário abre o Chat IA
   /// a partir do botão dentro do sumário da vistoria.
   String? selectedSinistroIdForChat;
@@ -47,6 +55,8 @@ class _MainShellState extends State<MainShell> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _handleNotificationSinistroOpened();
     });
+
+    _watchAccountStatus();
 
     final initialProfileCompletionRequired =
         widget.initialProfileCompletionRequired;
@@ -70,7 +80,60 @@ class _MainShellState extends State<MainShell> {
           .removeListener(listener);
     }
 
+    _accountStatusSubscription?.cancel();
+
     super.dispose();
+  }
+
+  /// Escuta em tempo real o próprio documento do usuário para reagir se um
+  /// administrador bloquear (ou de qualquer forma tirar de "ativo") a
+  /// conta enquanto a sessão já está em uso — sem isso, o usuário só
+  /// descobriria o bloqueio da próxima vez que tentasse logar de novo.
+  void _watchAccountStatus() {
+    final email = _emailKey;
+
+    if (email.isEmpty) return;
+
+    _accountStatusSubscription = FirebaseFirestore.instance
+        .collection('users')
+        .doc(email)
+        .snapshots()
+        .listen(
+      (snapshot) {
+        if (!mounted || _accountBlockedDialogShown) return;
+
+        final status = snapshot.data()?['status']?.toString() ?? '';
+
+        if (status.isNotEmpty && status != 'ativo') {
+          _showAccountBlockedDialog(status);
+        }
+      },
+      onError: (error) {
+        debugPrint('Account status watch error: $error');
+      },
+    );
+  }
+
+  Future<void> _showAccountBlockedDialog(String status) async {
+    _accountBlockedDialogShown = true;
+    _accountStatusSubscription?.cancel();
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return PopScope(
+          canPop: false,
+          child: _AccountBlockedDialog(
+            status: status,
+            onAcknowledge: () {
+              Navigator.of(dialogContext).pop();
+              SessionContextService.instance.logout();
+            },
+          ),
+        );
+      },
+    );
   }
 
   Future<void> _loadProfileCompletionStatus() async {
@@ -220,8 +283,31 @@ class _MainShellState extends State<MainShell> {
     });
   }
 
+  List<Widget>? _cachedPages;
+  String? _cachedPagesSinistroKey;
+  String? _cachedPagesNotificationSinistroId;
+  bool? _cachedPagesProfileCompletionRequired;
+
+  /// Cacheado: o IndexedStack mantém as 3 páginas montadas o tempo todo, e
+  /// InspectionsPage sozinha é uma árvore enorme. Sem esse cache, qualquer
+  /// setState do MainShell (troca de aba, notificação, cadastro concluído)
+  /// recriava as 3 instâncias de widget do zero, forçando o Flutter a
+  /// reconstruir a InspectionsPage inteira mesmo quando nada relevante para
+  /// ela havia mudado — contribuindo para os frames perdidos logo na
+  /// abertura do app.
   List<Widget> get pages {
-    return [
+    final needsRebuild = _cachedPages == null ||
+        _cachedPagesSinistroKey != selectedSinistroIdForChat ||
+        _cachedPagesNotificationSinistroId != notificationSinistroIdToOpen ||
+        _cachedPagesProfileCompletionRequired != profileCompletionRequired;
+
+    if (!needsRebuild) return _cachedPages!;
+
+    _cachedPagesSinistroKey = selectedSinistroIdForChat;
+    _cachedPagesNotificationSinistroId = notificationSinistroIdToOpen;
+    _cachedPagesProfileCompletionRequired = profileCompletionRequired;
+
+    _cachedPages = [
       InspectionsPage(
         onOpenInspection: _openGenericChat,
         onOpenInspectionById: _openChatForSinistro,
@@ -241,6 +327,8 @@ class _MainShellState extends State<MainShell> {
         onProfileCompleted: _handleProfileCompleted,
       ),
     ];
+
+    return _cachedPages!;
   }
 
   @override
@@ -258,6 +346,161 @@ class _MainShellState extends State<MainShell> {
         currentIndex: selectedIndex,
         completionRequired: profileCompletionRequired,
         onTap: _handleNavTap,
+      ),
+    );
+  }
+}
+
+class _AccountBlockedDialog extends StatelessWidget {
+  final String status;
+  final VoidCallback onAcknowledge;
+
+  const _AccountBlockedDialog({
+    required this.status,
+    required this.onAcknowledge,
+  });
+
+  bool get _isPending => status == 'pendente';
+
+  Color get _accentColor =>
+      _isPending ? const Color(0xFFE8A400) : Colors.redAccent;
+
+  IconData get _icon =>
+      _isPending ? Icons.hourglass_top_rounded : Icons.lock_outline_rounded;
+
+  String get _title => _isPending ? 'Acesso pendente' : 'Acesso bloqueado';
+
+  String get _message => _isPending
+      ? 'Seu acesso está pendente de aprovação pelo administrador.'
+      : 'Seu acesso foi bloqueado pelo administrador.';
+
+  String get _tip => _isPending
+      ? 'Você será notificado assim que sua liberação for aprovada. Até lá, sua sessão será encerrada.'
+      : 'Fale com o administrador da sua oficina ou com o suporte Argos para reativar seu acesso.';
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.all(24),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(24, 28, 24, 24),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(32),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(.18),
+              blurRadius: 40,
+              offset: const Offset(0, 18),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 84,
+              height: 84,
+              decoration: BoxDecoration(
+                color: _accentColor.withOpacity(.12),
+                shape: BoxShape.circle,
+              ),
+              child: Center(
+                child: Container(
+                  width: 60,
+                  height: 60,
+                  decoration: BoxDecoration(
+                    color: _accentColor,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: _accentColor.withOpacity(.35),
+                        blurRadius: 18,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
+                  ),
+                  child: Icon(_icon, color: Colors.white, size: 28),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              _title,
+              textAlign: TextAlign.center,
+              style: GoogleFonts.spaceGrotesk(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: const Color(0xFF1F2937),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              _message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Color(0xFF414755),
+                fontSize: 14.5,
+                fontWeight: FontWeight.w600,
+                height: 1.35,
+              ),
+            ),
+            const SizedBox(height: 18),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF7FAFC),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.black.withOpacity(.04)),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.tips_and_updates_outlined,
+                    color: _accentColor,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      _tip,
+                      textAlign: TextAlign.left,
+                      style: const TextStyle(
+                        color: Color(0xFF414755),
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        height: 1.3,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 22),
+            SizedBox(
+              width: double.infinity,
+              height: 54,
+              child: ElevatedButton(
+                onPressed: onAcknowledge,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF0057C0),
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                ),
+                child: const Text(
+                  'Entendi, sair da conta',
+                  style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

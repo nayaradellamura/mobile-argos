@@ -16,6 +16,8 @@ import 'firebase_options.dart';
 import 'features/auth/login_page.dart';
 import 'app/main_shell.dart';
 import 'package:argos_app/features/network/argos_network_gate.dart';
+import 'features/inspections/data/inspections_prefetch_service.dart';
+import 'services/session_context_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -225,6 +227,9 @@ class _StartupGateState extends State<StartupGate> {
   bool _isResolvingProfile = false;
   bool _profileCompletionRequired = false;
 
+  bool _warmUpCompleted = false;
+  Timer? _warmUpTimeoutTimer;
+
   int _authChangeToken = 0;
 
   @override
@@ -253,6 +258,7 @@ class _StartupGateState extends State<StartupGate> {
   @override
   void dispose() {
     _authSubscription?.cancel();
+    _warmUpTimeoutTimer?.cancel();
     super.dispose();
   }
 
@@ -281,6 +287,15 @@ class _StartupGateState extends State<StartupGate> {
 
     _tryReleaseStartupGate();
 
+    // Aproveita o tempo da splash para já buscar as vistorias e as fotos de
+    // perfil da equipe: o gate só libera a splash depois que isso terminar
+    // (ou depois de um teto de segurança, para uma rede ruim não travar o
+    // login). Assim, quando a tela de Vistorias abrir de verdade, os cards
+    // já chegam prontos, sem o "pulo" de foto chegando atrasada.
+    unawaited(_warmUpInspections());
+    _warmUpTimeoutTimer =
+        Timer(const Duration(seconds: 3), _markWarmUpCompleted);
+
     final profileRequired = await _loadProfileCompletionRequired(authUser);
 
     if (!mounted || token != _authChangeToken) return;
@@ -289,6 +304,30 @@ class _StartupGateState extends State<StartupGate> {
       _user = authUser;
       _profileCompletionRequired = profileRequired;
       _isResolvingProfile = false;
+    });
+
+    _tryReleaseStartupGate();
+  }
+
+  Future<void> _warmUpInspections() async {
+    try {
+      final session = await SessionContextService.instance.resolve();
+      await InspectionsPrefetchService.instance.warmUp(session.credenciadoId);
+    } catch (_) {
+      // Sem oficina vinculada, sem rede, etc. — a tela de Vistorias resolve
+      // tudo normalmente por conta própria quando for aberta.
+    } finally {
+      _markWarmUpCompleted();
+    }
+  }
+
+  void _markWarmUpCompleted() {
+    _warmUpTimeoutTimer?.cancel();
+
+    if (!mounted || _warmUpCompleted) return;
+
+    setState(() {
+      _warmUpCompleted = true;
     });
 
     _tryReleaseStartupGate();
@@ -378,6 +417,10 @@ class _StartupGateState extends State<StartupGate> {
     // Na abertura com usuário já logado, segura a splash até o perfil carregar.
     // Depois que o gate já saiu da splash, novos logins não voltam para splash.
     if (_user != null && _isResolvingProfile) return;
+
+    // E até o pré-carregamento das vistorias/fotos terminar (ou o teto de
+    // segurança de _warmUpTimeoutTimer disparar).
+    if (_user != null && !_warmUpCompleted) return;
 
     setState(() {
       _startupGateReleased = true;

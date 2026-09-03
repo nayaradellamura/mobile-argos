@@ -17,6 +17,7 @@ class MetricsPage extends StatefulWidget {
 class _MetricsPageState extends State<MetricsPage> {
   MetricsPeriod _period = MetricsPeriod.last30Days;
   DateTimeRange? _customRange;
+  bool _showOnlyMine = false;
   late Future<List<MechanicPerformance>> _rankingFuture;
 
   // Incrementado a cada novo carregamento, para que uma atualização em
@@ -125,6 +126,17 @@ class _MetricsPageState extends State<MetricsPage> {
               selected: _period,
               onSelect: _selectPeriod,
             ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+              child: _ViewModeToggle(
+                showOnlyMine: _showOnlyMine,
+                onChanged: (value) {
+                  setState(() {
+                    _showOnlyMine = value;
+                  });
+                },
+              ),
+            ),
             Expanded(
               child: FutureBuilder<List<MechanicPerformance>>(
                 future: _rankingFuture,
@@ -160,6 +172,100 @@ class _MetricsPageState extends State<MetricsPage> {
                       .map((p) => p.completed)
                       .fold<int>(0, (a, b) => a > b ? a : b);
 
+                  var visualIndex = 0;
+                  final items = <Widget>[];
+
+                  if (_showOnlyMine) {
+                    MechanicPerformance? mine;
+                    var myPosition = 0;
+
+                    for (var i = 0; i < ranking.length; i++) {
+                      if (ranking[i].uid == currentUid) {
+                        mine = ranking[i];
+                        myPosition = i + 1;
+                        break;
+                      }
+                    }
+
+                    if (mine == null) {
+                      items.add(
+                        const _MetricsStateMessage(
+                          icon: Icons.person_search_outlined,
+                          title: 'Nenhum chamado seu no período',
+                          message:
+                              'Você ainda não tem sinistros atribuídos nesse período. Troque o filtro de período ou volte para "Equipe".',
+                        ),
+                      );
+                    } else {
+                      items.addAll([
+                        _StaggeredEntrance(
+                          index: visualIndex++,
+                          child: _TeamOverviewSection(
+                            ranking: [mine],
+                            title: 'Seu desempenho',
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        _StaggeredEntrance(
+                          index: visualIndex++,
+                          child: Text(
+                            'Você está em #$myPosition de ${ranking.length} na equipe',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: Color(0xFF414755),
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        _StaggeredEntrance(
+                          index: visualIndex++,
+                          child: _RankingCard(
+                            position: myPosition,
+                            performance: mine,
+                            isCurrentUser: true,
+                            maxCompleted: maxCompleted,
+                          ),
+                        ),
+                      ]);
+                    }
+                  } else {
+                    final podiumCount = ranking.length >= 3 ? 3 : ranking.length;
+                    final podium = ranking.take(podiumCount).toList();
+                    final rest = ranking.skip(podiumCount).toList();
+
+                    items.addAll([
+                      _StaggeredEntrance(
+                        index: visualIndex++,
+                        child: _TeamOverviewSection(ranking: ranking),
+                      ),
+                      const SizedBox(height: 16),
+                      if (podium.isNotEmpty) ...[
+                        _StaggeredEntrance(
+                          index: visualIndex++,
+                          child: _PodiumSection(
+                            top: podium,
+                            currentUid: currentUid,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                      for (var i = 0; i < rest.length; i++) ...[
+                        _StaggeredEntrance(
+                          index: visualIndex++,
+                          child: _RankingCard(
+                            position: podiumCount + i + 1,
+                            performance: rest[i],
+                            isCurrentUser: rest[i].uid == currentUid,
+                            maxCompleted: maxCompleted,
+                          ),
+                        ),
+                        if (i != rest.length - 1) const SizedBox(height: 12),
+                      ],
+                    ]);
+                  }
+
                   return RefreshIndicator(
                     color: const Color(0xFF0057C0),
                     onRefresh: () async {
@@ -168,29 +274,9 @@ class _MetricsPageState extends State<MetricsPage> {
                       });
                       await _rankingFuture;
                     },
-                    child: ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
-                    itemCount: ranking.length + 1,
-                    itemBuilder: (context, index) {
-                      if (index == 0) {
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 16),
-                          child: _TeamOverviewSection(ranking: ranking),
-                        );
-                      }
-
-                      final performance = ranking[index - 1];
-
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: _RankingCard(
-                          position: index,
-                          performance: performance,
-                          isCurrentUser: performance.uid == currentUid,
-                          maxCompleted: maxCompleted,
-                        ),
-                      );
-                    },
+                    child: ListView(
+                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+                      children: items,
                     ),
                   );
                 },
@@ -199,6 +285,280 @@ class _MetricsPageState extends State<MetricsPage> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Faz o filho entrar com fade + leve deslize de baixo pra cima, com um
+/// atraso proporcional a [index] — dá o efeito de itens "chegando" um
+/// atrás do outro em vez de estourarem todos de uma vez.
+class _StaggeredEntrance extends StatefulWidget {
+  final int index;
+  final Widget child;
+
+  const _StaggeredEntrance({required this.index, required this.child});
+
+  @override
+  State<_StaggeredEntrance> createState() => _StaggeredEntranceState();
+}
+
+class _StaggeredEntranceState extends State<_StaggeredEntrance> {
+  bool _visible = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    final delay = Duration(milliseconds: 70 * widget.index.clamp(0, 8));
+
+    Future.delayed(delay, () {
+      if (mounted) setState(() => _visible = true);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSlide(
+      duration: const Duration(milliseconds: 420),
+      curve: Curves.easeOutCubic,
+      offset: _visible ? Offset.zero : const Offset(0, .06),
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 420),
+        curve: Curves.easeOut,
+        opacity: _visible ? 1 : 0,
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+/// Pódio com os 3 primeiros colocados: 2º à esquerda, 1º no centro (maior,
+/// anel dourado), 3º à direita — clássico visual de leaderboard.
+class _PodiumSection extends StatelessWidget {
+  final List<MechanicPerformance> top;
+  final String? currentUid;
+
+  const _PodiumSection({required this.top, required this.currentUid});
+
+  @override
+  Widget build(BuildContext context) {
+    final first = top.isNotEmpty ? top[0] : null;
+    final second = top.length > 1 ? top[1] : null;
+    final third = top.length > 2 ? top[2] : null;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 26, 12, 18),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFFEAF2FF), Color(0xFFF7FBFF)],
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+        ),
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: const Color(0xFF0057C0).withOpacity(.08)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          if (second != null)
+            _PodiumSpot(
+              performance: second,
+              position: 2,
+              isCurrentUser: second.uid == currentUid,
+              animationDelayMs: 140,
+            )
+          else
+            const SizedBox(width: 76),
+          if (first != null)
+            _PodiumSpot(
+              performance: first,
+              position: 1,
+              isCurrentUser: first.uid == currentUid,
+              animationDelayMs: 0,
+            )
+          else
+            const SizedBox(width: 92),
+          if (third != null)
+            _PodiumSpot(
+              performance: third,
+              position: 3,
+              isCurrentUser: third.uid == currentUid,
+              animationDelayMs: 260,
+            )
+          else
+            const SizedBox(width: 76),
+        ],
+      ),
+    );
+  }
+}
+
+class _PodiumSpot extends StatefulWidget {
+  final MechanicPerformance performance;
+  final int position;
+  final bool isCurrentUser;
+  final int animationDelayMs;
+
+  const _PodiumSpot({
+    required this.performance,
+    required this.position,
+    required this.isCurrentUser,
+    required this.animationDelayMs,
+  });
+
+  @override
+  State<_PodiumSpot> createState() => _PodiumSpotState();
+}
+
+class _PodiumSpotState extends State<_PodiumSpot> {
+  bool _popped = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    Future.delayed(Duration(milliseconds: widget.animationDelayMs), () {
+      if (mounted) setState(() => _popped = true);
+    });
+  }
+
+  Color get _color {
+    switch (widget.position) {
+      case 1:
+        return const Color(0xFFC9A227);
+      case 2:
+        return const Color(0xFF9AA5B1);
+      default:
+        return const Color(0xFFB8763E);
+    }
+  }
+
+  IconData get _medalIcon =>
+      widget.position == 1 ? Icons.emoji_events : Icons.military_tech;
+
+  @override
+  Widget build(BuildContext context) {
+    final isFirst = widget.position == 1;
+    final avatarSize = isFirst ? 78.0 : 60.0;
+    final photoURL = widget.performance.photoURL.trim();
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AnimatedScale(
+          duration: const Duration(milliseconds: 520),
+          curve: Curves.elasticOut,
+          scale: _popped ? 1 : .4,
+          child: AnimatedOpacity(
+            duration: const Duration(milliseconds: 240),
+            opacity: _popped ? 1 : 0,
+            child: Stack(
+              clipBehavior: Clip.none,
+              alignment: Alignment.center,
+              children: [
+                Container(
+                  width: avatarSize + 8,
+                  height: avatarSize + 8,
+                  padding: const EdgeInsets.all(3),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _color,
+                    boxShadow: [
+                      BoxShadow(
+                        color: _color.withOpacity(.4),
+                        blurRadius: 20,
+                        spreadRadius: 1,
+                      ),
+                    ],
+                  ),
+                  child: Container(
+                    padding: const EdgeInsets.all(3),
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.white,
+                    ),
+                    child: CircleAvatar(
+                      radius: avatarSize / 2,
+                      backgroundColor: const Color(0xFFE5F6FF),
+                      backgroundImage:
+                          photoURL.isEmpty ? null : NetworkImage(photoURL),
+                      child: photoURL.isEmpty
+                          ? Icon(
+                              Icons.person,
+                              color: const Color(0xFF0057C0),
+                              size: avatarSize * .45,
+                            )
+                          : null,
+                    ),
+                  ),
+                ),
+                Positioned(
+                  bottom: -4,
+                  child: Container(
+                    padding: const EdgeInsets.all(5),
+                    decoration: BoxDecoration(
+                      color: _color,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
+                    ),
+                    child: Icon(
+                      _medalIcon,
+                      color: Colors.white,
+                      size: isFirst ? 16 : 13,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        SizedBox(
+          width: isFirst ? 96 : 78,
+          child: Text(
+            widget.performance.name.isEmpty
+                ? 'Sem nome'
+                : widget.performance.name,
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: GoogleFonts.spaceGrotesk(
+              fontSize: isFirst ? 13 : 11.5,
+              fontWeight: FontWeight.bold,
+              color: const Color(0xFF1F2937),
+            ),
+          ),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          '${widget.performance.completed} concluídos',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: isFirst ? 11 : 10,
+            fontWeight: FontWeight.w800,
+            color: _color,
+          ),
+        ),
+        if (widget.isCurrentUser) ...[
+          const SizedBox(height: 4),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0057C0),
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: const Text(
+              'Você',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 8.5,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+        ],
+      ],
     );
   }
 }
@@ -310,9 +670,19 @@ class _MetricsRankingCardSkeleton extends StatelessWidget {
                     const SizedBox(height: 8),
                     Row(
                       children: [
-                        const _SkeletonBox(width: 88, height: 20),
+                        Expanded(
+                          child: _SkeletonBox(
+                            width: double.infinity,
+                            height: 20,
+                          ),
+                        ),
                         const SizedBox(width: 8),
-                        const _SkeletonBox(width: 88, height: 20),
+                        Expanded(
+                          child: _SkeletonBox(
+                            width: double.infinity,
+                            height: 20,
+                          ),
+                        ),
                       ],
                     ),
                   ],
@@ -524,6 +894,96 @@ class _PeriodSelector extends StatelessWidget {
   }
 }
 
+class _ViewModeToggle extends StatelessWidget {
+  final bool showOnlyMine;
+  final ValueChanged<bool> onChanged;
+
+  const _ViewModeToggle({required this.showOnlyMine, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE5F6FF),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _ViewModeSegment(
+              label: 'Equipe',
+              icon: Icons.groups_outlined,
+              isSelected: !showOnlyMine,
+              onTap: () => onChanged(false),
+            ),
+          ),
+          Expanded(
+            child: _ViewModeSegment(
+              label: 'Meu desempenho',
+              icon: Icons.person,
+              isSelected: showOnlyMine,
+              onTap: () => onChanged(true),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ViewModeSegment extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _ViewModeSegment({
+    required this.label,
+    required this.icon,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: isSelected ? const Color(0xFF0057C0) : Colors.transparent,
+      borderRadius: BorderRadius.circular(11),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(11),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 9),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                size: 15,
+                color: isSelected ? Colors.white : const Color(0xFF0057C0),
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: isSelected ? Colors.white : const Color(0xFF0057C0),
+                    fontWeight: FontWeight.w800,
+                    fontSize: 12.5,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Resumo visual da equipe: KPIs + gráfico de barras por status.
 ///
 /// As cores usadas aqui (Pendentes/Em andamento/Em análise/Revisão/
@@ -535,8 +995,12 @@ class _PeriodSelector extends StatelessWidget {
 /// quem tem deuteranopia/protanopia quando exibidos juntos.
 class _TeamOverviewSection extends StatelessWidget {
   final List<MechanicPerformance> ranking;
+  final String title;
 
-  const _TeamOverviewSection({required this.ranking});
+  const _TeamOverviewSection({
+    required this.ranking,
+    this.title = 'Visão geral da equipe',
+  });
 
   int _sum(int Function(MechanicPerformance) selector) {
     return ranking.fold(0, (total, performance) => total + selector(performance));
@@ -615,7 +1079,7 @@ class _TeamOverviewSection extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Visão geral da equipe',
+            title,
             style: GoogleFonts.spaceGrotesk(
               fontSize: 16,
               fontWeight: FontWeight.bold,
@@ -702,14 +1166,32 @@ class _StatusBarData {
   });
 }
 
-class _StatusBarRow extends StatelessWidget {
+class _StatusBarRow extends StatefulWidget {
   final _StatusBarData data;
   final int max;
 
   const _StatusBarRow({required this.data, required this.max});
 
   @override
+  State<_StatusBarRow> createState() => _StatusBarRowState();
+}
+
+class _StatusBarRowState extends State<_StatusBarRow> {
+  bool _revealed = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    Future.delayed(const Duration(milliseconds: 180), () {
+      if (mounted) setState(() => _revealed = true);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final data = widget.data;
+    final max = widget.max;
     final fraction = max <= 0 ? 0.0 : (data.value / max).clamp(0.0, 1.0);
 
     return Semantics(
@@ -734,7 +1216,7 @@ class _StatusBarRow extends StatelessWidget {
           Expanded(
             child: LayoutBuilder(
               builder: (context, constraints) {
-                final barWidth = data.value == 0
+                final barWidth = data.value == 0 || !_revealed
                     ? 0.0
                     : (constraints.maxWidth * fraction).clamp(
                         18.0,
@@ -751,7 +1233,7 @@ class _StatusBarRow extends StatelessWidget {
                       ),
                     ),
                     AnimatedContainer(
-                      duration: const Duration(milliseconds: 320),
+                      duration: const Duration(milliseconds: 700),
                       curve: Curves.easeOutCubic,
                       height: 18,
                       width: barWidth,
@@ -976,14 +1458,32 @@ class _RankingCard extends StatelessWidget {
 /// concluídos deste mecânico com o do melhor colocado. Não é usada para
 /// distinguir identidade — por isso é sempre a mesma cor (azul da marca),
 /// diferente do gráfico de status da equipe, que usa cores por categoria.
-class _MagnitudeBar extends StatelessWidget {
+class _MagnitudeBar extends StatefulWidget {
   final int value;
   final int max;
 
   const _MagnitudeBar({required this.value, required this.max});
 
   @override
+  State<_MagnitudeBar> createState() => _MagnitudeBarState();
+}
+
+class _MagnitudeBarState extends State<_MagnitudeBar> {
+  bool _revealed = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    Future.delayed(const Duration(milliseconds: 180), () {
+      if (mounted) setState(() => _revealed = true);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final value = widget.value;
+    final max = widget.max;
     final fraction = max <= 0 ? 0.0 : (value / max).clamp(0.0, 1.0);
 
     return Semantics(
@@ -1001,10 +1501,10 @@ class _MagnitudeBar extends StatelessWidget {
                 ),
               ),
               AnimatedContainer(
-                duration: const Duration(milliseconds: 320),
+                duration: const Duration(milliseconds: 700),
                 curve: Curves.easeOutCubic,
                 height: 8,
-                width: constraints.maxWidth * fraction,
+                width: _revealed ? constraints.maxWidth * fraction : 0,
                 decoration: BoxDecoration(
                   color: const Color(0xFF0057C0),
                   borderRadius: BorderRadius.circular(999),
