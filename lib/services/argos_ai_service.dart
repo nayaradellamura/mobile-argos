@@ -10,6 +10,12 @@ class ArgosAiService {
     region: 'us-central1',
   );
 
+  /// O default do plugin e 60s, e um turno do agente com analise de fotos
+  /// (download das imagens + AnalistaDanosVisao multimodal +
+  /// VerificadorConsistencia) passa disso com facilidade. Alinhado com o
+  /// timeoutSeconds das Cloud Functions.
+  static const Duration _agentTimeout = Duration(seconds: 540);
+
   Future<String> sendMessage({
     required String text,
     required String inspectionId,
@@ -20,7 +26,10 @@ class ArgosAiService {
       return 'Digite uma mensagem para eu conseguir ajudar na vistoria.';
     }
 
-    final callable = _functions.httpsCallable('sendArgosMessage');
+    final callable = _functions.httpsCallable(
+      'sendArgosMessage',
+      options: HttpsCallableOptions(timeout: _agentTimeout),
+    );
 
     final result = await callable.call<Map<String, dynamic>>({
       'text': cleanText,
@@ -33,20 +42,32 @@ class ArgosAiService {
         'Entendi. Pode continuar descrevendo a vistoria.';
   }
 
-  Future<void> sendBackgroundMessage({
+  /// Manda uma mensagem de sistema (ex.: aviso de que as fotos subiram) e
+  /// DEVOLVE a resposta do agente.
+  ///
+  /// Antes era `Future<void>` e a reply era descartada — o que funcionava
+  /// com o Dialogflow CX, que nao olhava as fotos. Com o ADK, esse e
+  /// justamente o turno que produz o achado de visao e a pergunta de
+  /// divergencia: jogar fora a resposta esconderia o principal.
+  Future<String> sendBackgroundMessage({
     required String text,
     required String inspectionId,
   }) async {
     final cleanText = text.trim();
 
-    if (cleanText.isEmpty) return;
+    if (cleanText.isEmpty) return '';
 
-    final callable = _functions.httpsCallable('sendmessageargos');
+    final callable = _functions.httpsCallable(
+      'sendmessageargos',
+      options: HttpsCallableOptions(timeout: _agentTimeout),
+    );
 
-    await callable.call<Map<String, dynamic>>({
+    final result = await callable.call<Map<String, dynamic>>({
       'text': cleanText,
       'inspectionId': inspectionId,
     });
+
+    return result.data['reply']?.toString() ?? '';
   }
 
   Future<ArgosAudioMessageResult> sendAudioMessage({
@@ -71,9 +92,7 @@ class ArgosAiService {
 
     final callable = _functions.httpsCallable(
       'sendArgosAudioMessage',
-      options: HttpsCallableOptions(
-        timeout: const Duration(seconds: 120),
-      ),
+      options: HttpsCallableOptions(timeout: _agentTimeout),
     );
 
     final result = await callable.call<Map<String, dynamic>>({

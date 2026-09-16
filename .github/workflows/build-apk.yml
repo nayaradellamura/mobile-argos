@@ -1,0 +1,61 @@
+# Build do APK no CI.
+#
+# Existe porque a maquina de desenvolvimento nao consegue buildar: qualquer JDK
+# moderno falha nela com
+#   java.io.IOException: Unable to establish loopback connection
+# porque o Selector do Java cria um pipe sobre AF_UNIX e a familia AF_UNIX nao
+# esta registrada no catalogo Winsock daquele Windows. Runners Linux nao tem
+# esse problema.
+#
+# Nao precisa de nenhum secret: `android/app/google-services.json` esta
+# versionado, e o build de release assina com a chave de debug
+# (android/app/build.gradle.kts -> signingConfig = signingConfigs.debug).
+# ATENCAO: por isso este APK serve para teste, NAO para publicar na Play Store.
+# Para publicar, crie uma signingConfig de release e guarde o keystore em
+# secrets do repositorio.
+
+name: build-apk
+
+on:
+  push:
+    branches: [main, Juan]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.0'
+          channel: stable
+          cache: true
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      # Portao de qualidade: falha o build se aparecer erro de analise.
+      # Warnings e infos nao derrubam (o projeto ja tem ~200 infos de
+      # withOpacity depreciado, pre-existentes).
+      - name: flutter analyze
+        run: flutter analyze --no-fatal-warnings --no-fatal-infos
+
+      - name: flutter build apk --release
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: argos-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 14

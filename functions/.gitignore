@@ -2,3 +2,6 @@ node_modules/
 *.local
 
 functions/
+
+# Guarda ARGOS_ADK_SERVICE_URL (lido por defineString). Nao versionar.
+.env

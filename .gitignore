@@ -62,6 +62,8 @@ functions/node_modules/
 functions/lib/
 functions/.env
 functions/.env.*
+# ...menos o exemplo, que documenta ARGOS_ADK_SERVICE_URL para quem clonar.
+!functions/.env.example
 functions/firebase-debug.log
 functions/ui-debug.log
 

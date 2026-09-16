@@ -1,9 +1,9 @@
 const crypto = require("crypto");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
-const { defineSecret } = require("firebase-functions/params");
+const { defineString } = require("firebase-functions/params");
 const admin = require("firebase-admin");
-const dialogflowCx = require("@google-cloud/dialogflow-cx");
+const { GoogleAuth } = require("google-auth-library");
 const { VertexAI } = require("@google-cloud/vertexai");
 
 if (!admin.apps.length) {
@@ -15,14 +15,12 @@ if (!admin.apps.length) {
   });
 }
 
-const DIALOGFLOW_PROJECT_ID = "upheld-magpie-404322";
-const LOCATION = "us-central1";
-const AGENT_ID = "8ece03b0-a71c-4860-818f-422d9c61ddac";
-const AGENT_SESSION_TTL_SECONDS = 86399;
-const LANGUAGE_CODE = "pt-BR";
 
-const DIALOGFLOW_CLIENT_EMAIL = defineSecret("DIALOGFLOW_CLIENT_EMAIL");
-const DIALOGFLOW_PRIVATE_KEY = defineSecret("DIALOGFLOW_PRIVATE_KEY");
+
+// URL do Cloud Run onde o agente ADK roda. Setada como env var do servico
+// (--update-env-vars ARGOS_ADK_SERVICE_URL=...), nao como secret: nao e
+// segredo, e o rollback fica sendo so trocar a revisao.
+const ARGOS_ADK_SERVICE_URL = defineString("ARGOS_ADK_SERVICE_URL", { default: "" });
 
 const FIREBASE_PROJECT_ID =
   process.env.GCLOUD_PROJECT ||
@@ -33,32 +31,8 @@ const VERTEX_PROJECT_ID = FIREBASE_PROJECT_ID;
 const VERTEX_LOCATION = "us-central1";
 const GEMINI_REVIEW_MODEL = "gemini-2.5-flash";
 
-let cachedDialogflowClient = null;
 let cachedGeminiModel = null;
 
-function getDialogflowClient() {
-  if (cachedDialogflowClient) return cachedDialogflowClient;
-
-  const clientEmail = DIALOGFLOW_CLIENT_EMAIL.value();
-  const privateKey = DIALOGFLOW_PRIVATE_KEY.value().replace(/\\n/g, "\n");
-
-  if (!clientEmail || !privateKey) {
-    throw new Error(
-      "Secrets do Dialogflow não configuradas: DIALOGFLOW_CLIENT_EMAIL/DIALOGFLOW_PRIVATE_KEY."
-    );
-  }
-
-  cachedDialogflowClient = new dialogflowCx.SessionsClient({
-    apiEndpoint: `${LOCATION}-dialogflow.googleapis.com`,
-    credentials: {
-      client_email: clientEmail,
-      private_key: privateKey,
-    },
-    projectId: DIALOGFLOW_PROJECT_ID,
-  });
-
-  return cachedDialogflowClient;
-}
 
 function getGeminiReviewModel() {
   if (cachedGeminiModel) return cachedGeminiModel;
@@ -88,23 +62,14 @@ function createSessionId(uid, inspectionId) {
     .slice(0, 32);
 }
 
-function extractDialogflowReply(response) {
-  const messages = response?.queryResult?.responseMessages || [];
-  const parts = [];
-
-  for (const message of messages) {
-    if (message.text?.text && Array.isArray(message.text.text)) {
-      for (const text of message.text.text) parts.push(text);
-    }
-  }
-
-  return parts.join("\n").trim() || "Entendi. Pode continuar descrevendo a vistoria.";
-}
 
 exports.sendArgosMessage = onCall(
   {
     region: "us-central1",
-    secrets: [DIALOGFLOW_CLIENT_EMAIL, DIALOGFLOW_PRIVATE_KEY],
+    // O turno de fotos encadeia download das imagens + AnalistaDanosVisao
+    // (multimodal) + VerificadorConsistencia. Nos 60s default isso estoura.
+    timeoutSeconds: 540,
+    memory: "512MiB",
   },
   async (request) => {
     if (!request.auth) {
@@ -176,18 +141,15 @@ exports.sendArgosMessage = onCall(
         inspectionId,
         text,
         sessionParameters,
-        currentPage: context.vistoria?.agentCurrentPage || "",
+        chatmessages: context.vistoria?.chatmessages || [],
+        currentAgent: context.vistoria?.agentCurrentAgent || "",
       });
 
       const reply = agentResult.reply;
 
       await saveAgentStateToVistoria({
         idvistoria: inspectionId,
-        currentPage: agentResult.currentPage,
-        parameters:
-          agentResult.parameters && Object.keys(agentResult.parameters).length > 0
-            ? agentResult.parameters
-            : sessionParameters,
+        currentAgent: agentResult.currentAgent,
       });
 
       return {
@@ -198,7 +160,7 @@ exports.sendArgosMessage = onCall(
         sessionParameters,
       };
     } catch (error) {
-      console.error("Erro ao conversar com Dialogflow CX:", error);
+      console.error("Erro ao conversar com o agente ADK:", error);
       console.error("code:", error.code);
       console.error("message:", error.message);
       console.error("details:", error.details);
@@ -313,9 +275,8 @@ exports.notifySinistroChanges = onDocumentWritten(
 exports.sendArgosAudioMessage = onCall(
   {
     region: "us-central1",
-    timeoutSeconds: 180,
+    timeoutSeconds: 540,
     memory: "1GiB",
-    secrets: [DIALOGFLOW_CLIENT_EMAIL, DIALOGFLOW_PRIVATE_KEY],
   },
   async (request) => {
     if (!request.auth) {
@@ -431,18 +392,15 @@ console.log("Parâmetros enviados ao agente Argos no áudio:", sessionParameters
       inspectionId: idvistoria,
       text: revisedTranscript,
       sessionParameters,
-      currentPage: vistoria?.agentCurrentPage || "",
+      chatmessages: vistoria?.chatmessages || [],
+      currentAgent: vistoria?.agentCurrentAgent || "",
     });
 
     const reply = agentResult.reply;
 
     await saveAgentStateToVistoria({
       idvistoria,
-      currentPage: agentResult.currentPage,
-      parameters:
-        agentResult.parameters && Object.keys(agentResult.parameters).length > 0
-          ? agentResult.parameters
-          : sessionParameters,
+      currentAgent: agentResult.currentAgent,
     });
 
       const now = admin.firestore.Timestamp.now();
@@ -1375,30 +1333,193 @@ function str(value) {
   return String(value).trim();
 }
 
-function toProtoStruct(data) {
-  const fields = {};
+// ---------------------------------------------------------------------------
+// Ponte para o agente ADK hospedado no Cloud Run (substitui o Dialogflow CX).
+//
+// O contrato HTTP abaixo foi conferido no código do ADK 2.8.0, não na doc:
+//   - `cli/utils/common.py` define alias_generator=to_camel + populate_by_name,
+//     então tanto camelCase quanto snake_case são aceitos no corpo.
+//   - `cli/api_server.py` expõe GET/POST /apps/{app}/users/{uid}/sessions[/{sid}]
+//     e POST /run, e `CreateSessionRequest` aceita `sessionId`, `state` e `events`.
+//
+// Duas decisões que importam:
+//
+// 1. O `state` inicial carrega `id_vistoria`. O prompt dos dois agentes usa
+//    `{id_vistoria}` (sem `?`), então uma sessão criada sem esse state falha
+//    ALTO em vez de renderizar silenciosamente uma instrução contraditória.
+//
+// 2. Quando a sessão não existe (cold start, deploy, reciclagem da instância),
+//    ela é recriada JÁ COM o histórico de `vistorias/{id}.chatmessages`. Sem
+//    isso, o Cloud Run reciclando no meio de uma vistoria faz o mecânico ser
+//    cumprimentado de novo e perder tudo. O endpoint suporta isso de propósito
+//    — ver `_validate_session_initialization_events` em api_server.py.
+// ---------------------------------------------------------------------------
 
-  for (const [key, value] of Object.entries(data || {})) {
-    fields[key] = toProtoValue(value);
+const ADK_APP_NAME = "vistoria_team";
+const ADK_HTTP_TIMEOUT_MS = 500000;
+// Teto de turnos reconstruídos: `chatmessages` é um array dentro do documento
+// (limite de 1 MiB), e reenviar a conversa inteira a cada cold start custa
+// tokens. Os últimos N turnos bastam para o agente retomar o fio.
+const ADK_MAX_SEED_MESSAGES = 40;
+
+let cachedAdkClient = null;
+let cachedAdkAudience = "";
+
+function getAdkBaseUrl() {
+  const url = String(ARGOS_ADK_SERVICE_URL.value() || "").trim().replace(/\/+$/, "");
+
+  if (!url) {
+    throw new Error(
+      "ARGOS_ADK_SERVICE_URL não configurada — aponte para a URL do Cloud Run do agente."
+    );
   }
 
-  return { fields };
+  return url;
 }
 
-function toProtoValue(value) {
-  if (value === null || value === undefined) return { nullValue: "NULL_VALUE" };
-  if (typeof value === "number") return { numberValue: value };
-  if (typeof value === "boolean") return { boolValue: value };
+async function getAdkClient(baseUrl) {
+  if (cachedAdkClient && cachedAdkAudience === baseUrl) return cachedAdkClient;
 
-  if (Array.isArray(value)) {
-    return { listValue: { values: value.map((item) => toProtoValue(item)) } };
+  const auth = new GoogleAuth();
+  // O serviço sobe com --no-allow-unauthenticated: o IAM do Cloud Run exige
+  // um ID token OIDC assinado pelo Google, com a URL raiz como audience.
+  cachedAdkClient = await auth.getIdTokenClient(baseUrl);
+  cachedAdkAudience = baseUrl;
+
+  return cachedAdkClient;
+}
+
+async function adkRequest({ baseUrl, method, path, body }) {
+  const client = await getAdkClient(baseUrl);
+
+  return client.request({
+    url: `${baseUrl}${path}`,
+    method,
+    data: body,
+    responseType: "json",
+    timeout: ADK_HTTP_TIMEOUT_MS,
+    validateStatus: () => true,
+  });
+}
+
+function adkSessionsPath(uid) {
+  return `/apps/${ADK_APP_NAME}/users/${encodeURIComponent(uid)}/sessions`;
+}
+
+// Converte `chatmessages` (formato do app: {role: 'user'|'ai'|'audio', text})
+// para eventos do ADK. Só texto: o validador do ADK rejeita eventos que
+// aleguem ser gerados por ele (tool calls reservadas, actions não-default).
+function chatMessagesToAdkEvents(chatmessages, currentAgent) {
+  // O autor das falas do agente vai como `agentCurrentAgent` (gravado no fim
+  // do ultimo turno). Importa porque e assim que o ADK sabe quem estava com a
+  // palavra: sem isso, uma reciclagem de instancia no meio do orcamento faria
+  // a conversa voltar para o agente de vistoria e cumprimentar o mecanico de novo.
+  const autorAgente = String(currentAgent || "").trim() || "VistoriaPeritoDigitalAgent";
+  const mensagens = Array.isArray(chatmessages) ? chatmessages : [];
+  const recentes = mensagens.slice(-ADK_MAX_SEED_MESSAGES);
+  const eventos = [];
+
+  recentes.forEach((mensagem, indice) => {
+    const texto = String(mensagem?.text || "").trim();
+    if (!texto) return;
+
+    const ehAgente = mensagem?.role === "ai";
+
+    eventos.push({
+      id: `seed${indice}`,
+      invocationId: `seed${indice}`,
+      author: ehAgente ? autorAgente : "user",
+      content: {
+        role: ehAgente ? "model" : "user",
+        parts: [{ text: texto }],
+      },
+    });
+  });
+
+  return eventos;
+}
+
+async function createAdkSession({ baseUrl, uid, sessionId, state, events }) {
+  const res = await adkRequest({
+    baseUrl,
+    method: "POST",
+    path: adkSessionsPath(uid),
+    body: { sessionId, state, ...(events && events.length ? { events } : {}) },
+  });
+
+  // 409 = alguém criou entre o GET e o POST (duas mensagens em paralelo).
+  if (res.status === 200 || res.status === 201 || res.status === 409) return;
+
+  throw new Error(
+    `ADK create_session ${res.status}: ${JSON.stringify(res.data)}`
+  );
+}
+
+async function ensureAdkSession({ baseUrl, uid, sessionId, state, chatmessages, currentAgent }) {
+  const res = await adkRequest({
+    baseUrl,
+    method: "GET",
+    path: `${adkSessionsPath(uid)}/${encodeURIComponent(sessionId)}`,
+  });
+
+  if (res.status === 200) return { criada: false };
+
+  if (res.status !== 404) {
+    throw new Error(`ADK get_session ${res.status}: ${JSON.stringify(res.data)}`);
   }
 
-  if (typeof value === "object") {
-    return { structValue: toProtoStruct(value) };
+  const events = chatMessagesToAdkEvents(chatmessages, currentAgent);
+
+  await createAdkSession({ baseUrl, uid, sessionId, state, events });
+
+  console.log("Sessão ADK recriada", {
+    sessionId,
+    turnosReconstruidos: events.length,
+  });
+
+  return { criada: true, turnosReconstruidos: events.length };
+}
+
+// Junta o texto que o usuário deve ver. Ignora o que não é fala do agente:
+// eventos parciais (streaming), pensamento do modelo, chamadas de ferramenta
+// e as respostas delas.
+function extractAdkReply(events) {
+  const lista = Array.isArray(events) ? events : [];
+  const partes = [];
+
+  for (const evento of lista) {
+    if (evento?.partial === true) continue;
+
+    const content = evento?.content || {};
+    if (content.role === "user" || evento?.author === "user") continue;
+
+    for (const parte of content.parts || []) {
+      if (parte?.thought === true) continue;
+      if (parte?.functionCall || parte?.functionResponse) continue;
+
+      const texto = String(parte?.text || "").trim();
+      if (texto) partes.push(texto);
+    }
   }
 
-  return { stringValue: String(value) };
+  return (
+    partes.join("\n").trim() ||
+    "Entendi. Pode continuar descrevendo a vistoria."
+  );
+}
+
+// Qual agente está com a palavra ao fim do turno — é o que substitui o
+// `currentPage` do Dialogflow (que, aliás, nunca funcionou: o código gravava
+// "[object Object]" e isValidCurrentPage sempre retornava false).
+function extractAdkCurrentAgent(events) {
+  const lista = Array.isArray(events) ? events : [];
+
+  for (let i = lista.length - 1; i >= 0; i -= 1) {
+    const autor = String(lista[i]?.author || "").trim();
+    if (autor && autor !== "user") return autor;
+  }
+
+  return "";
 }
 
 async function sendTextToArgosAgent({
@@ -1406,52 +1527,46 @@ async function sendTextToArgosAgent({
   inspectionId,
   text,
   sessionParameters = {},
-  currentPage = "",
+  chatmessages = [],
+  currentAgent = "",
 }) {
-  const client = getDialogflowClient();
+  const baseUrl = getAdkBaseUrl();
 
+  // Mesmo sessionId determinístico de antes — preserva a correspondência
+  // com o histórico já gravado no Firestore.
   const sessionId = createSessionId(uid, inspectionId);
 
-  const sessionPath = client.projectLocationAgentSessionPath(
-    DIALOGFLOW_PROJECT_ID,
-    LOCATION,
-    AGENT_ID,
-    sessionId
-  );
-
-  const queryParams = {
-    sessionTtl: {
-      seconds: AGENT_SESSION_TTL_SECONDS,
-    },
+  const state = {
+    ...sessionParameters,
+    id_vistoria: inspectionId,
+    uid,
   };
 
-  if (sessionParameters && Object.keys(sessionParameters).length > 0) {
-    queryParams.parameters = toProtoStruct(sessionParameters);
-  }
+  await ensureAdkSession({ baseUrl, uid, sessionId, state, chatmessages, currentAgent });
 
-  if (isValidCurrentPage(currentPage)) {
-    queryParams.currentPage = currentPage;
-  }
-
-  const request = {
-    session: sessionPath,
-    queryInput: {
-      text: {
-        text,
-      },
-      languageCode: LANGUAGE_CODE,
+  const res = await adkRequest({
+    baseUrl,
+    method: "POST",
+    path: "/run",
+    body: {
+      appName: ADK_APP_NAME,
+      userId: uid,
+      sessionId,
+      newMessage: { role: "user", parts: [{ text }] },
+      // Reforça o id a cada turno: se a sessão foi recriada por outro
+      // caminho, o agente continua sabendo de qual vistoria se trata.
+      stateDelta: { id_vistoria: inspectionId },
+      streaming: false,
     },
-    queryParams,
-  };
+  });
 
-  const [response] = await client.detectIntent(request);
-
-  const agentState = extractAgentStateFromResponse(response);
+  if (res.status !== 200) {
+    throw new Error(`ADK /run ${res.status}: ${JSON.stringify(res.data)}`);
+  }
 
   return {
-    reply: extractDialogflowReply(response),
-    currentPage: agentState.currentPage,
-    parameters: agentState.parameters,
+    reply: extractAdkReply(res.data),
+    currentAgent: extractAdkCurrentAgent(res.data),
   };
 }
 
@@ -1502,47 +1617,6 @@ function isBusinessDay(date) {
   return day >= 1 && day <= 5;
 }
 
-function protoValueToJs(value) {
-  if (!value) return null;
-
-  if (Object.prototype.hasOwnProperty.call(value, "stringValue")) {
-    return value.stringValue;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(value, "numberValue")) {
-    return value.numberValue;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(value, "boolValue")) {
-    return value.boolValue;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(value, "nullValue")) {
-    return null;
-  }
-
-  if (value.listValue?.values) {
-    return value.listValue.values.map((item) => protoValueToJs(item));
-  }
-
-  if (value.structValue?.fields) {
-    return protoStructToJs(value.structValue);
-  }
-
-  return null;
-}
-
-function protoStructToJs(struct) {
-  const fields = struct?.fields || {};
-  const obj = {};
-
-  for (const [key, value] of Object.entries(fields)) {
-    obj[key] = protoValueToJs(value);
-  }
-
-  return obj;
-}
-
 function mergeSessionParameters(savedParameters, freshParameters) {
   return removeEmptyValues({
     ...(savedParameters || {}),
@@ -1550,11 +1624,7 @@ function mergeSessionParameters(savedParameters, freshParameters) {
   });
 }
 
-async function saveAgentStateToVistoria({
-  idvistoria,
-  currentPage,
-  parameters,
-}) {
+async function saveAgentStateToVistoria({ idvistoria, currentAgent }) {
   const cleanId = String(idvistoria || "").trim();
 
   if (!cleanId) return;
@@ -1562,13 +1632,19 @@ async function saveAgentStateToVistoria({
   const now = new Date();
   const expiresAt = addBusinessHours(now, 24);
 
+  // NAO grava mais `agentParameters`: quem escreve esse campo agora sao as
+  // tools do ADK (`salvar_estado_vistoria`), e o `removeEmptyValues` daqui
+  // coage tudo a string — passaria por cima das listas que o agente gravou.
+  //
+  // `agentCurrentPage` tambem saiu: era conceito do Dialogflow e ja estava
+  // quebrado (gravava a string "[object Object]"). O equivalente util no ADK
+  // e qual agente esta com a palavra ao fim do turno.
   await admin.firestore().collection("vistorias").doc(cleanId).set(
     {
-      agentCurrentPage: String(currentPage || ""),
-      agentParameters: removeEmptyValues(parameters || {}),
+      agentBackend: "adk",
+      agentCurrentAgent: String(currentAgent || ""),
       agentLastTurnAt: admin.firestore.Timestamp.fromDate(now),
       agentBusinessExpiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
-      agentSessionTtlSeconds: AGENT_SESSION_TTL_SECONDS,
       agentSessionPolicy: {
         ttlBusinessHours: 24,
         workdays: [1, 2, 3, 4, 5],
@@ -1578,24 +1654,4 @@ async function saveAgentStateToVistoria({
     },
     { merge: true }
   );
-}
-
-function extractAgentStateFromResponse(response) {
-  const queryResult = response?.queryResult || {};
-  const currentPage = queryResult.currentPage || "";
-
-  const responseParameters = queryResult.parameters
-    ? protoStructToJs(queryResult.parameters)
-    : {};
-
-  return {
-    currentPage,
-    parameters: responseParameters,
-  };
-}
-
-function isValidCurrentPage(value) {
-  const text = String(value || "").trim();
-
-  return text.startsWith("projects/") && text.includes("/pages/");
 }

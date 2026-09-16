@@ -847,47 +847,58 @@ class _AiChatPageState extends State<AiChatPage> {
       }
     }
 
-    Future.delayed(const Duration(milliseconds: 650), () async {
-      if (!mounted) return;
+    if (!uploadedAnyPhoto) return;
 
-      final quantity = photos.length;
-      final aiText =
-          '$quantity foto${quantity > 1 ? 's' : ''} recebida${quantity > 1 ? 's' : ''}. Essas evidências foram vinculadas à vistoria.';
-
-      await VistoriaChatSessionService.instance.appendAiMessage(
-        vistoriaDocId: session.docId,
-        text: aiText,
-      );
-
-      if (!mounted) return;
-
-      setState(() {
-        messages.add(
-          ChatMessage(
-            type: ChatMessageType.ai,
-            text: aiText,
-            createdAt: DateTime.now(),
-          ),
-        );
-      });
-
-      _scrollToBottom();
-    });
-
-    if (uploadedAnyPhoto) {
-      unawaited(_notifyPhotosSentInBackground(session.idvistoria));
-    }
+    await _analyzePhotosWithAgent(session: session, quantity: photos.length);
   }
 
-  Future<void> _notifyPhotosSentInBackground(String inspectionId) async {
+  /// Avisa o agente que a leva de fotos subiu e MOSTRA a resposta dele.
+  ///
+  /// Antes isto era `unawaited(...)` com a reply descartada, e a tela exibia
+  /// um texto fixo montado aqui. Fazia sentido com o Dialogflow CX, que não
+  /// enxerga imagem. Com o ADK, este é o turno em que `AnalistaDanosVisao` e
+  /// `VerificadorConsistencia` rodam — descartar a resposta esconderia
+  /// exatamente o que a troca de backend veio entregar.
+  Future<void> _analyzePhotosWithAgent({
+    required VistoriaSession session,
+    required int quantity,
+  }) async {
+    if (!mounted) return;
+
+    setState(() => isAiTyping = true);
+    _scrollToBottom();
+
+    final plural = quantity > 1 ? 's' : '';
+    final fallback =
+        '$quantity foto$plural recebida$plural. Essas evidências foram vinculadas à vistoria.';
+
+    String aiText;
+
     try {
-      await ArgosAiService.instance.sendBackgroundMessage(
-        text: 'enviadas',
-        inspectionId: inspectionId,
+      final reply = await ArgosAiService.instance.sendBackgroundMessage(
+        text: 'Fotos enviadas ($quantity).',
+        inspectionId: session.idvistoria,
       );
+
+      aiText = reply.trim().isEmpty ? fallback : reply.trim();
     } catch (e) {
       debugPrint('Erro ao notificar envio de fotos para IA: $e');
+      aiText = fallback;
     }
+
+    await VistoriaChatSessionService.instance.appendAiMessage(
+      vistoriaDocId: session.docId,
+      text: aiText,
+    );
+
+    if (!mounted) return;
+
+    setState(() {
+      isAiTyping = false;
+      messages.add(_aiMessageFromText(aiText));
+    });
+
+    _scrollToBottom();
   }
 
   Future<String> _createAudioFilePath() async {
