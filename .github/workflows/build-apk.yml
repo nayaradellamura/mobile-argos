@@ -7,12 +7,19 @@
 # esta registrada no catalogo Winsock daquele Windows. Runners Linux nao tem
 # esse problema.
 #
-# Nao precisa de nenhum secret: `android/app/google-services.json` esta
-# versionado, e o build de release assina com a chave de debug
-# (android/app/build.gradle.kts -> signingConfig = signingConfigs.debug).
-# ATENCAO: por isso este APK serve para teste, NAO para publicar na Play Store.
-# Para publicar, crie uma signingConfig de release e guarde o keystore em
-# secrets do repositorio.
+# ASSINATURA: o APK e assinado com um keystore fixo, montado a partir de dois
+# secrets do repositorio:
+#   ANDROID_KEYSTORE_BASE64    - o arquivo .keystore em base64
+#   ANDROID_KEYSTORE_PASSWORD  - a senha (store e key usam a mesma)
+#
+# Isso existe porque a chave de debug do runner e gerada nova a cada execucao:
+# o SHA-1 mudava todo build, e o Google Sign-In falhava com
+# PlatformException(sign_in_failed, ...: 10) = DEVELOPER_ERROR, ja que o SHA-1
+# precisa estar registrado no Firebase. Com keystore fixo o SHA e estavel,
+# basta registra-lo uma vez.
+#
+# Sem os secrets configurados o build ainda passa, mas cai na chave de debug e
+# o login Google volta a falhar — o passo abaixo avisa quando isso acontece.
 
 name: build-apk
 
@@ -50,8 +57,31 @@ jobs:
       - name: flutter analyze
         run: flutter analyze --no-fatal-warnings --no-fatal-infos
 
+      - name: Monta o keystore de release a partir dos secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::warning::ANDROID_KEYSTORE_BASE64 nao configurado — o APK sai assinado com chave de DEBUG e o Google Sign-In vai falhar (DEVELOPER_ERROR)."
+            exit 0
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > android/app/argos-release.keystore
+          cat > android/key.properties <<PROPS
+          storePassword=$KEYSTORE_PASS
+          keyPassword=$KEYSTORE_PASS
+          keyAlias=argos
+          storeFile=app/argos-release.keystore
+          PROPS
+          echo "keystore montado ($(stat -c%s android/app/argos-release.keystore) bytes)"
+
       - name: flutter build apk --release
         run: flutter build apk --release
+
+      - name: Confere com qual chave o APK foi assinado
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | tail -1)
+          "$APKSIGNER" verify --print-certs build/app/outputs/flutter-apk/app-release.apk             | grep -i "SHA-1" || true
 
       - uses: actions/upload-artifact@v4
         with:

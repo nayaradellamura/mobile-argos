@@ -1,0 +1,7 @@
+# Copie para android/key.properties e preencha. NAO versione o arquivo real.
+# No CI isto e gerado a partir dos secrets ANDROID_KEYSTORE_BASE64 e
+# ANDROID_KEYSTORE_PASSWORD (ver .github/workflows/build-apk.yml).
+storePassword=SENHA_DO_KEYSTORE
+keyPassword=SENHA_DA_CHAVE
+keyAlias=argos
+storeFile=app/argos-release.keystore
