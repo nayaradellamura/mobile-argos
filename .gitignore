@@ -56,6 +56,11 @@ serviceAccountKey.json
 firebase-admin-key.json
 *service-account*.json
 *firebase-admin*.json
+*firebase-credentials*.json
+
+# web-argos é um repositório Git próprio, clonado aqui dentro só por
+# conveniência local — nunca deve ser rastreado por este repo (mobile).
+website/
 
 # Firebase Functions
 functions/node_modules/
@@ -66,6 +71,12 @@ functions/.env.*
 !functions/.env.example
 functions/firebase-debug.log
 functions/ui-debug.log
+
+# laudo-service (Cloud Run)
+services/laudo-service/node_modules/
+services/laudo-service/.env
+services/laudo-service/.env.*
+!services/laudo-service/.env.example
 
 # Firebase emulators
 .firebase/
