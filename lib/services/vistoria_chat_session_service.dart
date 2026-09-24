@@ -99,9 +99,22 @@ class VistoriaChatSessionService {
         .where((doc) {
           final data = doc.data();
           final assignedToUid = _str(data['assignedToUid']);
+          final vistoriaStatus = _str(data['vistoriaAtualStatus']).toUpperCase();
+
+          // Só o veículo atribuído ao mecânico logado — sinistros ainda sem
+          // dono (assignedToUid vazio) não aparecem aqui mais, mesmo sendo
+          // da mesma oficina.
+          final isMine = assignedToUid == ctx.uid;
+
+          // Só vistoria em andamento (o estado normal após o check-in) ou
+          // rejeitada (precisa de retificação) — exclui EM_ANALISE_OPERACIONAL
+          // (já enviada, nada a fazer no chat), FINALIZADA e CANCELADA.
+          final isEmAndamento = vistoriaStatus.contains('ANDAMENTO');
+          final isRejeitada = vistoriaStatus.contains('REJEITADA');
 
           return _hasCheckIn(data['checkInAt']) &&
-              (assignedToUid.isEmpty || assignedToUid == ctx.uid);
+              isMine &&
+              (isEmAndamento || isRejeitada);
         })
         .map(SinistroVistoriaOption.fromFirestore)
         .toList();
@@ -1158,6 +1171,9 @@ class SinistroVistoriaOption {
   final String cliente;
   final String checkInAt;
   final String status;
+  // vistoriaAtualStatus do sinistro — não confundir com `status` acima (esse
+  // é o sinistro.status, que fica EM_ANDAMENTO o tempo todo até finalizar).
+  final String vistoriaStatus;
 
   const SinistroVistoriaOption({
     required this.sinistroId,
@@ -1166,7 +1182,11 @@ class SinistroVistoriaOption {
     required this.cliente,
     required this.checkInAt,
     required this.status,
+    required this.vistoriaStatus,
   });
+
+  bool get isRetificacaoPendente =>
+      vistoriaStatus.toUpperCase().contains('REJEITADA');
 
   factory SinistroVistoriaOption.fromFirestore(
     QueryDocumentSnapshot<Map<String, dynamic>> doc,
@@ -1213,6 +1233,7 @@ class SinistroVistoriaOption {
       cliente: cliente,
       checkInAt: VistoriaChatSessionService._str(data['checkInAt']),
       status: VistoriaChatSessionService._str(data['status']),
+      vistoriaStatus: VistoriaChatSessionService._str(data['vistoriaAtualStatus']),
     );
   }
 

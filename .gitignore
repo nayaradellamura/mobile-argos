@@ -142,3 +142,5 @@ linux/
 macos/
 web/
 windows/
+# Ferramentas locais de teste (snapshot/restore de sinistro) — não vai pro repo.
+functions/tools/

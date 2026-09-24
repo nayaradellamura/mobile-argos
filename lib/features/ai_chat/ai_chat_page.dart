@@ -14,6 +14,7 @@ import 'package:record/record.dart';
 import '../../services/argos_ai_service.dart';
 import '../../services/user_audio_storage_service.dart';
 import '../../services/vistoria_chat_session_service.dart';
+import '../../shared/widgets/ellipsis_text.dart';
 import '../camera/camera_page.dart';
 
 enum ChatMessageType { ai, user, photo, audio }
@@ -321,48 +322,126 @@ class _AiChatPageState extends State<AiChatPage> {
   Future<ContinueVistoriaAction?> _askVistoriaAction(
     VistoriaSession session,
   ) {
+    final placa = session.placa.trim().isEmpty ? 'Sem placa' : session.placa;
+    final veiculo =
+        session.veiculo.trim().isEmpty ? 'Não informado' : session.veiculo;
+
     return showDialog<ContinueVistoriaAction>(
       context: context,
       barrierDismissible: false,
       builder: (context) {
-        return AlertDialog(
+        return Dialog(
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(24),
+            borderRadius: BorderRadius.circular(28),
           ),
-          title: const Text('Vistoria em andamento'),
-          content: Text(
-            'Encontramos uma vistoria aberta para este veículo.\n\n'
-            'Nº: ${session.idvistoria}\n'
-            'Placa: ${session.placa.isEmpty ? 'Sem placa' : session.placa}\n'
-            'Veículo: ${session.veiculo.isEmpty ? 'Não informado' : session.veiculo}\n\n'
-            'O que deseja fazer?',
+          insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 60,
+                    height: 60,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFE5F6FF),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.pending_actions_rounded,
+                      color: Color(0xFF0057C0),
+                      size: 30,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Vistoria em andamento',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.spaceGrotesk(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: const Color(0xFF1F2937),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Você já começou a vistoria deste veículo e ainda não terminou.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Color(0xFF6B7280),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    height: 1.3,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF3FBFF),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Column(
+                    children: [
+                      _VistoriaInfoRow(
+                        icon: Icons.badge_outlined,
+                        label: 'Vistoria',
+                        value: session.idvistoria,
+                      ),
+                      const SizedBox(height: 8),
+                      _VistoriaInfoRow(
+                        icon: Icons.directions_car_outlined,
+                        label: 'Veículo',
+                        value: '$placa • $veiculo',
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 20),
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 10, left: 2),
+                  child: Text(
+                    'O que você quer fazer?',
+                    style: TextStyle(
+                      color: Color(0xFF1F2937),
+                      fontWeight: FontWeight.w800,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+                _VistoriaActionTile(
+                  icon: Icons.play_circle_fill_rounded,
+                  title: 'Continuar agora',
+                  subtitle: 'Volta pro ponto exato onde você parou.',
+                  color: const Color(0xFF0057C0),
+                  filled: true,
+                  onTap: () => Navigator.of(context)
+                      .pop(ContinueVistoriaAction.continueNow),
+                ),
+                const SizedBox(height: 10),
+                _VistoriaActionTile(
+                  icon: Icons.schedule_rounded,
+                  title: 'Continuar mais tarde',
+                  subtitle: 'Fecha por agora — o progresso fica salvo.',
+                  color: const Color(0xFF0057C0),
+                  onTap: () => Navigator.of(context)
+                      .pop(ContinueVistoriaAction.continueLater),
+                ),
+                const SizedBox(height: 10),
+                _VistoriaActionTile(
+                  icon: Icons.restart_alt_rounded,
+                  title: 'Começar nova',
+                  subtitle: 'Descarta o progresso atual e recomeça do zero.',
+                  color: Colors.deepOrange,
+                  onTap: () => Navigator.of(context)
+                      .pop(ContinueVistoriaAction.startNew),
+                ),
+              ],
+            ),
           ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop(
-                  ContinueVistoriaAction.continueLater,
-                );
-              },
-              child: const Text('Continuar mais tarde'),
-            ),
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop(
-                  ContinueVistoriaAction.startNew,
-                );
-              },
-              child: const Text('Começar nova'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.of(context).pop(
-                  ContinueVistoriaAction.continueNow,
-                );
-              },
-              child: const Text('Continuar agora'),
-            ),
-          ],
         );
       },
     );
@@ -717,6 +796,10 @@ class _AiChatPageState extends State<AiChatPage> {
   }
 
   Future<void> _handleSinistroSelected(SinistroVistoriaOption option) async {
+    if (option.isRetificacaoPendente) {
+      await _startRetificacaoFromSinistro(option.sinistroId);
+      return;
+    }
     await _startVistoriaFromSinistro(option.sinistroId);
   }
 
@@ -1550,9 +1633,42 @@ class _InspectionCompletedViewState extends State<_InspectionCompletedView>
     super.dispose();
   }
 
+  // O status que chega aqui é o valor cru do Firestore (vistorias.status) —
+  // nunca deve aparecer pro mecânico sem tradução (ex: "EM_ANALISE_OPERACIONAL").
+  static String _friendlyStatus(String rawStatus) {
+    final normalized = rawStatus.trim().toUpperCase();
+
+    switch (normalized) {
+      case 'EM_ANALISE_OPERACIONAL':
+        return 'Em análise pelo time de operações';
+      case 'FINALIZADA':
+        return 'Vistoria finalizada';
+      case 'REJEITADA':
+        return 'Vistoria rejeitada';
+      case 'CANCELADA':
+        return 'Vistoria cancelada';
+      case 'EXPIRADA':
+        return 'Vistoria expirada';
+      case 'ABANDONADA':
+        return 'Vistoria abandonada';
+    }
+
+    if (normalized.isEmpty) return '';
+
+    // Fallback pra qualquer status novo que a gente ainda não mapeou aqui:
+    // pelo menos humaniza (sem underscore, sem caixa alta) em vez de
+    // mostrar a constante do banco crua.
+    return normalized
+        .split('_')
+        .map((word) => word.isEmpty
+            ? word
+            : '${word[0]}${word.substring(1).toLowerCase()}')
+        .join(' ');
+  }
+
   @override
   Widget build(BuildContext context) {
-    final status = widget.status.trim();
+    final status = _friendlyStatus(widget.status);
 
     return Container(
       width: double.infinity,
@@ -1691,7 +1807,7 @@ class _InspectionCompletedViewState extends State<_InspectionCompletedView>
   }
 }
 
-class _SinistroSelectionView extends StatelessWidget {
+class _SinistroSelectionView extends StatefulWidget {
   final List<SinistroVistoriaOption> options;
   final ValueChanged<SinistroVistoriaOption> onSelect;
 
@@ -1702,10 +1818,126 @@ class _SinistroSelectionView extends StatelessWidget {
   });
 
   @override
+  State<_SinistroSelectionView> createState() =>
+      _SinistroSelectionViewState();
+}
+
+class _SinistroSelectionViewState extends State<_SinistroSelectionView> {
+  final TextEditingController _searchController = TextEditingController();
+  bool _isSearching = false;
+  String _query = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  String _normalize(String value) {
+    return value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+  }
+
+  bool _matchesSearch(SinistroVistoriaOption option) {
+    final query = _normalize(_query);
+    if (query.isEmpty) return true;
+
+    return _normalize(option.placa).contains(query) ||
+        _normalize(option.veiculo).contains(query);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final options =
+        widget.options.where(_matchesSearch).toList(growable: false);
+
     return Column(
       children: [
         const _ChatHeader(),
+        if (widget.options.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 14, 18, 0),
+            child: Row(
+              children: [
+                Expanded(
+                  child: _isSearching
+                      ? TextField(
+                          controller: _searchController,
+                          autofocus: true,
+                          textInputAction: TextInputAction.search,
+                          onChanged: (value) =>
+                              setState(() => _query = value),
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF1F2937),
+                          ),
+                          decoration: InputDecoration(
+                            isDense: true,
+                            hintText: 'Buscar por placa ou modelo',
+                            hintStyle: const TextStyle(
+                              color: Color(0xFF6B7280),
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            filled: true,
+                            fillColor: Colors.white,
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 12,
+                            ),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(14),
+                              borderSide: BorderSide.none,
+                            ),
+                          ),
+                        )
+                      : const Text(
+                          'Selecione o veículo',
+                          style: TextStyle(
+                            color: Color(0xFF414755),
+                            fontWeight: FontWeight.w700,
+                            fontSize: 14,
+                          ),
+                        ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(left: 8),
+                  child: Tooltip(
+                    message: _isSearching ? 'Fechar busca' : 'Buscar placa',
+                    child: Material(
+                      color: _isSearching
+                          ? const Color(0xFF0057C0)
+                          : const Color(0xFFE5F6FF),
+                      borderRadius: BorderRadius.circular(12),
+                      child: InkWell(
+                        onTap: () {
+                          setState(() {
+                            _isSearching = !_isSearching;
+                            if (!_isSearching) {
+                              _searchController.clear();
+                              _query = '';
+                            }
+                          });
+                        },
+                        borderRadius: BorderRadius.circular(12),
+                        child: SizedBox(
+                          width: 36,
+                          height: 36,
+                          child: Icon(
+                            _isSearching ? Icons.close : Icons.search,
+                            color: _isSearching
+                                ? Colors.white
+                                : const Color(0xFF0057C0),
+                            size: 19,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
         Expanded(
           child: Padding(
             padding: const EdgeInsets.all(18),
@@ -1717,10 +1949,12 @@ class _SinistroSelectionView extends StatelessWidget {
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(24),
                       ),
-                      child: const Text(
-                        'Nenhum veículo com check-in disponível para iniciar vistoria.',
+                      child: Text(
+                        widget.options.isEmpty
+                            ? 'Nenhum veículo com check-in disponível para iniciar vistoria.'
+                            : 'Nenhum veículo encontrado para essa busca.',
                         textAlign: TextAlign.center,
-                        style: TextStyle(
+                        style: const TextStyle(
                           color: Color(0xFF414755),
                           fontWeight: FontWeight.w700,
                         ),
@@ -1732,13 +1966,17 @@ class _SinistroSelectionView extends StatelessWidget {
                     separatorBuilder: (_, __) => const SizedBox(height: 12),
                     itemBuilder: (context, index) {
                       final option = options[index];
+                      final isRetificacao = option.isRetificacaoPendente;
+                      final accentColor = isRetificacao
+                          ? Colors.deepOrange
+                          : const Color(0xFF0057C0);
 
                       return Material(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(22),
                         child: InkWell(
                           borderRadius: BorderRadius.circular(22),
-                          onTap: () => onSelect(option),
+                          onTap: () => widget.onSelect(option),
                           child: Padding(
                             padding: const EdgeInsets.all(16),
                             child: Row(
@@ -1747,12 +1985,16 @@ class _SinistroSelectionView extends StatelessWidget {
                                   width: 46,
                                   height: 46,
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFFE5F6FF),
+                                    color: isRetificacao
+                                        ? Colors.deepOrange.withOpacity(.10)
+                                        : const Color(0xFFE5F6FF),
                                     borderRadius: BorderRadius.circular(16),
                                   ),
-                                  child: const Icon(
-                                    Icons.directions_car,
-                                    color: Color(0xFF0057C0),
+                                  child: Icon(
+                                    isRetificacao
+                                        ? Icons.rate_review_outlined
+                                        : Icons.directions_car,
+                                    color: accentColor,
                                   ),
                                 ),
                                 const SizedBox(width: 12),
@@ -1760,18 +2002,47 @@ class _SinistroSelectionView extends StatelessWidget {
                                   child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
-                                      Text(
-                                        option.placa.isEmpty
-                                            ? 'Sem placa'
-                                            : option.placa,
-                                        style: const TextStyle(
-                                          color: Color(0xFF1F2937),
-                                          fontWeight: FontWeight.w900,
-                                          fontSize: 16,
-                                        ),
+                                      Row(
+                                        children: [
+                                          Flexible(
+                                            child: EllipsisText(
+                                              option.placa.isEmpty
+                                                  ? 'Sem placa'
+                                                  : option.placa,
+                                              style: const TextStyle(
+                                                color: Color(0xFF1F2937),
+                                                fontWeight: FontWeight.w900,
+                                                fontSize: 16,
+                                              ),
+                                            ),
+                                          ),
+                                          if (isRetificacao) ...[
+                                            const SizedBox(width: 8),
+                                            Container(
+                                              padding: const EdgeInsets.symmetric(
+                                                horizontal: 8,
+                                                vertical: 2,
+                                              ),
+                                              decoration: BoxDecoration(
+                                                color: Colors.deepOrange
+                                                    .withOpacity(.12),
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                              ),
+                                              child: const Text(
+                                                'RETIFICAÇÃO',
+                                                style: TextStyle(
+                                                  color: Colors.deepOrange,
+                                                  fontWeight: FontWeight.w800,
+                                                  fontSize: 10,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ],
                                       ),
                                       const SizedBox(height: 4),
-                                      Text(
+                                      EllipsisText(
                                         option.veiculo.isEmpty
                                             ? 'Veículo não informado'
                                             : option.veiculo,
@@ -1783,9 +2054,9 @@ class _SinistroSelectionView extends StatelessWidget {
                                     ],
                                   ),
                                 ),
-                                const Icon(
+                                Icon(
                                   Icons.chevron_right,
-                                  color: Color(0xFF0057C0),
+                                  color: accentColor,
                                 ),
                               ],
                             ),
@@ -1797,6 +2068,120 @@ class _SinistroSelectionView extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _VistoriaInfoRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+
+  const _VistoriaInfoRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 18, color: const Color(0xFF0057C0)),
+        const SizedBox(width: 10),
+        Text(
+          '$label: ',
+          style: const TextStyle(
+            color: Color(0xFF6B7280),
+            fontWeight: FontWeight.w700,
+            fontSize: 13,
+          ),
+        ),
+        Expanded(
+          child: EllipsisText(
+            value,
+            style: const TextStyle(
+              color: Color(0xFF1F2937),
+              fontWeight: FontWeight.w800,
+              fontSize: 13,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _VistoriaActionTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final Color color;
+  final bool filled;
+  final VoidCallback onTap;
+
+  const _VistoriaActionTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.color,
+    required this.onTap,
+    this.filled = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: filled ? color : color.withOpacity(.07),
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: Row(
+            children: [
+              Icon(
+                icon,
+                color: filled ? Colors.white : color,
+                size: 24,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        color: filled ? Colors.white : const Color(0xFF1F2937),
+                        fontWeight: FontWeight.w800,
+                        fontSize: 14,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        color: filled
+                            ? Colors.white.withOpacity(.85)
+                            : const Color(0xFF6B7280),
+                        fontWeight: FontWeight.w600,
+                        fontSize: 11.5,
+                        height: 1.2,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: filled ? Colors.white : color,
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1947,12 +2332,10 @@ class _ChatHeader extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 2),
-                Text(
+                EllipsisText(
                   subtitle.isEmpty
                       ? 'Assistente de vistoria inteligente'
                       : subtitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: Color(0xFF6B7280),
                     fontSize: 12,

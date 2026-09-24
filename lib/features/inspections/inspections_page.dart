@@ -12,6 +12,7 @@ import 'package:shimmer/shimmer.dart';
 import '../../services/session_context_service.dart';
 import '../../services/sinistro_presence_service.dart';
 import '../../services/vistoria_chat_session_service.dart';
+import '../../shared/widgets/ellipsis_text.dart';
 import '../metrics/metrics_page.dart';
 import 'data/inspection_case.dart';
 import 'data/inspection_filter.dart';
@@ -1440,14 +1441,12 @@ class _HistoryHeaderCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 3),
-                Text(
+                EllipsisText(
                   selected == null
                       ? 'Toque em uma vistoria para abrir o preview.'
                       : selectedDate == null
                           ? 'Selecionada: ${selected!.idvistoria}'
                           : 'Selecionada: ${selected!.idvistoria} • ${_formatDateTime(selectedDate)}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: Color(0xFF6B7280),
                     fontSize: 11,
@@ -1524,10 +1523,8 @@ class _HistoryVistoriaCard extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
+                    EllipsisText(
                       vistoria.idvistoria,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                       style: GoogleFonts.spaceGrotesk(
                         fontSize: 16,
                         fontWeight: FontWeight.bold,
@@ -1535,12 +1532,10 @@ class _HistoryVistoriaCard extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 4),
-                    Text(
+                    EllipsisText(
                       date == null
                           ? '${vistoria.statusLabel} • ${vistoria.tipoLabel}'
                           : '${vistoria.statusLabel} • ${vistoria.tipoLabel} • ${_formatDateTime(date)}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Color(0xFF414755),
                         fontSize: 11,
@@ -1548,10 +1543,8 @@ class _HistoryVistoriaCard extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 3),
-                    Text(
+                    EllipsisText(
                       'Responsável: ${vistoria.responsibleLabel}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Color(0xFF6B7280),
                         fontSize: 10,
@@ -1623,10 +1616,8 @@ class _TinyMetric extends StatelessWidget {
             Icon(icon, size: 12, color: const Color(0xFF0057C0)),
             const SizedBox(width: 4),
             Flexible(
-              child: Text(
+              child: EllipsisText(
                 value,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   color: Color(0xFF0057C0),
                   fontSize: 10,
@@ -1726,12 +1717,11 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
             icon: vistoria.hasLaudo
                 ? Icons.description_outlined
                 : Icons.pending_actions_outlined,
-            child: Text(
+            child: EllipsisText(
               laudoText.isEmpty
                   ? 'Laudo ainda não registrado para esta vistoria.'
                   : laudoText,
               maxLines: 5,
-              overflow: TextOverflow.ellipsis,
               style: const TextStyle(
                 color: Color(0xFF414755),
                 fontSize: 12,
@@ -1745,10 +1735,9 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
             _PreviewBlock(
               title: 'Observações',
               icon: Icons.notes_outlined,
-              child: Text(
+              child: EllipsisText(
                 vistoria.observacoes,
                 maxLines: 4,
-                overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   color: Color(0xFF414755),
                   fontSize: 12,
@@ -1994,10 +1983,8 @@ class _MiniChatPreview extends StatelessWidget {
                                         fontWeight: FontWeight.bold,
                                       ),
                                     ),
-                                    Text(
+                                    EllipsisText(
                                       '${vistoria.idvistoria} • ${messages.length} mensagens',
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
                                       style: const TextStyle(
                                         color: Color(0xFF6B7280),
                                         fontSize: 11,
@@ -2181,10 +2168,9 @@ class _MiniChatBubble extends StatelessWidget {
                     const SizedBox(width: 6),
                   ],
                   Flexible(
-                    child: Text(
+                    child: EllipsisText(
                       text,
                       maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: isAi ? const Color(0xFF1F2937) : Colors.white,
                         fontSize: 11,
@@ -2687,10 +2673,8 @@ class _HistoryAudioTileState extends State<_HistoryAudioTile> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
+                    EllipsisText(
                       widget.label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Color(0xFF414755),
                         fontSize: 12,
@@ -2698,10 +2682,8 @@ class _HistoryAudioTileState extends State<_HistoryAudioTile> {
                       ),
                     ),
                     const SizedBox(height: 2),
-                    Text(
+                    EllipsisText(
                       canPlay ? widget.subtitle : 'Sem arquivo reproduzível',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Color(0xFF6B7280),
                         fontSize: 10,
@@ -2864,10 +2846,8 @@ class _ChatPreviewMessage extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(
+                  child: EllipsisText(
                     isAudio ? 'Áudio enviado' : 'Foto enviada',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                       color: Color(0xFF414755),
                       fontSize: 12,
@@ -2879,10 +2859,9 @@ class _ChatPreviewMessage extends StatelessWidget {
               ],
             )
           else
-            Text(
+            EllipsisText(
               message.text,
               maxLines: 3,
-              overflow: TextOverflow.ellipsis,
               style: const TextStyle(
                 color: Color(0xFF414755),
                 fontSize: 12,
@@ -3235,10 +3214,8 @@ class _ScopeSegment extends StatelessWidget {
               ),
               const SizedBox(width: 6),
               Flexible(
-                child: Text(
+                child: EllipsisText(
                   label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: isSelected ? Colors.white : const Color(0xFF0057C0),
                     fontWeight: FontWeight.w800,
@@ -3319,10 +3296,8 @@ class _InspectionFilterCard extends StatelessWidget {
                 ],
               ),
               const Spacer(),
-              Text(
+              EllipsisText(
                 filter.label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   color: isSelected ? Colors.white : const Color(0xFF1F2937),
                   fontSize: 12,
@@ -3330,10 +3305,8 @@ class _InspectionFilterCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 2),
-              Text(
+              EllipsisText(
                 filter.description,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   color: isSelected
                       ? Colors.white.withOpacity(.82)
@@ -3648,10 +3621,8 @@ class _InspectionCardContent extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
+                        EllipsisText(
                           inspection.vehicle.model,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
                           style: GoogleFonts.spaceGrotesk(
                             fontSize: 17,
                             fontWeight: FontWeight.bold,
@@ -3659,10 +3630,8 @@ class _InspectionCardContent extends StatelessWidget {
                           ),
                         ),
                         const SizedBox(height: 4),
-                        Text(
+                        EllipsisText(
                           '${inspection.vehicle.plate} • ${inspection.claimType}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                             color: Color(0xFF414755),
                             fontWeight: FontWeight.w600,
@@ -3743,10 +3712,8 @@ class _InspectionCardContent extends StatelessWidget {
                   ),
                   const SizedBox(width: 6),
                   Expanded(
-                    child: Text(
+                    child: EllipsisText(
                       inspection.insurer,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Color(0xFF414755),
                         fontWeight: FontWeight.w600,
@@ -3940,12 +3907,10 @@ class SinistroViewersBar extends StatelessWidget {
               _ViewerAvatarStack(viewers: viewers),
               const SizedBox(width: 10),
               Expanded(
-                child: Text(
+                child: EllipsisText(
                   viewers.length == 1
                       ? '${viewers.first.displayName} está visualizando'
                       : '${viewers.length} pessoas estão visualizando',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: Color(0xFF414755),
                     fontSize: 13,
@@ -4003,12 +3968,10 @@ class _SummaryAssignmentBanner extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 2),
-                Text(
+                EllipsisText(
                   inspection.assignedToName.isEmpty
                       ? 'Responsável não informado'
                       : inspection.assignedToName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: Color(0xFF414755),
                     fontSize: 12,
@@ -4140,12 +4103,10 @@ class _AssignedToBadge extends StatelessWidget {
               ),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(
+            child: EllipsisText(
               isMine
                   ? 'Vinculada a você'
                   : 'Vinculada a ${inspection.assignedToName}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: isMine ? const Color(0xFF0057C0) : const Color(0xFF8A5700),
                 fontSize: 12,
@@ -4188,12 +4149,10 @@ class _ActiveViewersBadge extends StatelessWidget {
           _ViewerAvatarStack(viewers: viewers.take(3).toList(), small: true),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(
+            child: EllipsisText(
               viewers.length == 1
                   ? '${viewers.first.displayName} está olhando'
                   : '${viewers.length} pessoas estão olhando',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
               style: const TextStyle(
                 color: Color(0xFF7A4A00),
                 fontSize: 12,
@@ -4336,10 +4295,8 @@ class _LinkedVistoriaSummaryCard extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 3),
-                    Text(
+                    EllipsisText(
                       vistoria.idvistoria,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Color(0xFF414755),
                         fontSize: 12,
@@ -4397,12 +4354,10 @@ class _LinkedVistoriaSummaryCard extends StatelessWidget {
               ),
               const SizedBox(width: 7),
               Expanded(
-                child: Text(
+                child: EllipsisText(
                   vistoria.hasLaudo
                       ? 'Laudo registrado na vistoria'
                       : 'Laudo ainda não registrado',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: Color(0xFF414755),
                     fontSize: 12,
@@ -4455,10 +4410,8 @@ class _LinkedVistoriaPage extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
+                    EllipsisText(
                       vistoria.idvistoria,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                       style: GoogleFonts.spaceGrotesk(
                         fontSize: 17,
                         fontWeight: FontWeight.bold,
@@ -4525,12 +4478,10 @@ class _LinkedVistoriaPage extends StatelessWidget {
               ),
               const SizedBox(width: 6),
               Expanded(
-                child: Text(
+                child: EllipsisText(
                   vistoria.hasLaudo
                       ? 'Laudo registrado na vistoria'
                       : 'Laudo ainda não registrado',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: Color(0xFF414755),
                     fontSize: 12,
@@ -4762,10 +4713,8 @@ class _AudioPreviewPill extends StatelessWidget {
           const Icon(Icons.graphic_eq, size: 12, color: Color(0xFF0057C0)),
           const SizedBox(width: 4),
           Expanded(
-            child: Text(
+            child: EllipsisText(
               preview.label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
               style: const TextStyle(
                 color: Color(0xFF414755),
                 fontSize: 10,
@@ -4976,10 +4925,8 @@ class _SummaryHeroCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
+                EllipsisText(
                   inspection.vehicle.model,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                   style: GoogleFonts.spaceGrotesk(
                     color: Colors.white,
                     fontSize: 20,
