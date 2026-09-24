@@ -8,8 +8,10 @@
 # appbundle --release` por baixo dos panos, então cai no mesmo problema.
 #
 # Setup necessário (uma vez só):
-#   1. `shorebird login:ci` na sua máquina — gera um token.
-#   2. Cadastra esse token como secret SHOREBIRD_TOKEN neste repositório
+#   1. Cria uma API key em https://console.shorebird.dev (`shorebird
+#      login:ci` foi descontinuado — a Shorebird trocou pra API key direto
+#      no console).
+#   2. Cadastra essa chave como secret SHOREBIRD_TOKEN neste repositório
 #      (Settings → Secrets and variables → Actions).
 #   3. Os secrets ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD já
 #      existem (usados pelo build-apk.yml) — o patch reaproveita os mesmos,
