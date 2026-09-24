@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<title>Laudo Técnico — {{protocolo}}</title>
+<style>
+  /* Títulos 12pt, conteúdo 10pt. Margem de página só na faixa do cabeçalho
+     (numeração), aplicada via Puppeteer (page.pdf margin + headerTemplate) —
+     ver services/laudo-service/lib/pdf.js. O restante do espaçamento é feito
+     aqui mesmo, pelo padding do .page. */
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
+    color: #1a2733;
+    font-size: 10pt;
+    line-height: 1.5;
+  }
+  .page { padding: 28px 40px 40px; }
+
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 3px solid #0057C0;
+    padding-bottom: 14px;
+    margin-bottom: 22px;
+  }
+  .header .brand { display: flex; align-items: center; gap: 12px; }
+  .header .brand img { width: 40px; height: 40px; border-radius: 8px; }
+  .header .brand .title { font-size: 16pt; font-weight: 700; color: #0057C0; }
+  .header .brand .subtitle { font-size: 9pt; color: #667685; }
+  .header .meta { text-align: right; font-size: 9pt; color: #667685; }
+  .header .meta .protocolo { font-size: 12pt; font-weight: 700; color: #1a2733; }
+
+  /* Evita título "órfão" no fim da página com o conteúdo dele pulando pra
+     próxima — Chromium respeita break-after/page-break-after em impressão. */
+  h2.section-title {
+    font-size: 12pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #0057C0;
+    border-bottom: 1px solid #dbe4ee;
+    padding-bottom: 6px;
+    margin: 22px 0 10px;
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  /* Blocos pequenos que não devem ser cortados ao meio por uma quebra de página. */
+  .summary-box,
+  .severity-block,
+  .field,
+  .foto-card,
+  table.danos tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 24px;
+  }
+  .field .label { color: #667685; font-size: 8pt; text-transform: uppercase; letter-spacing: 0.03em; line-height: 1.2; }
+  .field .value { font-size: 10pt; font-weight: 600; line-height: 1.3; }
+
+  .summary-box {
+    background: #f2f7fd;
+    border-left: 4px solid #0057C0;
+    padding: 12px 14px;
+    border-radius: 6px;
+    font-size: 10pt;
+  }
+
+  .severity-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 11pt;
+    color: #fff;
+    background: {{severityColor classificacaoContran}};
+  }
+  .severity-justificativa { margin-top: 8px; font-size: 10pt; color: #3a4855; }
+
+  table.danos { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  table.danos th {
+    text-align: left;
+    font-size: 8pt;
+    text-transform: uppercase;
+    color: #667685;
+    border-bottom: 1px solid #dbe4ee;
+    padding: 6px 8px;
+  }
+  table.danos td {
+    padding: 8px;
+    font-size: 10pt;
+    line-height: 1.35;
+    border-bottom: 1px solid #eef2f6;
+    vertical-align: top;
+  }
+  .gravidade-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 8pt;
+    font-weight: 700;
+    color: #fff;
+  }
+  .gravidade-leve { background: #2e9e5b; }
+  .gravidade-moderada { background: #d97706; }
+  .gravidade-grave { background: #d9364a; }
+
+  .fotos-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-top: 8px;
+  }
+  .foto-card { border: 1px solid #dbe4ee; border-radius: 8px; overflow: hidden; }
+  .foto-card img { width: 100%; height: 130px; object-fit: cover; display: block; }
+  .foto-card .caption { padding: 4px 8px; font-size: 8pt; color: #667685; }
+
+  .transcricao { margin-top: 6px; }
+  .transcricao .linha { padding: 5px 0; border-bottom: 1px dashed #eef2f6; font-size: 10pt; }
+  .transcricao .autor { font-weight: 700; color: #0057C0; }
+  .transcricao .autor.ia { color: #7a4fd1; }
+
+  .footer {
+    margin-top: 30px;
+    padding-top: 12px;
+    border-top: 1px solid #dbe4ee;
+    font-size: 8pt;
+    line-height: 1.4;
+    color: #8a97a3;
+    text-align: center;
+  }
+  .footer strong { color: #667685; }
+</style>
+</head>
+<body>
+  <div class="page">
+    <div class="header">
+      <div class="brand">
+        <img src="{{logoDataUri}}" alt="Argos" />
+        <div>
+          <div class="title">Argos</div>
+          <div class="subtitle">Laudo Técnico de Vistoria — gerado por IA</div>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="protocolo">{{protocolo}}</div>
+        <div>Emitido em {{dataEmissao}}</div>
+      </div>
+    </div>
+
+    <h2 class="section-title">Resumo</h2>
+    <div class="summary-box">{{resumoExecutivo}}</div>
+
+    <h2 class="section-title">Classificação de Severidade</h2>
+    <div class="severity-block">
+      <span class="severity-badge">{{classificacaoContran}}</span>
+      <div class="severity-justificativa">{{justificativaClassificacao}}</div>
+    </div>
+
+    <h2 class="section-title">Dados do Sinistro</h2>
+    <div class="grid-2">
+      <div class="field"><div class="label">Seguradora</div><div class="value">{{seguradoraNome}}</div></div>
+      <div class="field"><div class="label">Tipo de sinistro</div><div class="value">{{tipoSinistro}}</div></div>
+      <div class="field"><div class="label">Cliente</div><div class="value">{{clienteNome}}</div></div>
+      <div class="field"><div class="label">Documento</div><div class="value">{{clienteDocumento}}</div></div>
+      <div class="field"><div class="label">Veículo</div><div class="value">{{veiculoModelo}} ({{veiculoAno}})</div></div>
+      <div class="field"><div class="label">Placa / Cor</div><div class="value">{{veiculoPlaca}} — {{veiculoCor}}</div></div>
+    </div>
+
+    <h2 class="section-title">Dados da Vistoria</h2>
+    <div class="grid-2">
+      <div class="field"><div class="label">Oficina credenciada</div><div class="value">{{oficinaNome}}</div></div>
+      <div class="field"><div class="label">Localização</div><div class="value">{{oficinaCidade}}</div></div>
+      <div class="field"><div class="label">Mecânico responsável</div><div class="value">{{mecanicoNome}}</div></div>
+      <div class="field"><div class="label">Contato</div><div class="value">{{mecanicoEmail}}</div></div>
+      <div class="field"><div class="label">Check-in</div><div class="value">{{checkInEm}}</div></div>
+      <div class="field"><div class="label">Finalizada em</div><div class="value">{{finalizadoEm}}</div></div>
+    </div>
+
+    <h2 class="section-title">Danos Identificados</h2>
+    <table class="danos">
+      <thead>
+        <tr><th>Local</th><th>Descrição</th><th>Gravidade</th><th>Foto</th></tr>
+      </thead>
+      <tbody>
+        {{#each danosIdentificados}}
+        <tr>
+          <td>{{localizacao}}</td>
+          <td>{{descricao}}</td>
+          <td><span class="gravidade-pill gravidade-{{gravidade}}">{{gravidade}}</span></td>
+          <td>{{#if fotoReferencia}}Foto {{fotoReferencia}}{{else}}—{{/if}}</td>
+        </tr>
+        {{/each}}
+      </tbody>
+    </table>
+
+    {{#if observacoesAdicionais}}
+    <h2 class="section-title">Observações Adicionais</h2>
+    <div class="summary-box">{{observacoesAdicionais}}</div>
+    {{/if}}
+
+    <h2 class="section-title">Recomendação</h2>
+    <div class="summary-box">{{recomendacoes}}</div>
+
+    <h2 class="section-title">Evidências Fotográficas ({{fotos.length}})</h2>
+    <div class="fotos-grid">
+      {{#each fotos}}
+      <div class="foto-card">
+        <img src="{{url}}" alt="Foto {{numero}}" />
+        <div class="caption">Foto {{numero}}</div>
+      </div>
+      {{/each}}
+    </div>
+
+    <h2 class="section-title">Transcrição da Vistoria</h2>
+    <div class="transcricao">
+      {{#each transcricao}}
+      <div class="linha"><span class="autor{{#if (eq autor "IA")}} ia{{/if}}">{{autor}}:</span> {{texto}}</div>
+      {{/each}}
+    </div>
+
+    <div class="footer">
+      <strong>Nível de confiança da IA: {{nivelConfianca}}.</strong>
+      Este laudo foi gerado automaticamente pelo agente de IA do Argos a partir das evidências
+      coletadas em campo. Está sujeito à revisão e aprovação de um analista humano antes de
+      qualquer decisão sobre o sinistro.
+    </div>
+  </div>
+</body>
+</html>

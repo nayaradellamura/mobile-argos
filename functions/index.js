@@ -5,6 +5,7 @@ const { defineString } = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const { GoogleAuth } = require("google-auth-library");
 const { VertexAI } = require("@google-cloud/vertexai");
+const { CloudTasksClient } = require("@google-cloud/tasks");
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -21,6 +22,18 @@ if (!admin.apps.length) {
 // (--update-env-vars ARGOS_ADK_SERVICE_URL=...), nao como secret: nao e
 // segredo, e o rollback fica sendo so trocar a revisao.
 const ARGOS_ADK_SERVICE_URL = defineString("ARGOS_ADK_SERVICE_URL", { default: "" });
+
+// URL do Cloud Run do gerador de laudo (services/laudo-service). Ex:
+// https://laudo-service-xxxx-uc.a.run.app/gerar-laudo
+const LAUDO_SERVICE_URL = defineString("LAUDO_SERVICE_URL", { default: "" });
+// Fila do Cloud Tasks usada para enfileirar a geracao (retry automatico se o
+// Cloud Run estiver frio/indisponivel). Criada uma vez com:
+//   gcloud tasks queues create laudo-tecnico --location=us-central1
+const LAUDO_TASKS_QUEUE = defineString("LAUDO_TASKS_QUEUE", { default: "laudo-tecnico" });
+const LAUDO_TASKS_LOCATION = defineString("LAUDO_TASKS_LOCATION", { default: "us-central1" });
+// Service account que o Cloud Tasks usa para autenticar (OIDC) a chamada no
+// Cloud Run — precisa ter o papel roles/run.invoker no servico laudo-service.
+const LAUDO_INVOKER_SERVICE_ACCOUNT = defineString("LAUDO_INVOKER_SERVICE_ACCOUNT", { default: "" });
 
 const FIREBASE_PROJECT_ID =
   process.env.GCLOUD_PROJECT ||
@@ -269,6 +282,105 @@ exports.notifySinistroChanges = onDocumentWritten(
       successCount: result.successCount,
       failureCount: result.failureCount,
     });
+  }
+);
+
+// Dispara a geracao do laudo tecnico assim que a vistoria entra em analise
+// operacional (mecanico terminou de coletar fotos/audio/relato — ver
+// EM_ANALISE_OPERACIONAL em vistoria_chat_session_service.dart no app mobile).
+// So enfileira (Cloud Tasks -> laudo-service no Cloud Run); a geracao em si
+// roda la, nao aqui, porque envolve Puppeteer/Chromium e Gemini multimodal —
+// coisa pesada demais pro runtime de Cloud Functions.
+let cachedTasksClient = null;
+
+function getTasksClient() {
+  if (!cachedTasksClient) cachedTasksClient = new CloudTasksClient();
+  return cachedTasksClient;
+}
+
+async function enqueueLaudoGeneration({ sinistroId, vistoriaId }) {
+  const serviceUrl = LAUDO_SERVICE_URL.value();
+  if (!serviceUrl) {
+    console.warn(
+      "LAUDO_SERVICE_URL nao configurada — pulando geracao de laudo para",
+      { sinistroId, vistoriaId }
+    );
+    return;
+  }
+
+  const client = getTasksClient();
+  const queuePath = client.queuePath(
+    FIREBASE_PROJECT_ID,
+    LAUDO_TASKS_LOCATION.value(),
+    LAUDO_TASKS_QUEUE.value()
+  );
+
+  const payload = { sinistroId, vistoriaId };
+  const invokerServiceAccount = LAUDO_INVOKER_SERVICE_ACCOUNT.value();
+
+  const task = {
+    httpRequest: {
+      httpMethod: "POST",
+      url: serviceUrl,
+      headers: { "Content-Type": "application/json" },
+      body: Buffer.from(JSON.stringify(payload)).toString("base64"),
+      ...(invokerServiceAccount
+        ? { oidcToken: { serviceAccountEmail: invokerServiceAccount } }
+        : {}),
+    },
+    // Nome deterministico: se o mesmo sinistro/vistoria disparar duas vezes
+    // (ex: retry do proprio Firestore trigger), o Cloud Tasks rejeita a
+    // segunda com ALREADY_EXISTS em vez de gerar o laudo duplicado.
+    name: `${queuePath}/tasks/laudo-${sinistroId}-${vistoriaId}`,
+  };
+
+  try {
+    await client.createTask({ parent: queuePath, task });
+    console.log("Laudo enfileirado:", { sinistroId, vistoriaId });
+  } catch (err) {
+    if (err?.code === 6 /* ALREADY_EXISTS */) {
+      console.log("Laudo ja enfileirado anteriormente, ignorando:", {
+        sinistroId,
+        vistoriaId,
+      });
+      return;
+    }
+    console.error("Falha ao enfileirar geracao de laudo:", err);
+    throw err;
+  }
+}
+
+exports.onVistoriaEnterAnaliseOperacional = onDocumentWritten(
+  {
+    document: "sinistro/{sinistroId}",
+    region: "us-central1",
+  },
+  async (event) => {
+    if (!event.data) return;
+
+    const afterExists = event.data.after.exists;
+    if (!afterExists) return;
+
+    const before = event.data.before.exists ? event.data.before.data() : null;
+    const after = event.data.after.data();
+    if (!after) return;
+
+    const beforeStatus = String(before?.vistoriaAtualStatus || "").toUpperCase();
+    const afterStatus = String(after.vistoriaAtualStatus || "").toUpperCase();
+
+    if (beforeStatus === afterStatus || afterStatus !== "EM_ANALISE_OPERACIONAL") {
+      return;
+    }
+
+    const sinistroId = event.params.sinistroId;
+    const vistoriaId = String(after.vistoriaAtualId || "").trim();
+
+    if (!vistoriaId) {
+      console.warn("Sinistro entrou em analise operacional sem vistoriaAtualId:", sinistroId);
+      return;
+    }
+
+    await enqueueLaudoGeneration({ sinistroId, vistoriaId });
   }
 );
 
@@ -1544,21 +1656,38 @@ async function sendTextToArgosAgent({
 
   await ensureAdkSession({ baseUrl, uid, sessionId, state, chatmessages, currentAgent });
 
-  const res = await adkRequest({
-    baseUrl,
-    method: "POST",
-    path: "/run",
-    body: {
-      appName: ADK_APP_NAME,
-      userId: uid,
+  const corpoRun = {
+    appName: ADK_APP_NAME,
+    userId: uid,
+    sessionId,
+    newMessage: { role: "user", parts: [{ text }] },
+    // Reforça o id a cada turno: se a sessão foi recriada por outro
+    // caminho, o agente continua sabendo de qual vistoria se trata.
+    stateDelta: { id_vistoria: inspectionId },
+    streaming: false,
+  };
+
+  let res = await adkRequest({ baseUrl, method: "POST", path: "/run", body: corpoRun });
+
+  // A sessão do ADK vive na MEMÓRIA da instância do Cloud Run, e o serviço
+  // roda com min-instances=0. Entre o ensureAdkSession acima e este /run a
+  // instância pode ter sido reciclada — ou a requisição pode cair noutra
+  // instância —, e aí volta 404 "Session not found". Verificar antes não
+  // basta: é uma corrida. Quando isso acontece, recria a sessão (já com o
+  // histórico do Firestore) e repete UMA vez.
+  if (res.status === 404) {
+    console.warn("Sessão ADK sumiu entre a verificação e o /run; recriando e repetindo.", { sessionId });
+
+    await createAdkSession({
+      baseUrl,
+      uid,
       sessionId,
-      newMessage: { role: "user", parts: [{ text }] },
-      // Reforça o id a cada turno: se a sessão foi recriada por outro
-      // caminho, o agente continua sabendo de qual vistoria se trata.
-      stateDelta: { id_vistoria: inspectionId },
-      streaming: false,
-    },
-  });
+      state,
+      events: chatMessagesToAdkEvents(chatmessages, currentAgent),
+    });
+
+    res = await adkRequest({ baseUrl, method: "POST", path: "/run", body: corpoRun });
+  }
 
   if (res.status !== 200) {
     throw new Error(`ADK /run ${res.status}: ${JSON.stringify(res.data)}`);

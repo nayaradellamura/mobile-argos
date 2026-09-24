@@ -1,0 +1,20 @@
+{
+  "name": "laudo-service",
+  "description": "Gera o laudo tecnico em PDF de uma vistoria (Argos) usando Gemini + Puppeteer, e salva no Firebase Storage.",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "engines": {
+    "node": "22"
+  },
+  "dependencies": {
+    "@google-cloud/vertexai": "^1.12.0",
+    "express": "^4.21.2",
+    "firebase-admin": "^12.7.0",
+    "handlebars": "^4.7.8",
+    "puppeteer": "^23.11.1"
+  }
+}
