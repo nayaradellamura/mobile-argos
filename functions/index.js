@@ -245,6 +245,8 @@ exports.notifySinistroChanges = onDocumentWritten(
       return;
     }
 
+    console.log("Notificação gerada:", { sinistroId, ...notification });
+
     const credenciadoSnap = await db.collection("credenciados").doc(credenciadoId).get();
 
     if (!credenciadoSnap.exists) {
