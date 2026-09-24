@@ -700,6 +700,34 @@ function normalizeArgosAudioError(error) {
   };
 }
 
+// O texto da notificacao nao pode mostrar a constante crua do banco (ex:
+// "EM_ANALISE_OPERACIONAL") pro mecanico — mapeia pros status conhecidos, e
+// humaniza (sem underscore, sem caixa alta) qualquer status novo que ainda
+// nao esteja mapeado aqui, em vez de vazar a constante crua.
+const FRIENDLY_STATUS_LABELS = {
+  PENDENTE: "Pendente",
+  EM_ANDAMENTO: "Em andamento",
+  FINALIZADO: "Finalizado",
+  EM_ANALISE_OPERACIONAL: "Em análise pelo time de operações",
+  FINALIZADA: "Finalizada",
+  REJEITADA: "Rejeitada",
+  CANCELADA: "Cancelada",
+  EXPIRADA: "Expirada",
+  ABANDONADA: "Abandonada",
+};
+
+function friendlyStatusLabel(rawStatus) {
+  const normalized = String(rawStatus || "").trim().toUpperCase();
+  if (!normalized) return "";
+
+  if (FRIENDLY_STATUS_LABELS[normalized]) return FRIENDLY_STATUS_LABELS[normalized];
+
+  return normalized
+    .split("_")
+    .map((word) => (word ? word[0] + word.slice(1).toLowerCase() : word))
+    .join(" ");
+}
+
 async function buildSinistroNotification({ db, sinistroId, before, after, isCreate }) {
   const protocol = String(after.protocol || sinistroId);
   const vehicle = after.veiculoSnapshot || after.vehicleSnapshot || {};
@@ -746,11 +774,36 @@ async function buildSinistroNotification({ db, sinistroId, before, after, isCrea
     };
   }
 
+  // Mesma lógica da rejeição: cancelamento também só muda vistoriaAtualStatus,
+  // não sinistro.status — sem esse caso, cairia no genérico e o mecânico não
+  // saberia que a vistoria foi cancelada (nem o motivo).
+  if (beforeVistoriaStatus !== "CANCELADA" && afterVistoriaStatus === "CANCELADA") {
+    const vistoriaId = String(after.vistoriaAtualId || "").trim();
+    let motivoCancelamento = "";
+
+    if (vistoriaId) {
+      try {
+        const vistoriaSnap = await db.collection("vistorias").doc(vistoriaId).get();
+        motivoCancelamento = String(vistoriaSnap.data()?.motivoCancelamento || "").trim();
+      } catch (err) {
+        console.error("Falha ao buscar motivoCancelamento pra notificação:", err);
+      }
+    }
+
+    return {
+      type: "vistoria_cancelada",
+      title: "Vistoria cancelada",
+      body: motivoCancelamento
+        ? `${protocol}: ${motivoCancelamento}`
+        : `${protocol} foi cancelada pelo analista.`,
+    };
+  }
+
   if (String(before?.status || "") !== String(after.status || "")) {
     return {
       type: "status_changed",
       title: "Status da vistoria atualizado",
-      body: `${protocol} mudou para ${after.status || "novo status"}`,
+      body: `${protocol} mudou para ${friendlyStatusLabel(after.status) || "novo status"}`,
     };
   }
 
