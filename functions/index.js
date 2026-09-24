@@ -207,6 +207,14 @@ exports.notifySinistroChanges = onDocumentWritten(
   async (event) => {
     if (!event.data) return;
 
+    // Eventarc entrega com garantia "at-least-once" — o mesmo evento pode
+    // chegar mais de uma vez (raro, mas aconteceu em teste). Sem isso, uma
+    // unica mudanca real vira 2-3 notificacoes duplicadas pro mecanico.
+    if (await isDuplicateEvent(event.id)) {
+      console.log("Evento duplicado, ignorando:", event.id);
+      return;
+    }
+
     const beforeExists = event.data.before.exists;
     const afterExists = event.data.after.exists;
     if (!afterExists) return;
@@ -801,6 +809,20 @@ async function buildSinistroNotification({ db, sinistroId, before, after, isCrea
     };
   }
 
+  // Aprovacao (finalizar/route.ts) muda sinistro.status pra FINALIZADO —
+  // merece uma mensagem propria e positiva, em vez de cair no aviso
+  // generico de "status mudou" que rejeicao/cancelamento tambem usariam.
+  const beforeStatus = String(before?.status || "").toUpperCase();
+  const afterStatus = String(after.status || "").toUpperCase();
+
+  if (beforeStatus !== "FINALIZADO" && afterStatus === "FINALIZADO") {
+    return {
+      type: "vistoria_aprovada",
+      title: "Vistoria aprovada!",
+      body: `${protocol} foi aprovada pelo analista. O reparo já pode seguir.`,
+    };
+  }
+
   if (String(before?.status || "") !== String(after.status || "")) {
     return {
       type: "status_changed",
@@ -849,6 +871,32 @@ async function buildSinistroNotification({ db, sinistroId, before, after, isCrea
     title: "Vistoria atualizada",
     body: `${protocol} recebeu uma nova atualização`,
   };
+}
+
+// Guarda o id de cada evento processado por um tempo curto — se o Eventarc
+// reentregar o mesmo evento (at-least-once, acontece), a segunda tentativa
+// acha o doc ja criado e desiste antes de mandar push duplicado. .create()
+// falha se o doc ja existe, o que da a checagem atomica sem precisar de
+// transacao.
+async function isDuplicateEvent(eventId) {
+  if (!eventId) return false;
+
+  const db = admin.firestore();
+  const ref = db.collection("_processedEvents").doc(eventId);
+
+  try {
+    await ref.create({
+      processedAt: admin.firestore.FieldValue.serverTimestamp(),
+      expireAt: admin.firestore.Timestamp.fromMillis(Date.now() + 24 * 60 * 60 * 1000),
+    });
+    return false;
+  } catch (err) {
+    if (err.code === 6 || String(err.message || "").includes("ALREADY_EXISTS")) {
+      return true;
+    }
+    console.error("Falha ao checar evento duplicado (seguindo mesmo assim):", err);
+    return false;
+  }
 }
 
 function shouldIgnoreSinistroNotificationUpdate(before, after) {
