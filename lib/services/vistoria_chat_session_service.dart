@@ -933,13 +933,15 @@ class VistoriaChatSessionService {
     var remaining = hours;
 
     while (remaining > 0) {
-      final nextHour = current.add(const Duration(hours: 1));
-
-      if (_isBusinessDay(nextHour)) {
+      // Conta a hora que está prestes a decorrer (a que começa em `current`),
+      // não a hora seguinte — checar a hora seguinte descartava a última
+      // hora de sexta (23h-24h), porque o timestamp final cai bem na virada
+      // pra sábado, mesmo essa hora inteira pertencendo à sexta.
+      if (_isBusinessDay(current)) {
         remaining -= 1;
       }
 
-      current = _normalizeBusinessStart(nextHour);
+      current = _normalizeBusinessStart(current.add(const Duration(hours: 1)));
     }
 
     return current;

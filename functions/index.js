@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { defineString } = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const { GoogleAuth } = require("google-auth-library");
@@ -1717,13 +1718,15 @@ function addBusinessHours(startDate, hours) {
   let remaining = hours;
 
   while (remaining > 0) {
-    const nextHour = new Date(current.getTime() + 60 * 60 * 1000);
-
-    if (isBusinessDay(nextHour)) {
+    // Conta a hora que está prestes a decorrer (a que começa em `current`),
+    // não a hora seguinte — checar a hora seguinte descartava a última hora
+    // de sexta (23h-24h), porque o timestamp final cai bem na virada pra
+    // sábado, mesmo essa hora inteira pertencendo à sexta.
+    if (isBusinessDay(current)) {
       remaining -= 1;
     }
 
-    current = normalizeBusinessStart(nextHour);
+    current = normalizeBusinessStart(new Date(current.getTime() + 60 * 60 * 1000));
   }
 
   return current;
@@ -1784,3 +1787,68 @@ async function saveAgentStateToVistoria({ idvistoria, currentAgent }) {
     { merge: true }
   );
 }
+
+// Expira sozinha as vistorias que passaram das 24h úteis sem sair de
+// EM_ANDAMENTO — antes disso só acontecia quando o próprio mecânico tentava
+// reabrir aquela vistoria específica (findOpenVistoria, no app), então uma
+// vistoria abandonada podia ficar "viva" indefinidamente se ninguém nunca
+// mais voltasse nela. Replica exatamente o que o app já faz em
+// _expireVistoria/_syncSinistroVistoriaStatus (vistoria_chat_session_service.dart),
+// só que rodando sozinha, sem depender de ninguém abrir o app.
+//
+// Não cria vistoria nova aqui — isso o app já faz sozinho
+// (createOrResumeFromSinistro) na próxima vez que o mecânico tentar retomar
+// aquele sinistro.
+exports.expireStaleVistorias = onSchedule(
+  { schedule: "every 60 minutes", region: "us-central1", timeZone: "America/Sao_Paulo" },
+  async () => {
+    const db = admin.firestore();
+    const now = admin.firestore.Timestamp.now();
+
+    const snap = await db
+      .collection("vistorias")
+      .where("status", "==", "EM_ANDAMENTO")
+      .where("agentBusinessExpiresAt", "<=", now)
+      .get();
+
+    if (snap.empty) {
+      console.log("expireStaleVistorias: nenhuma vistoria vencida.");
+      return;
+    }
+
+    console.log(`expireStaleVistorias: ${snap.size} vistoria(s) vencida(s), expirando.`);
+
+    for (const doc of snap.docs) {
+      const data = doc.data();
+      const sinistroId = String(data.sinistroId || "").trim();
+
+      const batch = db.batch();
+
+      batch.set(
+        doc.ref,
+        {
+          status: "EXPIRADA",
+          expiredAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      if (sinistroId) {
+        batch.set(
+          db.collection("sinistro").doc(sinistroId),
+          {
+            vistoriaAtualId: String(data.idvistoria || doc.id),
+            vistoriaAtualStatus: "EXPIRADA",
+            vistoriaAtualTipo: String(data.tipoVistoria || "ORIGINAL"),
+            ultimaVistoriaAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
+
+      await batch.commit();
+      console.log("expireStaleVistorias: expirada", { vistoriaId: doc.id, sinistroId });
+    }
+  }
+);
