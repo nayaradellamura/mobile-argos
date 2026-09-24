@@ -289,6 +289,9 @@ class InspectionCase {
   final String vistoriaAtualTipo;
   final String vistoriaAtualOrigemId;
   final String retificacaoAtualId;
+  final String orcamentoAprovadoStatus;
+  final String orcamentoAprovadoUrl;
+  final double orcamentoAprovadoValorTotal;
 
   const InspectionCase({
     required this.id,
@@ -315,6 +318,9 @@ class InspectionCase {
     this.vistoriaAtualTipo = '',
     this.vistoriaAtualOrigemId = '',
     this.retificacaoAtualId = '',
+    this.orcamentoAprovadoStatus = '',
+    this.orcamentoAprovadoUrl = '',
+    this.orcamentoAprovadoValorTotal = 0,
   });
 
   factory InspectionCase.fromFirestore(
@@ -331,6 +337,8 @@ class InspectionCase {
         parseFirestoreDateTime(data['scheduledDate']) ??
         parseFirestoreDateTime(data['entryDate']) ??
         DateTime.now();
+
+    final orcamentoAprovado = asStringMap(data['orcamentoAprovado']);
 
     return InspectionCase(
       id: doc.id,
@@ -360,8 +368,14 @@ class InspectionCase {
       vistoriaAtualTipo: stringValue(data['vistoriaAtualTipo']),
       vistoriaAtualOrigemId: stringValue(data['vistoriaAtualOrigemId']),
       retificacaoAtualId: stringValue(data['retificacaoAtualId']),
+      orcamentoAprovadoStatus: stringValue(orcamentoAprovado['status']),
+      orcamentoAprovadoUrl: stringValue(orcamentoAprovado['url']),
+      orcamentoAprovadoValorTotal:
+          (orcamentoAprovado['valorTotal'] as num?)?.toDouble() ?? 0,
     );
   }
+
+  bool get hasOrcamentoAprovado => orcamentoAprovadoStatus == 'pronto';
 
   bool get hasAssignedUser => assignedToUid.trim().isNotEmpty;
 
@@ -381,31 +395,38 @@ class InspectionCase {
   bool get isCompletedCategory {
     final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
 
+    // "finalizada" no STATUS da vistoria é o valor real gravado quando a
+    // aprovação acontece — não é um estágio intermediário de análise.
     return status == InspectionStatus.approved ||
         status == InspectionStatus.finalized ||
         vistoriaStatus.contains('aprovada') ||
         vistoriaStatus.contains('aprovado') ||
-        vistoriaStatus.contains('approved');
+        vistoriaStatus.contains('approved') ||
+        vistoriaStatus.contains('finalizada') ||
+        vistoriaStatus.contains('finalizado') ||
+        vistoriaStatus.contains('finalized');
   }
 
   bool get isAiAnalysisCategory {
+    // Concluída/revisão/cancelada têm prioridade: uma vistoria já aprovada
+    // não deve continuar caindo no filtro "Em análise" só porque o campo
+    // vistoriaAtualStatus (denormalizado, escrito por outro sistema) ainda
+    // guarda um texto antigo como "em_analise".
+    if (isCompletedCategory || isRevisionCategory || isCancelledCategory) {
+      return false;
+    }
+
     final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
 
     return status == InspectionStatus.submitted ||
-        (vistoriaStatus.isNotEmpty &&
-            !vistoriaStatus.contains('em_andamento') &&
-            !vistoriaStatus.contains('andamento') &&
-            !isCompletedCategory &&
-            !isRevisionCategory &&
-            !isCancelledCategory) ||
         vistoriaStatus.contains('analise') ||
         vistoriaStatus.contains('análise') ||
-        vistoriaStatus.contains('finalizada') ||
-        vistoriaStatus.contains('finalizado') ||
-        vistoriaStatus.contains('finalized') ||
         vistoriaStatus.contains('em_analise_operacional') ||
         vistoriaStatus.contains('review') ||
-        vistoriaStatus.contains('submitted');
+        vistoriaStatus.contains('submitted') ||
+        (vistoriaStatus.isNotEmpty &&
+            !vistoriaStatus.contains('em_andamento') &&
+            !vistoriaStatus.contains('andamento'));
   }
 
   bool get isRevisionCategory {
@@ -507,6 +528,9 @@ class InspectionCase {
       vistoriaAtualTipo: vistoriaAtualTipo ?? this.vistoriaAtualTipo,
       vistoriaAtualOrigemId: vistoriaAtualOrigemId ?? this.vistoriaAtualOrigemId,
       retificacaoAtualId: retificacaoAtualId ?? this.retificacaoAtualId,
+      orcamentoAprovadoStatus: orcamentoAprovadoStatus,
+      orcamentoAprovadoUrl: orcamentoAprovadoUrl,
+      orcamentoAprovadoValorTotal: orcamentoAprovadoValorTotal,
     );
   }
 }

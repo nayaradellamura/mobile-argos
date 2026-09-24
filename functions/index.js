@@ -36,6 +36,11 @@ const LAUDO_TASKS_LOCATION = defineString("LAUDO_TASKS_LOCATION", { default: "us
 // Cloud Run — precisa ter o papel roles/run.invoker no servico laudo-service.
 const LAUDO_INVOKER_SERVICE_ACCOUNT = defineString("LAUDO_INVOKER_SERVICE_ACCOUNT", { default: "" });
 
+// Orcamento aprovado: mesmo servico Cloud Run do laudo tecnico
+// (services/laudo-service), rota diferente (/gerar-orcamento-aprovado) —
+// so muda a URL. Reaproveita a mesma fila/service account do laudo.
+const ORCAMENTO_SERVICE_URL = defineString("ORCAMENTO_SERVICE_URL", { default: "" });
+
 const FIREBASE_PROJECT_ID =
   process.env.GCLOUD_PROJECT ||
   process.env.GCP_PROJECT ||
@@ -299,13 +304,9 @@ function getTasksClient() {
   return cachedTasksClient;
 }
 
-async function enqueueLaudoGeneration({ sinistroId, vistoriaId }) {
-  const serviceUrl = LAUDO_SERVICE_URL.value();
+async function enqueuePdfGeneration({ serviceUrl, taskKind, sinistroId, vistoriaId }) {
   if (!serviceUrl) {
-    console.warn(
-      "LAUDO_SERVICE_URL nao configurada — pulando geracao de laudo para",
-      { sinistroId, vistoriaId }
-    );
+    console.warn(`${taskKind}: URL nao configurada — pulando`, { sinistroId, vistoriaId });
     return;
   }
 
@@ -331,24 +332,39 @@ async function enqueueLaudoGeneration({ sinistroId, vistoriaId }) {
     },
     // Nome deterministico: se o mesmo sinistro/vistoria disparar duas vezes
     // (ex: retry do proprio Firestore trigger), o Cloud Tasks rejeita a
-    // segunda com ALREADY_EXISTS em vez de gerar o laudo duplicado.
-    name: `${queuePath}/tasks/laudo-${sinistroId}-${vistoriaId}`,
+    // segunda com ALREADY_EXISTS em vez de gerar o documento duplicado.
+    name: `${queuePath}/tasks/${taskKind}-${sinistroId}-${vistoriaId}`,
   };
 
   try {
     await client.createTask({ parent: queuePath, task });
-    console.log("Laudo enfileirado:", { sinistroId, vistoriaId });
+    console.log(`${taskKind} enfileirado:`, { sinistroId, vistoriaId });
   } catch (err) {
     if (err?.code === 6 /* ALREADY_EXISTS */) {
-      console.log("Laudo ja enfileirado anteriormente, ignorando:", {
-        sinistroId,
-        vistoriaId,
-      });
+      console.log(`${taskKind} ja enfileirado anteriormente, ignorando:`, { sinistroId, vistoriaId });
       return;
     }
-    console.error("Falha ao enfileirar geracao de laudo:", err);
+    console.error(`Falha ao enfileirar ${taskKind}:`, err);
     throw err;
   }
+}
+
+function enqueueLaudoGeneration({ sinistroId, vistoriaId }) {
+  return enqueuePdfGeneration({
+    serviceUrl: LAUDO_SERVICE_URL.value(),
+    taskKind: "laudo",
+    sinistroId,
+    vistoriaId,
+  });
+}
+
+function enqueueOrcamentoAprovado({ sinistroId, vistoriaId }) {
+  return enqueuePdfGeneration({
+    serviceUrl: ORCAMENTO_SERVICE_URL.value(),
+    taskKind: "orcamento",
+    sinistroId,
+    vistoriaId,
+  });
 }
 
 exports.onVistoriaEnterAnaliseOperacional = onDocumentWritten(
@@ -382,6 +398,46 @@ exports.onVistoriaEnterAnaliseOperacional = onDocumentWritten(
     }
 
     await enqueueLaudoGeneration({ sinistroId, vistoriaId });
+  }
+);
+
+// Dispara a geracao do PDF de orcamento aprovado assim que o sinistro e
+// aprovado pelo analista (sinistro.status vira FINALIZADO — ver
+// /api/sinistros/[id]/finalizar no web-argos e markAsFinalizada no app
+// mobile, os dois caminhos que podem fazer essa transicao). Reusa
+// vistoriaAtualId, que a rota de finalizar nao mexe (so ela ja estava
+// certa desde que a vistoria entrou em analise operacional).
+exports.onSinistroFinalizado = onDocumentWritten(
+  {
+    document: "sinistro/{sinistroId}",
+    region: "us-central1",
+  },
+  async (event) => {
+    if (!event.data) return;
+
+    const afterExists = event.data.after.exists;
+    if (!afterExists) return;
+
+    const before = event.data.before.exists ? event.data.before.data() : null;
+    const after = event.data.after.data();
+    if (!after) return;
+
+    const beforeStatus = String(before?.status || "").toUpperCase();
+    const afterStatus = String(after.status || "").toUpperCase();
+
+    if (beforeStatus === afterStatus || afterStatus !== "FINALIZADO") {
+      return;
+    }
+
+    const sinistroId = event.params.sinistroId;
+    const vistoriaId = String(after.vistoriaAtualId || "").trim();
+
+    if (!vistoriaId) {
+      console.warn("Sinistro finalizado sem vistoriaAtualId:", sinistroId);
+      return;
+    }
+
+    await enqueueOrcamentoAprovado({ sinistroId, vistoriaId });
   }
 );
 

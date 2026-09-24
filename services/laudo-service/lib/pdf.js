@@ -4,6 +4,7 @@ const Handlebars = require("handlebars");
 const puppeteer = require("puppeteer");
 
 const TEMPLATE_PATH = path.join(__dirname, "..", "templates", "laudo.html");
+const ORCAMENTO_TEMPLATE_PATH = path.join(__dirname, "..", "templates", "orcamento-aprovado.html");
 const LOGO_PATH = path.join(__dirname, "..", "assets", "argos_icon.png");
 
 const SEVERITY_COLORS = {
@@ -20,15 +21,19 @@ Handlebars.registerHelper("severityColor", (classificacao) => {
 
 Handlebars.registerHelper("eq", (a, b) => a === b);
 
-let cachedTemplate = null;
+Handlebars.registerHelper("currency", (value) =>
+  (Number(value) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+);
+
+const cachedTemplates = new Map();
 let cachedLogoDataUri = null;
 
-function getTemplate() {
-  if (!cachedTemplate) {
-    const source = fs.readFileSync(TEMPLATE_PATH, "utf8");
-    cachedTemplate = Handlebars.compile(source);
+function getTemplate(templatePath) {
+  if (!cachedTemplates.has(templatePath)) {
+    const source = fs.readFileSync(templatePath, "utf8");
+    cachedTemplates.set(templatePath, Handlebars.compile(source));
   }
-  return cachedTemplate;
+  return cachedTemplates.get(templatePath);
 }
 
 function getLogoDataUri() {
@@ -39,27 +44,48 @@ function getLogoDataUri() {
   return cachedLogoDataUri;
 }
 
+function dataEmissaoAgora() {
+  return new Date().toLocaleString("pt-BR", {
+    timeZone: "America/Sao_Paulo",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 /**
  * Renderiza o HTML (contexto da vistoria + achados do Gemini) e converte pra
  * PDF via Chromium headless. Retorna um Buffer pronto pra subir no Storage.
  */
 async function renderLaudoPdf({ context, achados }) {
-  const template = getTemplate();
-
-  const html = template({
+  const html = getTemplate(TEMPLATE_PATH)({
     ...context,
     ...achados,
-    dataEmissao: new Date().toLocaleString("pt-BR", {
-      timeZone: "America/Sao_Paulo",
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    }),
+    dataEmissao: dataEmissaoAgora(),
     logoDataUri: getLogoDataUri(),
   });
 
+  return renderHtmlToPdf(html);
+}
+
+/**
+ * Mesma ideia, mas pro orçamento aprovado — sem achados de IA, só os dados
+ * do sinistro + o orçamento que o mecânico já rascunhou em campo
+ * (context.orcamentoCampo, ver lib/data.js).
+ */
+async function renderOrcamentoAprovadoPdf({ context }) {
+  const html = getTemplate(ORCAMENTO_TEMPLATE_PATH)({
+    ...context,
+    dataEmissao: dataEmissaoAgora(),
+    logoDataUri: getLogoDataUri(),
+  });
+
+  return renderHtmlToPdf(html);
+}
+
+async function renderHtmlToPdf(html) {
   const browser = await puppeteer.launch({
     headless: true,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
@@ -92,4 +118,4 @@ async function renderLaudoPdf({ context, achados }) {
   }
 }
 
-module.exports = { renderLaudoPdf };
+module.exports = { renderLaudoPdf, renderOrcamentoAprovadoPdf };

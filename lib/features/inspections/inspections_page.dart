@@ -16,6 +16,7 @@ import 'data/inspection_case.dart';
 import 'data/inspection_filter.dart';
 import 'data/inspection_parsing_utils.dart';
 import 'data/linked_vistoria_info.dart';
+import 'pdf_viewer_page.dart';
 
 class InspectionsPage extends StatefulWidget {
   final VoidCallback onOpenInspection;
@@ -910,6 +911,10 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                               if (inspection.hasAssignedUser) ...[
                                 const SizedBox(height: 14),
                                 _SummaryAssignmentBanner(inspection: inspection),
+                              ],
+                              if (inspection.hasOrcamentoAprovado) ...[
+                                const SizedBox(height: 14),
+                                _OrcamentoAprovadoCard(inspection: inspection),
                               ],
                               const SizedBox(height: 14),
                               _SectionCard(
@@ -3682,6 +3687,89 @@ class _InspectionCardContent extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _OrcamentoAprovadoCard extends StatelessWidget {
+  final InspectionCase inspection;
+
+  const _OrcamentoAprovadoCard({required this.inspection});
+
+  String _formatCurrency(double value) {
+    final fixed = value.toStringAsFixed(2);
+    final parts = fixed.split('.');
+    final intPart = parts[0].replaceAllMapped(
+      RegExp(r'\B(?=(\d{3})+(?!\d))'),
+      (match) => '.',
+    );
+    return 'R\$ $intPart,${parts[1]}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.green.withOpacity(.06),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: Colors.green.withOpacity(.18)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.check_circle, size: 20, color: Colors.green.shade700),
+              const SizedBox(width: 8),
+              Text(
+                'Orçamento Aprovado',
+                style: GoogleFonts.spaceGrotesk(
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.green.shade800,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            _formatCurrency(inspection.orcamentoAprovadoValorTotal),
+            style: GoogleFonts.spaceGrotesk(
+              fontSize: 22,
+              fontWeight: FontWeight.w800,
+              color: Colors.green.shade800,
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => PdfViewerPage(
+                      url: inspection.orcamentoAprovadoUrl,
+                      title: 'Orçamento Aprovado',
+                    ),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.picture_as_pdf_outlined, size: 18),
+              label: const Text('Ver orçamento aprovado'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green.shade700,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

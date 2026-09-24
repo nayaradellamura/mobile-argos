@@ -18,7 +18,11 @@ function getModel() {
     model: MODEL,
     generationConfig: {
       temperature: 0.2,
-      maxOutputTokens: 4096,
+      // 4096 estava curto demais pra vistorias com muitos danos — o Gemini
+      // cortava a resposta no meio de uma string, gerando JSON inválido
+      // (ver caso ARG-2026-0086: colisão traseira com bastante dano
+      // descrito). Dobrado com folga.
+      maxOutputTokens: 8192,
       responseMimeType: "application/json",
     },
   });
