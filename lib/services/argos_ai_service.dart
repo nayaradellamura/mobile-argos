@@ -19,6 +19,13 @@ class ArgosAiService {
   Future<String> sendMessage({
     required String text,
     required String inspectionId,
+    // Preenchidos quando a vistoria é uma retificação (VistoriaSession.isRetificacao)
+    // — o backend (sendArgosMessage, functions/index.js) já sabe usar isso
+    // pra avisar o agente que essa conversa é uma correção, não uma vistoria
+    // nova, e o que precisa ser corrigido.
+    bool isRetificacao = false,
+    String? ajustesNecessarios,
+    String? contextoVistoriaAnterior,
   }) async {
     final cleanText = text.trim();
 
@@ -34,6 +41,11 @@ class ArgosAiService {
     final result = await callable.call<Map<String, dynamic>>({
       'text': cleanText,
       'inspectionId': inspectionId,
+      if (isRetificacao) ...{
+        'modo': 'retificacao',
+        'ajustesNecessarios': ajustesNecessarios ?? '',
+        'contextoVistoriaAnterior': contextoVistoriaAnterior ?? '',
+      },
     });
 
     final data = result.data;
@@ -52,6 +64,9 @@ class ArgosAiService {
   Future<String> sendBackgroundMessage({
     required String text,
     required String inspectionId,
+    bool isRetificacao = false,
+    String? ajustesNecessarios,
+    String? contextoVistoriaAnterior,
   }) async {
     final cleanText = text.trim();
 
@@ -65,6 +80,11 @@ class ArgosAiService {
     final result = await callable.call<Map<String, dynamic>>({
       'text': cleanText,
       'inspectionId': inspectionId,
+      if (isRetificacao) ...{
+        'modo': 'retificacao',
+        'ajustesNecessarios': ajustesNecessarios ?? '',
+        'contextoVistoriaAnterior': contextoVistoriaAnterior ?? '',
+      },
     });
 
     return result.data['reply']?.toString() ?? '';

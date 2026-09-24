@@ -451,6 +451,45 @@ class VistoriaChatSessionService {
     );
   }
 
+  /// Busca a vistoria que o sinistro aponta como atual (sinistro.vistoriaAtualId)
+  /// — usado pra pegar a vistoria REJEITADA como base de uma retificação, já
+  /// que ela não está mais em EM_ANDAMENTO (findOpenVistoria não a acha).
+  Future<VistoriaSession?> getVistoriaAtualDoSinistro({
+    required String sinistroId,
+  }) async {
+    final sinistroDoc = await _sinistros.doc(sinistroId).get();
+    final vistoriaAtualId = _str(sinistroDoc.data()?['vistoriaAtualId']);
+
+    if (vistoriaAtualId.isEmpty) return null;
+
+    final vistoriaDoc = await _vistorias.doc(vistoriaAtualId).get();
+    if (!vistoriaDoc.exists) return null;
+
+    return VistoriaSession.fromFirestore(vistoriaDoc);
+  }
+
+  /// Ponto de entrada da retificação: acha a vistoria rejeitada do sinistro e
+  /// cria a nova vistoria de correção a partir dela. Separado de
+  /// createOrResumeFromSinistro de propósito — não deve ser possível cair
+  /// aqui sem ter uma vistoria rejeitada de verdade por trás.
+  Future<VistoriaSession> startRetificacaoFromSinistro({
+    required String sinistroId,
+  }) async {
+    final original = await getVistoriaAtualDoSinistro(sinistroId: sinistroId);
+
+    if (original == null) {
+      throw Exception(
+        'Não foi encontrada uma vistoria rejeitada para este sinistro.',
+      );
+    }
+
+    return createRetificacaoFromVistoria(
+      original: original,
+      ajustesNecessarios: original.ajustesNecessarios,
+      contextoVistoriaAnterior: original.contextoVistoriaAnterior,
+    );
+  }
+
   Future<void> discardVistoria({
     required String vistoriaDocId,
     bool hardDelete = true,
@@ -1015,6 +1054,7 @@ class VistoriaSession {
   final String vistoriaOrigemId;
   final String ajustesNecessarios;
   final String contextoVistoriaAnterior;
+  final String motivoRejeicao;
   final List<Map<String, dynamic>> chatMessages;
   final DateTime? agentLastTurnAt;
   final DateTime? agentBusinessExpiresAt;
@@ -1032,6 +1072,7 @@ class VistoriaSession {
     required this.vistoriaOrigemId,
     required this.ajustesNecessarios,
     required this.contextoVistoriaAnterior,
+    this.motivoRejeicao = '',
     required this.chatMessages,
     this.agentLastTurnAt,
     this.agentBusinessExpiresAt,
@@ -1095,6 +1136,9 @@ class VistoriaSession {
       ),
       contextoVistoriaAnterior: VistoriaChatSessionService._str(
         data['contextoVistoriaAnterior'],
+      ),
+      motivoRejeicao: VistoriaChatSessionService._str(
+        data['motivoRejeicao'],
       ),
       chatMessages: messages,
       agentLastTurnAt: VistoriaChatSessionService._dateValueOrNull(

@@ -230,7 +230,10 @@ exports.notifySinistroChanges = onDocumentWritten(
       return;
     }
 
-    const notification = buildSinistroNotification({
+    const db = admin.firestore();
+
+    const notification = await buildSinistroNotification({
+      db,
       sinistroId,
       before,
       after,
@@ -242,7 +245,6 @@ exports.notifySinistroChanges = onDocumentWritten(
       return;
     }
 
-    const db = admin.firestore();
     const credenciadoSnap = await db.collection("credenciados").doc(credenciadoId).get();
 
     if (!credenciadoSnap.exists) {
@@ -698,7 +700,7 @@ function normalizeArgosAudioError(error) {
   };
 }
 
-function buildSinistroNotification({ sinistroId, before, after, isCreate }) {
+async function buildSinistroNotification({ db, sinistroId, before, after, isCreate }) {
   const protocol = String(after.protocol || sinistroId);
   const vehicle = after.veiculoSnapshot || after.vehicleSnapshot || {};
   const plate = String(vehicle.placa || after.plate || "");
@@ -712,6 +714,35 @@ function buildSinistroNotification({ sinistroId, before, after, isCreate }) {
       type: "sinistro_created",
       title: "Nova vistoria atribuída",
       body: `${protocol} · ${vehicleLabel || claimType}`,
+    };
+  }
+
+  // Rejeição não muda sinistro.status (fica EM_ANDAMENTO de propósito — a
+  // oficina ainda vai retificar) — só vistoriaAtualStatus. Sem esse caso
+  // específico, cairia no aviso genérico "Vistoria atualizada" e o mecânico
+  // nunca saberia que precisa corrigir algo, nem o motivo.
+  const beforeVistoriaStatus = String(before?.vistoriaAtualStatus || "").toUpperCase();
+  const afterVistoriaStatus = String(after.vistoriaAtualStatus || "").toUpperCase();
+
+  if (beforeVistoriaStatus !== "REJEITADA" && afterVistoriaStatus === "REJEITADA") {
+    const vistoriaId = String(after.vistoriaAtualId || "").trim();
+    let ajustesNecessarios = "";
+
+    if (vistoriaId) {
+      try {
+        const vistoriaSnap = await db.collection("vistorias").doc(vistoriaId).get();
+        ajustesNecessarios = String(vistoriaSnap.data()?.ajustesNecessarios || "").trim();
+      } catch (err) {
+        console.error("Falha ao buscar ajustesNecessarios pra notificação:", err);
+      }
+    }
+
+    return {
+      type: "vistoria_rejeitada",
+      title: "Vistoria rejeitada — retificação necessária",
+      body: ajustesNecessarios
+        ? `${protocol}: ${ajustesNecessarios}`
+        : `${protocol} foi rejeitada pelo analista. Abra o app pra ver o motivo.`,
     };
   }
 

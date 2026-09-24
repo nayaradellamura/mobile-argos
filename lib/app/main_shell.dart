@@ -43,6 +43,11 @@ class _MainShellState extends State<MainShell> {
   String? selectedSinistroIdForChat;
   String? notificationSinistroIdToOpen;
 
+  /// true quando o chat foi aberto pelo botão "Iniciar Retificação" — o
+  /// AiChatPage usa isso pra pular o fluxo normal (findOpenVistoria) e ir
+  /// direto pra startRetificacaoFromSinistro.
+  bool selectedRetificacaoForChat = false;
+
   String get _emailKey => (widget.user.email ?? '').trim().toLowerCase();
 
   @override
@@ -279,6 +284,30 @@ class _MainShellState extends State<MainShell> {
 
     setState(() {
       selectedSinistroIdForChat = sinistroId;
+      selectedRetificacaoForChat = false;
+      selectedIndex = 1;
+    });
+  }
+
+  void _openRetificacaoForSinistro(String sinistroId) {
+    if (profileCompletionRequired) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Finalize seu cadastro para continuar.'),
+          backgroundColor: Color(0xFF0057C0),
+        ),
+      );
+
+      setState(() {
+        selectedIndex = 2;
+      });
+
+      return;
+    }
+
+    setState(() {
+      selectedSinistroIdForChat = sinistroId;
+      selectedRetificacaoForChat = true;
       selectedIndex = 1;
     });
   }
@@ -287,6 +316,7 @@ class _MainShellState extends State<MainShell> {
   String? _cachedPagesSinistroKey;
   String? _cachedPagesNotificationSinistroId;
   bool? _cachedPagesProfileCompletionRequired;
+  bool? _cachedPagesRetificacao;
 
   /// Cacheado: o IndexedStack mantém as 3 páginas montadas o tempo todo, e
   /// InspectionsPage sozinha é uma árvore enorme. Sem esse cache, qualquer
@@ -299,26 +329,32 @@ class _MainShellState extends State<MainShell> {
     final needsRebuild = _cachedPages == null ||
         _cachedPagesSinistroKey != selectedSinistroIdForChat ||
         _cachedPagesNotificationSinistroId != notificationSinistroIdToOpen ||
-        _cachedPagesProfileCompletionRequired != profileCompletionRequired;
+        _cachedPagesProfileCompletionRequired != profileCompletionRequired ||
+        _cachedPagesRetificacao != selectedRetificacaoForChat;
 
     if (!needsRebuild) return _cachedPages!;
 
     _cachedPagesSinistroKey = selectedSinistroIdForChat;
     _cachedPagesNotificationSinistroId = notificationSinistroIdToOpen;
     _cachedPagesProfileCompletionRequired = profileCompletionRequired;
+    _cachedPagesRetificacao = selectedRetificacaoForChat;
 
     _cachedPages = [
       InspectionsPage(
         onOpenInspection: _openGenericChat,
         onOpenInspectionById: _openChatForSinistro,
+        onStartRetificacaoById: _openRetificacaoForSinistro,
         notificationSinistroIdToOpen: notificationSinistroIdToOpen,
       ),
 
       /// O ValueKey força o Flutter a reconstruir o chat quando outro
-      /// sinistro for selecionado.
+      /// sinistro (ou o modo retificação) for selecionado.
       AiChatPage(
-        key: ValueKey(selectedSinistroIdForChat ?? 'chat_sem_sinistro'),
+        key: ValueKey(
+          '${selectedSinistroIdForChat ?? 'chat_sem_sinistro'}_${selectedRetificacaoForChat ? 'retificacao' : 'normal'}',
+        ),
         sinistroId: selectedSinistroIdForChat,
+        startRetificacao: selectedRetificacaoForChat,
       ),
 
       ProfilePage(

@@ -11,6 +11,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:shimmer/shimmer.dart';
 import '../../services/session_context_service.dart';
 import '../../services/sinistro_presence_service.dart';
+import '../../services/vistoria_chat_session_service.dart';
 import '../metrics/metrics_page.dart';
 import 'data/inspection_case.dart';
 import 'data/inspection_filter.dart';
@@ -29,10 +30,16 @@ class InspectionsPage extends StatefulWidget {
   /// onOpenInspectionById: (sinistroId) => ...
   final ValueChanged<String>? onOpenInspectionById;
 
+  /// Abre o chat já em modo retificação (startRetificacaoFromSinistro), em
+  /// vez do fluxo normal de retomar/criar vistoria — usado pelo botão
+  /// "Iniciar Retificação" que só aparece pra vistorias rejeitadas.
+  final ValueChanged<String>? onStartRetificacaoById;
+
   const InspectionsPage({
     super.key,
     required this.onOpenInspection,
     this.onOpenInspectionById,
+    this.onStartRetificacaoById,
     this.notificationSinistroIdToOpen,
   });
 
@@ -386,6 +393,9 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
               widget.onOpenInspection();
             }
           },
+          onStartRetificacao: widget.onStartRetificacaoById == null
+              ? null
+              : () => widget.onStartRetificacaoById!(inspection.id),
         ),
       ),
     );
@@ -652,10 +662,16 @@ class InspectionSummaryPage extends StatefulWidget {
   final InspectionCase inspection;
   final VoidCallback onOpenChat;
 
+  /// null quando o MainShell ainda não sabe abrir retificação (idem
+  /// onOpenInspectionById) — nesse caso o botão de retificação some, em vez
+  /// de quebrar.
+  final VoidCallback? onStartRetificacao;
+
   const InspectionSummaryPage({
     super.key,
     required this.inspection,
     required this.onOpenChat,
+    this.onStartRetificacao,
   });
 
   @override
@@ -669,6 +685,12 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
   bool _hasShownAssignmentChangeNotice = false;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _inspectionSubscription;
 
+  // Motivo/ajustes da rejeição — vivem no documento da vistoria, não no
+  // sinistro (que é de onde InspectionCase vem), por isso busca separada.
+  bool _isLoadingRejeicao = false;
+  String? _motivoRejeicao;
+  String? _ajustesNecessariosRejeicao;
+
   @override
   void initState() {
     super.initState();
@@ -677,6 +699,30 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     inspection = widget.inspection;
     _watchInspectionRealtime();
     _startPresence();
+    _loadRejeicaoDetailsIfNeeded();
+  }
+
+  Future<void> _loadRejeicaoDetailsIfNeeded() async {
+    if (!inspection.isRevisionCategory) return;
+
+    setState(() => _isLoadingRejeicao = true);
+
+    try {
+      final vistoria = await VistoriaChatSessionService.instance
+          .getVistoriaAtualDoSinistro(sinistroId: inspection.id);
+
+      if (!mounted) return;
+
+      setState(() {
+        _motivoRejeicao = vistoria?.motivoRejeicao;
+        _ajustesNecessariosRejeicao = vistoria?.ajustesNecessarios;
+        _isLoadingRejeicao = false;
+      });
+    } catch (e) {
+      debugPrint('Erro ao buscar motivo da rejeição: $e');
+      if (!mounted) return;
+      setState(() => _isLoadingRejeicao = false);
+    }
   }
 
   @override
@@ -868,6 +914,19 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     widget.onOpenChat();
   }
 
+  void _goToRetificacao() {
+    if (!inspection.isAssignedToCurrentUser) {
+      _showBlockedByResponsibleSnack();
+      return;
+    }
+
+    final onStartRetificacao = widget.onStartRetificacao;
+    if (onStartRetificacao == null) return;
+
+    Navigator.of(context).pop();
+    onStartRetificacao();
+  }
+
   @override
   Widget build(BuildContext context) {
     final hasCheckIn = inspection.checkInAt != null;
@@ -876,11 +935,19 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     final canCheckIn =
         !isAssignedToAnother && (!hasCheckIn || !inspection.hasAssignedUser);
     final isHumanAnalysis = inspection.isAiAnalysisCategory;
+    // Vistoria rejeitada não usa o botão de chat comum — ele criaria uma
+    // vistoria nova do zero (findOpenVistoria não acha REJEITADA, cai no
+    // fluxo de vistoria original). O caminho certo é o botão de
+    // retificação abaixo.
     final canOpenChat = hasCheckIn &&
         isAssignedToMe &&
         !isHumanAnalysis &&
         !inspection.isCompletedCategory &&
-        !inspection.isCancelledCategory;
+        !inspection.isCancelledCategory &&
+        !inspection.isRevisionCategory;
+    final canStartRetificacao = isAssignedToMe &&
+        inspection.isRevisionCategory &&
+        widget.onStartRetificacao != null;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF3FBFF),
@@ -911,6 +978,14 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                               if (inspection.hasAssignedUser) ...[
                                 const SizedBox(height: 14),
                                 _SummaryAssignmentBanner(inspection: inspection),
+                              ],
+                              if (inspection.isRevisionCategory) ...[
+                                const SizedBox(height: 14),
+                                _RejeicaoBanner(
+                                  isLoading: _isLoadingRejeicao,
+                                  motivo: _motivoRejeicao,
+                                  ajustesNecessarios: _ajustesNecessariosRejeicao,
+                                ),
                               ],
                               if (inspection.hasOrcamentoAprovado) ...[
                                 const SizedBox(height: 14),
@@ -1102,6 +1177,24 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                   ),
                                 ),
                               ),
+                              if (canStartRetificacao) ...[
+                                const SizedBox(height: 10),
+                                SizedBox(
+                                  height: 54,
+                                  child: ElevatedButton.icon(
+                                    onPressed: _goToRetificacao,
+                                    icon: const Icon(Icons.rate_review_outlined),
+                                    label: const Text('Iniciar Retificação'),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.deepOrange,
+                                      foregroundColor: Colors.white,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(18),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ],
                           ),
                           _InspectionHistoryTab(inspection: inspection),
@@ -3928,6 +4021,93 @@ class _SummaryAssignmentBanner extends StatelessWidget {
           Icon(
             isMine ? Icons.verified_user_outlined : Icons.lock_outline,
             color: isMine ? const Color(0xFF0057C0) : Colors.orange,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RejeicaoBanner extends StatelessWidget {
+  final bool isLoading;
+  final String? motivo;
+  final String? ajustesNecessarios;
+
+  const _RejeicaoBanner({
+    required this.isLoading,
+    required this.motivo,
+    required this.ajustesNecessarios,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final ajustes = (ajustesNecessarios ?? '').trim();
+    final motivoText = (motivo ?? '').trim();
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.deepOrange.withOpacity(.08),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.deepOrange.withOpacity(.25)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.rate_review_outlined, color: Colors.deepOrange),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Vistoria rejeitada — retificação necessária',
+                  style: GoogleFonts.spaceGrotesk(
+                    color: Colors.deepOrange,
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                if (isLoading)
+                  const Text(
+                    'Carregando motivo...',
+                    style: TextStyle(
+                      color: Color(0xFF414755),
+                      fontSize: 12,
+                    ),
+                  )
+                else if (ajustes.isEmpty && motivoText.isEmpty)
+                  const Text(
+                    'O analista rejeitou esta vistoria. Abra a retificação para ver os detalhes.',
+                    style: TextStyle(
+                      color: Color(0xFF414755),
+                      fontSize: 12,
+                    ),
+                  )
+                else ...[
+                  if (motivoText.isNotEmpty)
+                    Text(
+                      motivoText,
+                      style: const TextStyle(
+                        color: Color(0xFF414755),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  if (ajustes.isNotEmpty) ...[
+                    if (motivoText.isNotEmpty) const SizedBox(height: 4),
+                    Text(
+                      ajustes,
+                      style: const TextStyle(
+                        color: Color(0xFF414755),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ],
+              ],
+            ),
           ),
         ],
       ),

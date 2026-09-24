@@ -70,7 +70,18 @@ class AiChatPage extends StatefulWidget {
   /// para vincular mensagens, fotos e áudios ao sinistro correto.
   final String? sinistroId;
 
-  const AiChatPage({super.key, this.sinistroId});
+  /// Quando true, ao abrir esta página ela não tenta retomar/criar uma
+  /// vistoria normal — ela busca a vistoria REJEITADA do sinistro e inicia
+  /// uma retificação a partir dela (ver
+  /// VistoriaChatSessionService.startRetificacaoFromSinistro). Usado pelo
+  /// botão "Iniciar Retificação" na tela de resumo.
+  final bool startRetificacao;
+
+  const AiChatPage({
+    super.key,
+    this.sinistroId,
+    this.startRetificacao = false,
+  });
 
   @override
   State<AiChatPage> createState() => _AiChatPageState();
@@ -396,6 +407,11 @@ class _AiChatPageState extends State<AiChatPage> {
     String sinistroId, {
     bool fromDirectSinistro = false,
   }) async {
+    if (widget.startRetificacao) {
+      await _startRetificacaoFromSinistro(sinistroId);
+      return;
+    }
+
     setState(() {
       isLoadingSession = true;
     });
@@ -494,6 +510,58 @@ class _AiChatPageState extends State<AiChatPage> {
     }
   }
 
+  /// Caminho separado de propósito de _startVistoriaFromSinistro — não passa
+  /// por findOpenVistoria (a vistoria rejeitada não está EM_ANDAMENTO, nunca
+  /// seria achada) nem pelo diálogo de continuar/começar de novo. Sempre
+  /// cria a vistoria de retificação a partir da rejeitada.
+  Future<void> _startRetificacaoFromSinistro(String sinistroId) async {
+    setState(() {
+      isLoadingSession = true;
+    });
+
+    try {
+      final session = await VistoriaChatSessionService.instance
+          .startRetificacaoFromSinistro(sinistroId: sinistroId);
+
+      if (!mounted) return;
+
+      setState(() {
+        _loadSessionIntoChat(session);
+        isLoadingSession = false;
+      });
+
+      _scrollToBottom();
+
+      final shouldSendInitialOi = session.chatMessages.any(
+        (message) => message['backgroundStart'] == true,
+      );
+
+      final hasAiReply = session.chatMessages.any(
+        (message) => message['role'] == 'ai',
+      );
+
+      if (shouldSendInitialOi && !hasAiReply) {
+        await _sendInitialOiToAgent();
+      }
+    } catch (e) {
+      debugPrint('Erro ao iniciar retificação pelo sinistro: $e');
+
+      if (!mounted) return;
+
+      setState(() {
+        isLoadingSession = false;
+        messages
+          ..clear()
+          ..add(
+            ChatMessage(
+              type: ChatMessageType.ai,
+              text: 'Não foi possível iniciar a retificação. Detalhe: $e',
+            ),
+          );
+      });
+    }
+  }
+
   Future<void> _handleContinueLater({
     required bool fromDirectSinistro,
   }) async {
@@ -522,6 +590,9 @@ class _AiChatPageState extends State<AiChatPage> {
       final reply = await ArgosAiService.instance.sendMessage(
         text: 'oi',
         inspectionId: session.idvistoria,
+        isRetificacao: session.isRetificacao,
+        ajustesNecessarios: session.ajustesNecessarios,
+        contextoVistoriaAnterior: session.contextoVistoriaAnterior,
       );
 
       if (isInspectionCompleted) return;
@@ -698,6 +769,9 @@ class _AiChatPageState extends State<AiChatPage> {
       final reply = await ArgosAiService.instance.sendMessage(
         text: text,
         inspectionId: session.idvistoria,
+        isRetificacao: session.isRetificacao,
+        ajustesNecessarios: session.ajustesNecessarios,
+        contextoVistoriaAnterior: session.contextoVistoriaAnterior,
       );
 
       if (isInspectionCompleted) return;
@@ -878,6 +952,9 @@ class _AiChatPageState extends State<AiChatPage> {
       final reply = await ArgosAiService.instance.sendBackgroundMessage(
         text: 'Fotos enviadas ($quantity).',
         inspectionId: session.idvistoria,
+        isRetificacao: session.isRetificacao,
+        ajustesNecessarios: session.ajustesNecessarios,
+        contextoVistoriaAnterior: session.contextoVistoriaAnterior,
       );
 
       aiText = reply.trim().isEmpty ? fallback : reply.trim();
@@ -1333,6 +1410,10 @@ class _AiChatPageState extends State<AiChatPage> {
                         session: currentSession,
                         onCloseChat: _closeCurrentChatAndBackToSelection,
                       ),
+                      if (currentSession!.isRetificacao)
+                        _RetificacaoBanner(
+                          ajustesNecessarios: currentSession!.ajustesNecessarios,
+                        ),
                       Expanded(
                         child: ListView.builder(
                           controller: scrollController,
@@ -1716,6 +1797,57 @@ class _SinistroSelectionView extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Fica fixo no topo do chat de retificação, pra nunca deixar o mecânico
+/// esquecer o que o analista pediu pra corrigir — mesma cor/ícone da aba
+/// "Revisão" da listagem (inspection_filter.dart), de propósito.
+class _RetificacaoBanner extends StatelessWidget {
+  final String ajustesNecessarios;
+
+  const _RetificacaoBanner({required this.ajustesNecessarios});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+      color: Colors.deepOrange.withOpacity(.08),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.rate_review_outlined, size: 18, color: Colors.deepOrange),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Retificação — corrija o que o analista apontou',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.deepOrange,
+                  ),
+                ),
+                if (ajustesNecessarios.trim().isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    ajustesNecessarios.trim(),
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      color: Color(0xFF5A4034),
+                      height: 1.3,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
