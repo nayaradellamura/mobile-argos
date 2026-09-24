@@ -1,0 +1,70 @@
+# Publica um patch Shorebird (atualização OTA de código Dart, sem passar
+# pela loja) a partir de um runner Linux do GitHub Actions.
+#
+# Por que via CI e não local: mesmo motivo documentado em build-apk.yml —
+# essa máquina Windows não consegue rodar um build de release (JDK moderno
+# falha com "Unable to establish loopback connection", família AF_UNIX não
+# registrada no Winsock). `shorebird patch` roda um `flutter build
+# appbundle --release` por baixo dos panos, então cai no mesmo problema.
+#
+# Setup necessário (uma vez só):
+#   1. `shorebird login:ci` na sua máquina — gera um token.
+#   2. Cadastra esse token como secret SHOREBIRD_TOKEN neste repositório
+#      (Settings → Secrets and variables → Actions).
+#   3. Os secrets ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD já
+#      existem (usados pelo build-apk.yml) — o patch reaproveita os mesmos,
+#      porque precisa ser assinado com a MESMA chave do release já publicado.
+#
+# Disparo manual (Actions → shorebird-patch → Run workflow), informando a
+# versão de release que o patch deve atualizar (ex: "1.2.3+4" ou "latest").
+
+name: shorebird-patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Versão do release pra aplicar o patch (ex: 1.2.3+4, ou "latest")'
+        required: true
+        default: 'latest'
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: shorebirdtech/setup-shorebird@v1
+
+      - name: Monta o keystore de release a partir dos secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 nao configurado — o patch precisa ser assinado com a MESMA chave do release original, senao o Shorebird rejeita."
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > android/app/argos-release.keystore
+          cat > android/key.properties <<PROPS
+          storePassword=$KEYSTORE_PASS
+          keyPassword=$KEYSTORE_PASS
+          keyAlias=argos
+          storeFile=app/argos-release.keystore
+          PROPS
+          echo "keystore montado ($(stat -c%s android/app/argos-release.keystore) bytes)"
+
+      - name: shorebird patch android
+        env:
+          SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
+        run: |
+          shorebird patch android \
+            --release-version="${{ inputs.release_version }}" \
+            --no-confirm
