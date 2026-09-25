@@ -1,0 +1,62 @@
+# Corta um release Shorebird (baseline pra patches OTA futuros) a partir de
+# um runner Linux do GitHub Actions. Mesmo motivo do shorebird-patch.yml:
+# `shorebird release` roda `flutter build appbundle --release` por baixo, e
+# essa máquina Windows não consegue rodar isso (JDK moderno falha com
+# "Unable to establish loopback connection").
+#
+# Usa os mesmos secrets ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD e
+# SHOREBIRD_TOKEN já cadastrados pro shorebird-patch.yml.
+#
+# Disparo manual (Actions → shorebird-release → Run workflow). Lembrete: cada
+# release precisa de um numero de versao novo em pubspec.yaml (Shorebird não
+# deixa reeditar um release já publicado).
+
+name: shorebird-release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: shorebirdtech/setup-shorebird@v1
+
+      - name: Monta o keystore de release a partir dos secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 nao configurado."
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > android/app/argos-release.keystore
+          cat > android/key.properties <<PROPS
+          storePassword=$KEYSTORE_PASS
+          keyPassword=$KEYSTORE_PASS
+          keyAlias=argos
+          storeFile=app/argos-release.keystore
+          PROPS
+          echo "keystore montado ($(stat -c%s android/app/argos-release.keystore) bytes)"
+
+      - name: shorebird release android
+        env:
+          SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
+        run: shorebird release android --no-confirm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: argos-release-aab
+          path: build/app/outputs/bundle/release/app-release.aab
+          if-no-files-found: warn
+          retention-days: 30
