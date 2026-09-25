@@ -52,7 +52,14 @@ jobs:
       - name: shorebird release android
         env:
           SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
-        run: shorebird release android --no-confirm
+        # --no-tree-shake-icons: sem isso, o Flutter remove do binario final
+        # os glifos de icone que o codigo nao usa no momento do build. Como o
+        # conjunto de icones usados muda a cada patch, a fonte
+        # MaterialIcons-Regular.otf fica com bytes diferentes a cada vez, e o
+        # Shorebird recusa o patch por "mudanca de asset". Mantendo a fonte
+        # sempre completa (mesmo custando ~1.6MB a mais), ela nunca muda de
+        # binario entre release e patch.
+        run: shorebird release android --no-confirm -- --no-tree-shake-icons
 
       - uses: actions/upload-artifact@v4
         with:
