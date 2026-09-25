@@ -52,6 +52,12 @@ jobs:
       - name: shorebird release android
         env:
           SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
+        # --artifact apk: o padrao do Shorebird e AAB (formato de loja, nao
+        # instalavel direto). Pra dar pra mandar o arquivo pra alguem
+        # sideloadar E ainda assim receber patch depois, precisa ser um APK
+        # com o motor do Shorebird embutido — o que so sai daqui, nunca de um
+        # `flutter build apk` comum (build-apk.yml), que nao tem esse motor.
+        #
         # --no-tree-shake-icons: sem isso, o Flutter remove do binario final
         # os glifos de icone que o codigo nao usa no momento do build. Como o
         # conjunto de icones usados muda a cada patch, a fonte
@@ -59,11 +65,13 @@ jobs:
         # Shorebird recusa o patch por "mudanca de asset". Mantendo a fonte
         # sempre completa (mesmo custando ~1.6MB a mais), ela nunca muda de
         # binario entre release e patch.
-        run: shorebird release android --no-confirm -- --no-tree-shake-icons
+        run: >
+          shorebird release android --no-confirm --artifact apk
+          -- --no-tree-shake-icons
 
       - uses: actions/upload-artifact@v4
         with:
-          name: argos-release-aab
-          path: build/app/outputs/bundle/release/app-release.aab
+          name: argos-release-apk-shorebird
+          path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: warn
           retention-days: 30
