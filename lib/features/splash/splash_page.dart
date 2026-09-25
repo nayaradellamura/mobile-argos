@@ -21,13 +21,20 @@ class _SplashPageState extends State<SplashPage> {
   // 1. Usando a classe nova do Shorebird: ShorebirdUpdater
   final shorebirdUpdater = ShorebirdUpdater();
   int? _patchNumber;
+  String? _updateStatusText;
 
   @override
   void initState() {
     super.initState();
-    
+
     // 2. Busca o número do patch ao abrir a tela
     _fetchPatchNumber();
+
+    // Dispara a checagem de update do Shorebird sem esperar (a doc do pacote
+    // avisa explicitamente pra não dar await nisso no startup — a chamada de
+    // rede pode demorar e travaria a splash indefinidamente). O progresso
+    // visual da tela continua no timer normal, independente do resultado.
+    _checkForShorebirdUpdate();
 
     timer = Timer.periodic(const Duration(milliseconds: 30), (timer) {
       if (!mounted) return;
@@ -67,6 +74,54 @@ class _SplashPageState extends State<SplashPage> {
       // Se der erro (ex: rodando no modo debug), ignora em silêncio
       debugPrint('Erro ao buscar patch do Shorebird: $e');
     }
+  }
+
+  void _checkForShorebirdUpdate() {
+    // Fora de um build gerado via `shorebird release`/`shorebird preview`
+    // (ex: debug local, flutter run) o updater não existe — não tem update
+    // pra checar.
+    if (!shorebirdUpdater.isAvailable) return;
+
+    if (mounted) {
+      setState(() => _updateStatusText = 'Verificando atualização...');
+    }
+
+    shorebirdUpdater
+        .checkForUpdate()
+        .then((status) async {
+          if (!mounted) return;
+
+          switch (status) {
+            case UpdateStatus.outdated:
+              setState(() => _updateStatusText = 'Baixando atualização...');
+              try {
+                await shorebirdUpdater.update();
+                if (!mounted) return;
+                setState(
+                  () => _updateStatusText =
+                      'Atualização baixada — abra o app de novo pra aplicar',
+                );
+              } catch (e) {
+                debugPrint('Erro ao baixar patch do Shorebird: $e');
+                if (!mounted) return;
+                setState(() => _updateStatusText = null);
+              }
+            case UpdateStatus.restartRequired:
+              setState(
+                () => _updateStatusText =
+                    'Atualização pronta — abra o app de novo pra aplicar',
+              );
+            case UpdateStatus.upToDate:
+              setState(() => _updateStatusText = 'App atualizado');
+            case UpdateStatus.unavailable:
+              setState(() => _updateStatusText = null);
+          }
+        })
+        .catchError((e) {
+          debugPrint('Erro ao checar atualização do Shorebird: $e');
+          if (!mounted) return;
+          setState(() => _updateStatusText = null);
+        });
   }
 
   @override
@@ -250,19 +305,39 @@ class _SplashPageState extends State<SplashPage> {
                   horizontal: 28,
                   vertical: 12,
                 ),
-                child: Opacity(
-                  opacity: .40,
+                child: AnimatedOpacity(
+                  duration: const Duration(milliseconds: 250),
+                  opacity: _updateStatusText != null ? .85 : .40,
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       // 4. Lógica de exibição da versão
-                      Text(
-                        _patchNumber != null ? 'v1.0 • Patch $_patchNumber' : 'v1.0',
-                        style: GoogleFonts.inter(
-                          color: Colors.white,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                        ),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _patchNumber != null
+                                ? 'v1.0 • Patch $_patchNumber'
+                                : 'v1.0',
+                            style: GoogleFonts.inter(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          if (_updateStatusText != null) ...[
+                            const SizedBox(height: 3),
+                            Text(
+                              _updateStatusText!,
+                              style: GoogleFonts.inter(
+                                color: Colors.white,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ],
                       ),
                       Row(
                         children: [
