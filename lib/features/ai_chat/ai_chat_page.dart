@@ -62,6 +62,23 @@ class ChatMessage {
     this.audioStatus,
     this.createdAt,
   });
+
+  ChatMessage copyWith({String? text}) {
+    return ChatMessage(
+      type: type,
+      text: text ?? this.text,
+      imagePath: imagePath,
+      audioPath: audioPath,
+      boldLineIndexes: boldLineIndexes,
+      durationSeconds: durationSeconds,
+      audioId: audioId,
+      originalStoragePath: originalStoragePath,
+      mp3StoragePath: mp3StoragePath,
+      mp3DownloadUrl: mp3DownloadUrl,
+      audioStatus: audioStatus,
+      createdAt: createdAt,
+    );
+  }
 }
 
 class AiChatPage extends StatefulWidget {
@@ -599,29 +616,68 @@ class _AiChatPageState extends State<AiChatPage> {
     });
 
     try {
-      final session = await VistoriaChatSessionService.instance
-          .startRetificacaoFromSinistro(sinistroId: sinistroId);
+      // Antes disto o botão criava uma retificação nova toda vez que era
+      // tocado — mesmo que já existisse uma em andamento — sem nunca
+      // perguntar nada pro mecânico. findOpenVistoria acha qualquer vistoria
+      // EM_ANDAMENTO do sinistro (original ou retificação), então serve
+      // igual ao fluxo normal pra decidir se continua, adia ou descarta.
+      final openSession = await VistoriaChatSessionService.instance
+          .findOpenVistoria(sinistroId: sinistroId);
 
       if (!mounted) return;
 
-      setState(() {
-        _loadSessionIntoChat(session);
-        isLoadingSession = false;
-      });
+      if (openSession != null) {
+        setState(() {
+          isLoadingSession = false;
+        });
 
-      _scrollToBottom();
+        final action = await _askVistoriaAction(openSession);
 
-      final shouldSendInitialOi = session.chatMessages.any(
-        (message) => message['backgroundStart'] == true,
-      );
+        if (!mounted) return;
 
-      final hasAiReply = session.chatMessages.any(
-        (message) => message['role'] == 'ai',
-      );
+        if (action == ContinueVistoriaAction.continueNow) {
+          setState(() {
+            _loadSessionIntoChat(openSession);
+            isLoadingSession = false;
+          });
 
-      if (shouldSendInitialOi && !hasAiReply) {
-        await _sendInitialOiToAgent();
+          _scrollToBottom();
+          return;
+        }
+
+        if (action == ContinueVistoriaAction.continueLater || action == null) {
+          await _handleContinueLater(fromDirectSinistro: true);
+          return;
+        }
+
+        if (action == ContinueVistoriaAction.startNew) {
+          final confirmed = await _confirmStartNewVistoria(openSession);
+
+          if (!mounted) return;
+
+          if (!confirmed) {
+            await _handleContinueLater(fromDirectSinistro: true);
+            return;
+          }
+
+          setState(() {
+            isLoadingSession = true;
+          });
+
+          await VistoriaChatSessionService.instance.discardVistoria(
+            vistoriaDocId: openSession.docId,
+            hardDelete: false,
+          );
+
+          await _createRetificacaoAfterDiscard(
+            sinistroId: sinistroId,
+            discardedOrigemId: openSession.vistoriaOrigemId,
+          );
+          return;
+        }
       }
+
+      await _createRetificacaoAfterDiscard(sinistroId: sinistroId);
     } catch (e) {
       debugPrint('Erro ao iniciar retificação pelo sinistro: $e');
 
@@ -638,6 +694,55 @@ class _AiChatPageState extends State<AiChatPage> {
             ),
           );
       });
+    }
+  }
+
+  /// Cria a retificação em si. Se `discardedOrigemId` vier preenchido, é
+  /// porque acabamos de descartar uma retificação já em andamento — nesse
+  /// caso sinistro.vistoriaAtualId aponta pro que acabou de ser descartado,
+  /// então busca a vistoria REJEITADA original diretamente por id em vez de
+  /// usar startRetificacaoFromSinistro (que leria o ponteiro errado).
+  Future<void> _createRetificacaoAfterDiscard({
+    required String sinistroId,
+    String? discardedOrigemId,
+  }) async {
+    final service = VistoriaChatSessionService.instance;
+
+    final session = (discardedOrigemId != null && discardedOrigemId.isNotEmpty)
+        ? await () async {
+            final original = await service.getVistoriaById(discardedOrigemId);
+            if (original == null) {
+              return service.startRetificacaoFromSinistro(
+                sinistroId: sinistroId,
+              );
+            }
+            return service.createRetificacaoFromVistoria(
+              original: original,
+              ajustesNecessarios: original.ajustesNecessarios,
+              contextoVistoriaAnterior: original.contextoVistoriaAnterior,
+            );
+          }()
+        : await service.startRetificacaoFromSinistro(sinistroId: sinistroId);
+
+    if (!mounted) return;
+
+    setState(() {
+      _loadSessionIntoChat(session);
+      isLoadingSession = false;
+    });
+
+    _scrollToBottom();
+
+    final shouldSendInitialOi = session.chatMessages.any(
+      (message) => message['backgroundStart'] == true,
+    );
+
+    final hasAiReply = session.chatMessages.any(
+      (message) => message['role'] == 'ai',
+    );
+
+    if (shouldSendInitialOi && !hasAiReply) {
+      await _sendInitialOiToAgent();
     }
   }
 
@@ -708,11 +813,38 @@ class _AiChatPageState extends State<AiChatPage> {
     autoCameraOpenedForPhotoRelease = false;
     _listenToVistoriaCompletion(session);
 
-    final loadedMessages = session.chatMessages
-        .where((item) => item['backgroundStart'] != true)
-        .map(_chatMessageFromFirestore)
-        .whereType<ChatMessage>()
-        .toList();
+    // audio_transcription vem do backend como uma entrada separada do
+    // chatmessages (role: user, mesmo audioId) — em vez de virar uma bolha
+    // de texto solta, anexa na bolha do áudio correspondente, pra dar pra
+    // esconder atrás do botão "Transcrever áudio" (estilo WhatsApp).
+    final loadedMessages = <ChatMessage>[];
+
+    for (final item in session.chatMessages) {
+      if (item['backgroundStart'] == true) continue;
+
+      final type = item['type']?.toString() ?? '';
+
+      if (type == 'audio_transcription') {
+        final audioId = item['audioId']?.toString() ?? '';
+        final transcript = item['text']?.toString() ?? '';
+
+        if (audioId.isNotEmpty && transcript.isNotEmpty) {
+          final index = loadedMessages.lastIndexWhere(
+            (m) => m.type == ChatMessageType.audio && m.audioId == audioId,
+          );
+
+          if (index >= 0) {
+            loadedMessages[index] = loadedMessages[index].copyWith(
+              text: transcript,
+            );
+          }
+        }
+        continue;
+      }
+
+      final message = _chatMessageFromFirestore(item);
+      if (message != null) loadedMessages.add(message);
+    }
 
     messages
       ..clear()
@@ -1317,7 +1449,10 @@ class _AiChatPageState extends State<AiChatPage> {
         if (index >= 0) {
           messages[index] = ChatMessage(
             type: ChatMessageType.audio,
-            text: '',
+            // Fica escondida por padrão — a bolha mostra um botão
+            // "Transcrever áudio" (estilo WhatsApp) que revela isso ali
+            // dentro, em vez de virar uma mensagem separada sempre visível.
+            text: audioResult.revisedTranscript,
             audioPath: path,
             durationSeconds: duration,
             audioId: uploadedAudio.audioId,
@@ -1326,16 +1461,6 @@ class _AiChatPageState extends State<AiChatPage> {
             mp3DownloadUrl: uploadedAudio.mp3DownloadUrl,
             audioStatus: 'done',
             createdAt: messages[index].createdAt,
-          );
-        }
-
-        if (audioResult.revisedTranscript.trim().isNotEmpty) {
-          messages.add(
-            ChatMessage(
-              type: ChatMessageType.user,
-              text: audioResult.revisedTranscript,
-              createdAt: DateTime.now(),
-            ),
           );
         }
 
@@ -2655,6 +2780,7 @@ class _AudioBubbleState extends State<_AudioBubble> {
   bool isPlaying = false;
   Duration currentPosition = Duration.zero;
   Duration totalDuration = Duration.zero;
+  bool _showTranscript = false;
 
   @override
   void initState() {
@@ -2762,68 +2888,136 @@ class _AudioBubbleState extends State<_AudioBubble> {
                 color: bubbleColor,
                 borderRadius: BorderRadius.circular(22),
               ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  _AudioProfileAvatar(
-                    photoUrl: widget.profilePhotoUrl,
-                    bubbleColor: bubbleColor,
-                  ),
-                  const SizedBox(width: 10),
-                  GestureDetector(
-                    onTap: _togglePlay,
-                    child: _AudioPlayButton(
-                      isProcessing: isProcessing,
-                      isError: isError,
-                      isPlaying: isPlaying,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SizedBox(
-                          height: 34,
-                          child: _WhatsappWaveform(
-                            isProcessing: isProcessing,
-                            isError: isError,
-                            isPlaying: isPlaying,
-                            progress: _audioProgress,
-                            color: Colors.white,
-                          ),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      _AudioProfileAvatar(
+                        photoUrl: widget.profilePhotoUrl,
+                        bubbleColor: bubbleColor,
+                      ),
+                      const SizedBox(width: 10),
+                      GestureDetector(
+                        onTap: _togglePlay,
+                        child: _AudioPlayButton(
+                          isProcessing: isProcessing,
+                          isError: isError,
+                          isPlaying: isPlaying,
                         ),
-                        const SizedBox(height: 3),
-                        Row(
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            Text(
-                              durationLabel,
-                              style: TextStyle(
-                                color: Colors.white.withOpacity(.75),
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
+                            SizedBox(
+                              height: 34,
+                              child: _WhatsappWaveform(
+                                isProcessing: isProcessing,
+                                isError: isError,
+                                isPlaying: isPlaying,
+                                progress: _audioProgress,
+                                color: Colors.white,
                               ),
                             ),
-                            const Spacer(),
-                            Text(
-                              _formatMessageTime(widget.createdAt),
-                              style: TextStyle(
-                                color: Colors.white.withOpacity(.75),
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(width: 5),
-                            _AudioStatusIcon(
-                              isProcessing: isProcessing,
-                              isDone: isDone,
-                              isError: isError,
+                            const SizedBox(height: 3),
+                            Row(
+                              children: [
+                                Text(
+                                  durationLabel,
+                                  style: TextStyle(
+                                    color: Colors.white.withOpacity(.75),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                const Spacer(),
+                                Text(
+                                  _formatMessageTime(widget.createdAt),
+                                  style: TextStyle(
+                                    color: Colors.white.withOpacity(.75),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                const SizedBox(width: 5),
+                                _AudioStatusIcon(
+                                  isProcessing: isProcessing,
+                                  isDone: isDone,
+                                  isError: isError,
+                                ),
+                              ],
                             ),
                           ],
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
+                  if (widget.text.trim().isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    InkWell(
+                      borderRadius: BorderRadius.circular(10),
+                      onTap: () =>
+                          setState(() => _showTranscript = !_showTranscript),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 4,
+                          horizontal: 2,
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.subtitles_outlined,
+                              size: 14,
+                              color: Colors.white.withOpacity(.85),
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              _showTranscript
+                                  ? 'Ocultar transcrição'
+                                  : 'Transcrever áudio',
+                              style: TextStyle(
+                                color: Colors.white.withOpacity(.85),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const Spacer(),
+                            Icon(
+                              _showTranscript
+                                  ? Icons.keyboard_arrow_up_rounded
+                                  : Icons.keyboard_arrow_down_rounded,
+                              size: 16,
+                              color: Colors.white.withOpacity(.85),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    if (_showTranscript) ...[
+                      const SizedBox(height: 2),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(.14),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Text(
+                          widget.text,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                            height: 1.3,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ],
               ),
             ),

@@ -464,6 +464,16 @@ class VistoriaChatSessionService {
     );
   }
 
+  /// Busca uma vistoria específica pelo id do documento — usado pra
+  /// recuperar a vistoria REJEITADA original quando o mecânico descarta uma
+  /// retificação já em andamento e pede pra começar outra do zero (nesse
+  /// caso sinistro.vistoriaAtualId já não aponta mais pra ela).
+  Future<VistoriaSession?> getVistoriaById(String vistoriaDocId) async {
+    final doc = await _vistorias.doc(vistoriaDocId).get();
+    if (!doc.exists) return null;
+    return VistoriaSession.fromFirestore(doc);
+  }
+
   /// Busca a vistoria que o sinistro aponta como atual (sinistro.vistoriaAtualId)
   /// — usado pra pegar a vistoria REJEITADA como base de uma retificação, já
   /// que ela não está mais em EM_ANDAMENTO (findOpenVistoria não a acha).
