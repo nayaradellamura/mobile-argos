@@ -176,11 +176,15 @@ class LinkedVistoriaInfo {
         normalized.contains('rejeitado')) return 'Rejeitada';
     if (normalized.contains('encerrada') ||
         normalized.contains('encerrado')) return 'Encerrada';
-    if (normalized.contains('analise') ||
-        normalized.contains('análise') ||
+    if (normalized.contains('aprovada') ||
+        normalized.contains('aprovado') ||
+        normalized.contains('approved') ||
         normalized.contains('finalizada') ||
         normalized.contains('finalizado') ||
-        normalized.contains('finalized')) return 'Em analise';
+        normalized.contains('finalized')) return 'Finalizada';
+    if (normalized.contains('analise') || normalized.contains('análise')) {
+      return 'Em analise';
+    }
 
     return 'Em andamento';
   }
