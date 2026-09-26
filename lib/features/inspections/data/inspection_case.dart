@@ -472,6 +472,39 @@ class InspectionCase {
         vistoriaStatus.contains('abandonado');
   }
 
+  // Badge de status mostrado nos cards/resumo do sinistro. Não pode usar só
+  // `status.label` (o status CRU do sinistro): cancelamento/expiração/revisão
+  // só ficam gravados em vistoriaAtualStatus (denormalizado pela vistoria),
+  // o sinistro em si segue "EM_ANDAMENTO" — sem isso o card mostra
+  // "Em andamento" pra uma vistoria já cancelada.
+  String get displayStatusLabel {
+    if (isCancelledCategory) {
+      final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
+      if (vistoriaStatus.contains('expirada') ||
+          vistoriaStatus.contains('expirado')) return 'Expirada';
+      if (vistoriaStatus.contains('abandonada') ||
+          vistoriaStatus.contains('abandonado')) return 'Abandonada';
+      return 'Cancelada';
+    }
+    if (isRevisionCategory) return 'Rejeitada';
+    if (isCompletedCategory) return 'Finalizada';
+    if (isAiAnalysisCategory) return 'Em analise';
+    return status.label;
+  }
+
+  Color get displayStatusColor {
+    if (isCancelledCategory) {
+      final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
+      if (vistoriaStatus.contains('expirada') ||
+          vistoriaStatus.contains('expirado')) return Colors.deepOrange;
+      return Colors.grey;
+    }
+    if (isRevisionCategory) return Colors.redAccent;
+    if (isCompletedCategory) return Colors.green;
+    if (isAiAnalysisCategory) return Colors.purple;
+    return status.color;
+  }
+
   bool get isInProgressCategory {
     return checkInAt != null &&
         !isAiAnalysisCategory &&

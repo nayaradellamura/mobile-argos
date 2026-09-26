@@ -1022,12 +1022,8 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                   ),
                                   _InfoRow(
                                     'Status',
-                                    isHumanAnalysis
-                                        ? 'Em analise'
-                                        : inspection.status.label,
-                                    valueColor: isHumanAnalysis
-                                        ? Colors.purple
-                                        : inspection.status.color,
+                                    inspection.displayStatusLabel,
+                                    valueColor: inspection.displayStatusColor,
                                   ),
                                   _InfoRow(
                                     'Agendamento',
@@ -3648,8 +3644,8 @@ class _InspectionCardContent extends StatelessWidget {
               Row(
                 children: [
                   _StatusChip(
-                    label: isHumanAnalysis ? 'Em analise' : inspection.status.label,
-                    color: isHumanAnalysis ? Colors.purple : inspection.status.color,
+                    label: inspection.displayStatusLabel,
+                    color: inspection.displayStatusColor,
                   ),
                   const SizedBox(width: 8),
                   _StatusChip(
@@ -4844,8 +4840,6 @@ class _SummaryTopBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isHumanAnalysis = inspection.isAiAnalysisCategory;
-
     return Container(
       height: 70,
       padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -4874,8 +4868,8 @@ class _SummaryTopBar extends StatelessWidget {
             ),
           ),
           _StatusChip(
-            label: isHumanAnalysis ? 'Em analise' : inspection.status.label,
-            color: isHumanAnalysis ? Colors.purple : inspection.status.color,
+            label: inspection.displayStatusLabel,
+            color: inspection.displayStatusColor,
           ),
         ],
       ),
