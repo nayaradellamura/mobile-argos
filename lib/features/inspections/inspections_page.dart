@@ -940,11 +940,16 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     // vistoria nova do zero (findOpenVistoria não acha REJEITADA, cai no
     // fluxo de vistoria original). O caminho certo é o botão de
     // retificação abaixo.
+    // Expirada/abandonada não bloqueia o botão comum — o mecânico deve
+    // conseguir começar uma vistoria nova direto por aqui (createOrResume
+    // já cria uma do zero quando não acha nenhuma EM_ANDAMENTO). Só
+    // cancelada de verdade (decisão do analista) continua bloqueando.
     final canOpenChat = hasCheckIn &&
         isAssignedToMe &&
         !isHumanAnalysis &&
         !inspection.isCompletedCategory &&
-        !inspection.isCancelledCategory &&
+        (!inspection.isCancelledCategory ||
+            inspection.isExpiredOrAbandonedCategory) &&
         !inspection.isRevisionCategory;
     final canStartRetificacao = isAssignedToMe &&
         inspection.isRevisionCategory &&

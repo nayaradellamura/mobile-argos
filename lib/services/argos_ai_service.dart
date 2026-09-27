@@ -127,6 +127,24 @@ class ArgosAiService {
 
     return ArgosAudioMessageResult.fromMap(result.data);
   }
+
+  /// Checa (e expira, se for o caso) uma vistoria específica na hora, em vez
+  /// de esperar a varredura agendada (agora de 12 em 12h) passar por ela.
+  /// Chamada no momento em que o mecânico aperta "Continuar agora" no modal
+  /// de retomar vistoria — cobre a janela entre uma varredura e outra.
+  Future<bool> checkVistoriaExpiration({required String idvistoria}) async {
+    final cleanId = idvistoria.trim();
+
+    if (cleanId.isEmpty) return false;
+
+    final callable = _functions.httpsCallable('checkVistoriaExpiration');
+
+    final result = await callable.call<Map<String, dynamic>>({
+      'idvistoria': cleanId,
+    });
+
+    return result.data['expired'] == true;
+  }
 }
 
 class ArgosAudioMessageResult {

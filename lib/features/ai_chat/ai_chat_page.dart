@@ -464,6 +464,119 @@ class _AiChatPageState extends State<AiChatPage> {
     );
   }
 
+  /// Mostrado no lugar de _askVistoriaAction quando a checagem em tempo
+  /// real (checkVistoriaExpiration) já confirmou que a sessão passou das 24h
+  /// úteis — não faz sentido oferecer "Continuar agora" pra uma vistoria que
+  /// acabou de ser marcada EXPIRADA no backend.
+  Future<ContinueVistoriaAction?> _showVistoriaExpiredDialog(
+    VistoriaSession session,
+  ) {
+    final placa = session.placa.trim().isEmpty ? 'Sem placa' : session.placa;
+    final veiculo =
+        session.veiculo.trim().isEmpty ? 'Não informado' : session.veiculo;
+
+    return showDialog<ContinueVistoriaAction>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return Dialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+          ),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 60,
+                    height: 60,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFFFF0E5),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.timer_off_rounded,
+                      color: Colors.deepOrange,
+                      size: 30,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Vistoria expirada',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.spaceGrotesk(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: const Color(0xFF1F2937),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Essa vistoria ficou mais de 24h úteis sem atividade e '
+                  'não pode mais ser continuada de onde parou.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Color(0xFF6B7280),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    height: 1.3,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF3FBFF),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Column(
+                    children: [
+                      _VistoriaInfoRow(
+                        icon: Icons.badge_outlined,
+                        label: 'Vistoria',
+                        value: session.idvistoria,
+                      ),
+                      const SizedBox(height: 8),
+                      _VistoriaInfoRow(
+                        icon: Icons.directions_car_outlined,
+                        label: 'Veículo',
+                        value: '$placa • $veiculo',
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 20),
+                _VistoriaActionTile(
+                  icon: Icons.restart_alt_rounded,
+                  title: 'Começar novo chat',
+                  subtitle: 'Inicia uma vistoria nova para este veículo.',
+                  color: const Color(0xFF0057C0),
+                  filled: true,
+                  onTap: () => Navigator.of(context)
+                      .pop(ContinueVistoriaAction.startNew),
+                ),
+                const SizedBox(height: 10),
+                _VistoriaActionTile(
+                  icon: Icons.schedule_rounded,
+                  title: 'Continuar mais tarde',
+                  subtitle: 'Volta pra tela de vistorias por agora.',
+                  color: const Color(0xFF0057C0),
+                  onTap: () => Navigator.of(context)
+                      .pop(ContinueVistoriaAction.continueLater),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<bool> _confirmStartNewVistoria(VistoriaSession session) async {
     final result = await showDialog<bool>(
       context: context,
@@ -523,11 +636,22 @@ class _AiChatPageState extends State<AiChatPage> {
           isLoadingSession = false;
         });
 
-        final action = await _askVistoriaAction(openSession);
+        // Checa em tempo real em vez de confiar só na varredura agendada
+        // (agora de 12 em 12h) — sem isso o mecânico podia cair numa sessão
+        // que já devia estar expirada só porque o job ainda não tinha
+        // passado por ela.
+        final alreadyExpired = await ArgosAiService.instance
+            .checkVistoriaExpiration(idvistoria: openSession.docId);
 
         if (!mounted) return;
 
-        if (action == ContinueVistoriaAction.continueNow) {
+        final action = alreadyExpired
+            ? await _showVistoriaExpiredDialog(openSession)
+            : await _askVistoriaAction(openSession);
+
+        if (!mounted) return;
+
+        if (!alreadyExpired && action == ContinueVistoriaAction.continueNow) {
           setState(() {
             _loadSessionIntoChat(openSession);
             isLoadingSession = false;
@@ -543,23 +667,31 @@ class _AiChatPageState extends State<AiChatPage> {
         }
 
         if (action == ContinueVistoriaAction.startNew) {
-          final confirmed = await _confirmStartNewVistoria(openSession);
+          if (alreadyExpired) {
+            // Já foi marcada EXPIRADA pela checagem acima — não há nada pra
+            // confirmar nem descartar, só seguir e criar a próxima.
+            setState(() {
+              isLoadingSession = true;
+            });
+          } else {
+            final confirmed = await _confirmStartNewVistoria(openSession);
 
-          if (!mounted) return;
+            if (!mounted) return;
 
-          if (!confirmed) {
-            await _handleContinueLater(fromDirectSinistro: fromDirectSinistro);
-            return;
+            if (!confirmed) {
+              await _handleContinueLater(fromDirectSinistro: fromDirectSinistro);
+              return;
+            }
+
+            setState(() {
+              isLoadingSession = true;
+            });
+
+            await VistoriaChatSessionService.instance.discardVistoria(
+              vistoriaDocId: openSession.docId,
+              hardDelete: false,
+            );
           }
-
-          setState(() {
-            isLoadingSession = true;
-          });
-
-          await VistoriaChatSessionService.instance.discardVistoria(
-            vistoriaDocId: openSession.docId,
-            hardDelete: false,
-          );
         }
       }
 
@@ -631,11 +763,18 @@ class _AiChatPageState extends State<AiChatPage> {
           isLoadingSession = false;
         });
 
-        final action = await _askVistoriaAction(openSession);
+        final alreadyExpired = await ArgosAiService.instance
+            .checkVistoriaExpiration(idvistoria: openSession.docId);
 
         if (!mounted) return;
 
-        if (action == ContinueVistoriaAction.continueNow) {
+        final action = alreadyExpired
+            ? await _showVistoriaExpiredDialog(openSession)
+            : await _askVistoriaAction(openSession);
+
+        if (!mounted) return;
+
+        if (!alreadyExpired && action == ContinueVistoriaAction.continueNow) {
           setState(() {
             _loadSessionIntoChat(openSession);
             isLoadingSession = false;
@@ -651,23 +790,29 @@ class _AiChatPageState extends State<AiChatPage> {
         }
 
         if (action == ContinueVistoriaAction.startNew) {
-          final confirmed = await _confirmStartNewVistoria(openSession);
+          if (!alreadyExpired) {
+            final confirmed = await _confirmStartNewVistoria(openSession);
 
-          if (!mounted) return;
+            if (!mounted) return;
 
-          if (!confirmed) {
-            await _handleContinueLater(fromDirectSinistro: true);
-            return;
+            if (!confirmed) {
+              await _handleContinueLater(fromDirectSinistro: true);
+              return;
+            }
+
+            setState(() {
+              isLoadingSession = true;
+            });
+
+            await VistoriaChatSessionService.instance.discardVistoria(
+              vistoriaDocId: openSession.docId,
+              hardDelete: false,
+            );
+          } else {
+            setState(() {
+              isLoadingSession = true;
+            });
           }
-
-          setState(() {
-            isLoadingSession = true;
-          });
-
-          await VistoriaChatSessionService.instance.discardVistoria(
-            vistoriaDocId: openSession.docId,
-            hardDelete: false,
-          );
 
           await _createRetificacaoAfterDiscard(
             sinistroId: sinistroId,

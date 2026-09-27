@@ -505,6 +505,20 @@ class InspectionCase {
     return status.color;
   }
 
+  // Expirou por inatividade (24h úteis) ou foi abandonada — diferente de
+  // CANCELADA (decisão do analista, sem um caminho de reinício definido):
+  // aqui o mecânico deve poder simplesmente começar uma vistoria nova pelo
+  // botão comum, sem precisar de um fluxo dedicado como a retificação.
+  bool get isExpiredOrAbandonedCategory {
+    final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
+
+    return vistoriaStatus.contains('expirada') ||
+        vistoriaStatus.contains('expirado') ||
+        vistoriaStatus.contains('expired') ||
+        vistoriaStatus.contains('abandonada') ||
+        vistoriaStatus.contains('abandonado');
+  }
+
   bool get isInProgressCategory {
     return checkInAt != null &&
         !isAiAnalysisCategory &&

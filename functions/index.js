@@ -809,6 +809,18 @@ async function buildSinistroNotification({ db, sinistroId, before, after, isCrea
     };
   }
 
+  // Mesma lógica de rejeição/cancelamento: expiração também só muda
+  // vistoriaAtualStatus (nunca sinistro.status), e sem esse caso específico
+  // caía no fallback genérico "Vistoria atualizada" — o mecânico nunca
+  // ficava sabendo que a sessão morreu por inatividade.
+  if (beforeVistoriaStatus !== "EXPIRADA" && afterVistoriaStatus === "EXPIRADA") {
+    return {
+      type: "vistoria_expirada",
+      title: "Vistoria expirada",
+      body: `${protocol} passou de 24h úteis sem atividade e precisa ser reiniciada.`,
+    };
+  }
+
   // Aprovacao (finalizar/route.ts) muda sinistro.status pra FINALIZADO —
   // merece uma mensagem propria e positiva, em vez de cair no aviso
   // generico de "status mudou" que rejeicao/cancelamento tambem usariam.
@@ -1990,19 +2002,62 @@ async function saveAgentStateToVistoria({ idvistoria, currentAgent }) {
   );
 }
 
-// Expira sozinha as vistorias que passaram das 24h úteis sem sair de
-// EM_ANDAMENTO — antes disso só acontecia quando o próprio mecânico tentava
-// reabrir aquela vistoria específica (findOpenVistoria, no app), então uma
-// vistoria abandonada podia ficar "viva" indefinidamente se ninguém nunca
-// mais voltasse nela. Replica exatamente o que o app já faz em
-// _expireVistoria/_syncSinistroVistoriaStatus (vistoria_chat_session_service.dart),
-// só que rodando sozinha, sem depender de ninguém abrir o app.
+// Expira UMA vistoria específica, se ela já passou de agentBusinessExpiresAt
+// sem sair de EM_ANDAMENTO. Compartilhada entre a varredura agendada
+// (expireStaleVistorias) e a checagem sob demanda (checkVistoriaExpiration,
+// chamada pelo app no momento em que o mecânico aperta "Continuar agora") —
+// as duas precisam expirar exatamente do mesmo jeito, senão uma delas fica
+// pra trás e o app e o backend divergem sobre se a vistoria está viva.
 //
-// Não cria vistoria nova aqui — isso o app já faz sozinho
-// (createOrResumeFromSinistro) na próxima vez que o mecânico tentar retomar
-// aquele sinistro.
+// Retorna true se expirou agora, false se já não estava mais elegível
+// (outra chamada expirou primeiro, ou ela nunca esteve vencida).
+async function expireVistoriaIfDue(db, doc) {
+  const data = doc.data();
+
+  if (data.status !== "EM_ANDAMENTO") return false;
+
+  const expiresAt = data.agentBusinessExpiresAt;
+  if (!expiresAt || expiresAt.toMillis() > Date.now()) return false;
+
+  const sinistroId = String(data.sinistroId || "").trim();
+  const batch = db.batch();
+
+  batch.set(
+    doc.ref,
+    {
+      status: "EXPIRADA",
+      expiredAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+
+  if (sinistroId) {
+    batch.set(
+      db.collection("sinistro").doc(sinistroId),
+      {
+        vistoriaAtualId: String(data.idvistoria || doc.id),
+        vistoriaAtualStatus: "EXPIRADA",
+        vistoriaAtualTipo: String(data.tipoVistoria || "ORIGINAL"),
+        ultimaVistoriaAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  }
+
+  await batch.commit();
+  console.log("expireVistoriaIfDue: expirada", { vistoriaId: doc.id, sinistroId });
+  return true;
+}
+
+// Varredura agendada — rede de segurança para vistorias abandonadas que
+// ninguém nunca mais tenta reabrir (sem isso, ficariam "vivas" indefinidamente
+// pro resto do sistema, mesmo que o app já bloqueie o mecânico específico
+// via checkVistoriaExpiration). Não precisa rodar de hora em hora: a
+// checagem no momento de reabrir (abaixo) já cobre o caso interativo em
+// tempo real, então aqui basta uma cadência mais espaçada.
 exports.expireStaleVistorias = onSchedule(
-  { schedule: "every 60 minutes", region: "us-central1", timeZone: "America/Sao_Paulo" },
+  { schedule: "every 12 hours", region: "us-central1", timeZone: "America/Sao_Paulo" },
   async () => {
     const db = admin.firestore();
     const now = admin.firestore.Timestamp.now();
@@ -2021,36 +2076,38 @@ exports.expireStaleVistorias = onSchedule(
     console.log(`expireStaleVistorias: ${snap.size} vistoria(s) vencida(s), expirando.`);
 
     for (const doc of snap.docs) {
-      const data = doc.data();
-      const sinistroId = String(data.sinistroId || "").trim();
-
-      const batch = db.batch();
-
-      batch.set(
-        doc.ref,
-        {
-          status: "EXPIRADA",
-          expiredAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true }
-      );
-
-      if (sinistroId) {
-        batch.set(
-          db.collection("sinistro").doc(sinistroId),
-          {
-            vistoriaAtualId: String(data.idvistoria || doc.id),
-            vistoriaAtualStatus: "EXPIRADA",
-            vistoriaAtualTipo: String(data.tipoVistoria || "ORIGINAL"),
-            ultimaVistoriaAt: admin.firestore.FieldValue.serverTimestamp(),
-          },
-          { merge: true }
-        );
-      }
-
-      await batch.commit();
-      console.log("expireStaleVistorias: expirada", { vistoriaId: doc.id, sinistroId });
+      await expireVistoriaIfDue(db, doc);
     }
+  }
+);
+
+// Checagem sob demanda — o app chama isso no exato momento em que o
+// mecânico aperta "Continuar agora" no modal de retomar vistoria. Cobre a
+// janela entre uma varredura agendada e outra (agora até 12h): sem isso, o
+// mecânico podia cair numa sessão que já devia estar expirada só porque o
+// job agendado ainda não tinha passado por ela.
+exports.checkVistoriaExpiration = onCall(
+  { region: "us-central1" },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Usuário precisa estar autenticado.");
+    }
+
+    const idvistoria = String(request.data?.idvistoria || "").trim();
+    if (!idvistoria) {
+      throw new HttpsError("invalid-argument", "idvistoria é obrigatório.");
+    }
+
+    const db = admin.firestore();
+    const ref = db.collection("vistorias").doc(idvistoria);
+    const doc = await ref.get();
+
+    if (!doc.exists) {
+      throw new HttpsError("not-found", "Vistoria não encontrada.");
+    }
+
+    const expired = await expireVistoriaIfDue(db, doc);
+
+    return { expired };
   }
 );
