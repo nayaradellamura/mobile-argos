@@ -1932,9 +1932,21 @@ function normalizeBusinessStart(date) {
   return current;
 }
 
-function isBusinessDay(date) {
-  const day = date.getDay();
+const SP_WEEKDAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Sao_Paulo",
+  weekday: "short",
+});
+const SP_WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
+function isBusinessDay(date) {
+  // date.getDay() reflete o fuso do container da Cloud Function (UTC), nao
+  // o horario de Brasilia. Como UTC-3 faz o "dia" virar entre 21h e 23h59
+  // no horario local, uma vistoria criada quinta as 23h22 em Brasilia era
+  // lida como sexta 02h22 em UTC — aplicando cedo demais a regra de pular
+  // o fim de semana e empurrando a expiracao pra segunda em vez de sexta a
+  // noite. Precisa converter pro fuso de Brasilia antes de checar o dia.
+  const weekday = SP_WEEKDAY_FORMATTER.format(date);
+  const day = SP_WEEKDAY_INDEX[weekday];
 
   return day >= 1 && day <= 5;
 }
