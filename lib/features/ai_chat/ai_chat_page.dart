@@ -124,7 +124,15 @@ class _AiChatPageState extends State<AiChatPage> {
   bool isRecording = false;
   bool isStartingRecording = false;
   bool isAiTyping = false;
-  bool autoCameraOpenedForPhotoRelease = false;
+
+  // Câmera começa travada — só libera quando o agente diz a frase exata de
+  // liberação da leva de danos externos (_isPhotoReleaseText). Uma vez
+  // liberada, fica liberada pelo resto da sessão (não existe sinal de
+  // "re-travar" pras levas seguintes). cameraPulsing acende só no momento
+  // em que acabou de liberar, e apaga assim que a câmera for aberta pela
+  // primeira vez (botão fixo ou ação dentro da própria bolha).
+  bool cameraUnlocked = false;
+  bool cameraPulsing = false;
 
   Timer? recordingTimer;
   int recordingSeconds = 0;
@@ -221,15 +229,15 @@ class _AiChatPageState extends State<AiChatPage> {
     );
   }
 
+  // Não abre mais a câmera sozinha — só destrava o botão (fixo na barra de
+  // composição) e acende o pulso, deixando o mecânico decidir quando tocar.
   void _openCameraAfterPhotoRelease(String text) {
-    if (autoCameraOpenedForPhotoRelease) return;
+    if (cameraUnlocked) return;
     if (!_isPhotoReleaseText(text)) return;
 
-    autoCameraOpenedForPhotoRelease = true;
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || isInspectionCompleted) return;
-      _openCamera();
+    setState(() {
+      cameraUnlocked = true;
+      cameraPulsing = true;
     });
   }
 
@@ -955,7 +963,8 @@ class _AiChatPageState extends State<AiChatPage> {
     currentSession = session;
     isInspectionCompleted = false;
     completedInspectionStatus = '';
-    autoCameraOpenedForPhotoRelease = false;
+    cameraUnlocked = false;
+    cameraPulsing = false;
     _listenToVistoriaCompletion(session);
 
     // audio_transcription vem do backend como uma entrada separada do
@@ -994,6 +1003,14 @@ class _AiChatPageState extends State<AiChatPage> {
     messages
       ..clear()
       ..addAll(loadedMessages);
+
+    // Retomando uma sessão que já passou desse ponto — destrava sem pulsar
+    // (o pulso é só pro momento em que a liberação acabou de acontecer).
+    if (messages.any(
+      (m) => m.type == ChatMessageType.ai && _isPhotoReleaseText(m.text),
+    )) {
+      cameraUnlocked = true;
+    }
 
     if (messages.isEmpty) {
       messages.add(
@@ -1217,6 +1234,12 @@ class _AiChatPageState extends State<AiChatPage> {
         backgroundColor: Colors.orange,
       );
       return;
+    }
+
+    if (cameraPulsing) {
+      setState(() {
+        cameraPulsing = false;
+      });
     }
 
     FocusScope.of(context).unfocus();
@@ -1781,10 +1804,17 @@ class _AiChatPageState extends State<AiChatPage> {
                             }
 
                             final message = messages[index];
+                            final isCameraReleaseMessage =
+                                message.type == ChatMessageType.ai &&
+                                _isPhotoReleaseText(message.text);
 
                             return Padding(
                               padding: const EdgeInsets.only(bottom: 16),
-                              child: _ChatBubble(message: message),
+                              child: _ChatBubble(
+                                message: message,
+                                onOpenCamera:
+                                    isCameraReleaseMessage ? _openCamera : null,
+                              ),
                             );
                           },
                         ),
@@ -1813,6 +1843,8 @@ class _AiChatPageState extends State<AiChatPage> {
                                 controller: messageController,
                                 hasText: hasText,
                                 isStartingRecording: isStartingRecording,
+                                cameraUnlocked: cameraUnlocked,
+                                cameraPulsing: cameraPulsing,
                                 onCameraTap: _openCamera,
                                 onSendTap: _sendTextMessage,
                                 onMicTap: _startRecording,
@@ -2623,7 +2655,12 @@ class _ChatHeader extends StatelessWidget {
 class _ChatBubble extends StatelessWidget {
   final ChatMessage message;
 
-  const _ChatBubble({required this.message});
+  /// Só não-nulo na bolha exata que liberou a câmera (calculado pelo
+  /// chamador com _isPhotoReleaseText, que é um método de estado e não dá
+  /// pra chamar direto daqui, já que esta é uma StatelessWidget à parte).
+  final VoidCallback? onOpenCamera;
+
+  const _ChatBubble({required this.message, this.onOpenCamera});
 
   @override
   Widget build(BuildContext context) {
@@ -2633,6 +2670,7 @@ class _ChatBubble extends StatelessWidget {
           text: message.text,
           boldLineIndexes: message.boldLineIndexes,
           createdAt: message.createdAt,
+          onOpenCamera: onOpenCamera,
         );
 
       case ChatMessageType.user:
@@ -2664,11 +2702,13 @@ class _AiBubble extends StatelessWidget {
   final String text;
   final List<int> boldLineIndexes;
   final DateTime? createdAt;
+  final VoidCallback? onOpenCamera;
 
   const _AiBubble({
     required this.text,
     this.boldLineIndexes = const [],
     this.createdAt,
+    this.onOpenCamera,
   });
 
   @override
@@ -2708,6 +2748,42 @@ class _AiBubble extends StatelessWidget {
                     children: _buildLineSpans(),
                   ),
                 ),
+                if (onOpenCamera != null) ...[
+                  const SizedBox(height: 10),
+                  InkWell(
+                    onTap: onOpenCamera,
+                    borderRadius: BorderRadius.circular(999),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0057C0),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.camera_alt,
+                            color: Colors.white,
+                            size: 16,
+                          ),
+                          SizedBox(width: 6),
+                          Text(
+                            'Abrir câmera',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 12.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 6),
                 Align(
                   alignment: Alignment.centerRight,
@@ -3485,6 +3561,8 @@ class _TextComposer extends StatelessWidget {
   final TextEditingController controller;
   final bool hasText;
   final bool isStartingRecording;
+  final bool cameraUnlocked;
+  final bool cameraPulsing;
   final VoidCallback onCameraTap;
   final VoidCallback onSendTap;
   final VoidCallback onMicTap;
@@ -3494,6 +3572,8 @@ class _TextComposer extends StatelessWidget {
     required this.controller,
     required this.hasText,
     required this.isStartingRecording,
+    required this.cameraUnlocked,
+    required this.cameraPulsing,
     required this.onCameraTap,
     required this.onSendTap,
     required this.onMicTap,
@@ -3509,11 +3589,10 @@ class _TextComposer extends StatelessWidget {
       ),
       child: Row(
         children: [
-          IconButton(
-            onPressed: onCameraTap,
-            icon: const Icon(Icons.camera_alt),
-            color: const Color(0xFF0057C0),
-            tooltip: 'Anexar fotos',
+          _CameraReleaseButton(
+            unlocked: cameraUnlocked,
+            pulsing: cameraPulsing,
+            onTap: onCameraTap,
           ),
           Expanded(
             child: TextField(
@@ -3562,6 +3641,92 @@ class _TextComposer extends StatelessWidget {
                   ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Botão de câmera da barra de composição: travado (cinza, sem ação) até o
+/// agente liberar a leva de fotos; ao liberar, acende um pulso discreto que
+/// só apaga quando a câmera é aberta de fato (por aqui ou pela ação dentro
+/// da própria bolha de chat que liberou — ver _AiBubble).
+class _CameraReleaseButton extends StatefulWidget {
+  final bool unlocked;
+  final bool pulsing;
+  final VoidCallback onTap;
+
+  const _CameraReleaseButton({
+    required this.unlocked,
+    required this.pulsing,
+    required this.onTap,
+  });
+
+  @override
+  State<_CameraReleaseButton> createState() => _CameraReleaseButtonState();
+}
+
+class _CameraReleaseButtonState extends State<_CameraReleaseButton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _glow;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 850),
+    );
+    _glow = Tween<double>(begin: .12, end: .5).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+    );
+
+    if (widget.pulsing) _controller.repeat(reverse: true);
+  }
+
+  @override
+  void didUpdateWidget(covariant _CameraReleaseButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (widget.pulsing && !oldWidget.pulsing) {
+      _controller.repeat(reverse: true);
+    } else if (!widget.pulsing && oldWidget.pulsing) {
+      _controller.stop();
+      _controller.value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        return Container(
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: widget.pulsing
+                ? const Color(0xFF0057C0).withOpacity(_glow.value)
+                : Colors.transparent,
+          ),
+          child: child,
+        );
+      },
+      child: IconButton(
+        onPressed: widget.unlocked ? widget.onTap : null,
+        icon: Icon(
+          widget.unlocked ? Icons.camera_alt : Icons.camera_alt_outlined,
+        ),
+        color: widget.unlocked ? const Color(0xFF0057C0) : null,
+        disabledColor: const Color(0xFFB5C3D6),
+        tooltip: widget.unlocked
+            ? 'Anexar fotos'
+            : 'A câmera libera quando o assistente pedir as fotos',
       ),
     );
   }
