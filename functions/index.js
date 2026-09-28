@@ -5,7 +5,12 @@ const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { defineString } = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const { GoogleAuth } = require("google-auth-library");
-const { VertexAI } = require("@google-cloud/vertexai");
+// @google-cloud/vertexai (a SDK antiga) nao sabe montar a URL pro endpoint
+// "global" -- obrigatorio pros modelos Gemini 3.x, que nao existem em
+// endpoints regionais como us-central1 (confirmado em teste de canario no
+// laudo-service: 404 "model not found" com a SDK antiga, funcionando
+// certinho com @google/genai). A antiga ja esta descontinuada pela Google.
+const { GoogleGenAI } = require("@google/genai");
 const { CloudTasksClient } = require("@google-cloud/tasks");
 
 if (!admin.apps.length) {
@@ -47,30 +52,29 @@ const FIREBASE_PROJECT_ID =
   "fho-argos";
 
 const VERTEX_PROJECT_ID = FIREBASE_PROJECT_ID;
-const VERTEX_LOCATION = "us-central1";
-const GEMINI_REVIEW_MODEL = "gemini-2.5-flash";
+// Modelos 3.x só existem no endpoint "global" do Vertex — em us-central1 a
+// chamada volta 404. Se algum dia voltar pra um modelo 2.x, pode voltar pra
+// us-central1 (global também atende os dois, então não é obrigatório).
+const VERTEX_LOCATION = "global";
+const GEMINI_REVIEW_MODEL = "gemini-3.8-flash";
+const GEMINI_REVIEW_GENERATION_CONFIG = {
+  temperature: 0.1,
+  maxOutputTokens: 1024,
+  responseMimeType: "application/json",
+};
 
-let cachedGeminiModel = null;
+let cachedGenAIClient = null;
 
+function getGenAIClient() {
+  if (cachedGenAIClient) return cachedGenAIClient;
 
-function getGeminiReviewModel() {
-  if (cachedGeminiModel) return cachedGeminiModel;
-
-  const vertexAI = new VertexAI({
+  cachedGenAIClient = new GoogleGenAI({
+    vertexai: true,
     project: VERTEX_PROJECT_ID,
     location: VERTEX_LOCATION,
   });
 
-  cachedGeminiModel = vertexAI.getGenerativeModel({
-    model: GEMINI_REVIEW_MODEL,
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 1024,
-      responseMimeType: "application/json",
-    },
-  });
-
-  return cachedGeminiModel;
+  return cachedGenAIClient;
 }
 
 function createSessionId(uid, inspectionId) {
@@ -1153,9 +1157,10 @@ Contexto da vistoria:
 - Observações: ${observacoes}
 `.trim();
 
-  const model = getGeminiReviewModel();
+  const client = getGenAIClient();
 
-  const result = await model.generateContent({
+  const result = await client.models.generateContent({
+    model: GEMINI_REVIEW_MODEL,
     contents: [
       {
         role: "user",
@@ -1170,6 +1175,7 @@ Contexto da vistoria:
         ],
       },
     ],
+    config: GEMINI_REVIEW_GENERATION_CONFIG,
   });
 
   const rawText = extractGeminiText(result);
@@ -1208,9 +1214,7 @@ function normalizeAudioMimeType(contentType) {
 }
 
 function extractGeminiText(result) {
-  const candidates = result?.response?.candidates || [];
-  const parts = candidates[0]?.content?.parts || [];
-  return parts.map((part) => part.text || "").join("").trim();
+  return (result?.text || "").trim();
 }
 
 function parseGeminiAudioJson(rawText) {
