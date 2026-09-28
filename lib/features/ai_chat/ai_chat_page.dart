@@ -963,7 +963,12 @@ class _AiChatPageState extends State<AiChatPage> {
     currentSession = session;
     isInspectionCompleted = false;
     completedInspectionStatus = '';
-    cameraUnlocked = false;
+    // Retificação não repete o roteiro original (identificação → danos
+    // externos → estruturais) que emite a frase exata de liberação — o
+    // agente já sabe o que existe e pode pedir foto nova a qualquer momento
+    // da correção. Travar o botão esperando por uma frase que talvez nunca
+    // venha deixaria a câmera bloqueada pro resto da retificação.
+    cameraUnlocked = session.isRetificacao;
     cameraPulsing = false;
     _listenToVistoriaCompletion(session);
 

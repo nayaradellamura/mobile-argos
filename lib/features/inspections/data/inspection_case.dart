@@ -432,30 +432,32 @@ class InspectionCase {
   bool get isRevisionCategory {
     final tipo = normalizeStatusText(vistoriaAtualTipo);
     final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
-    final origemId = vistoriaAtualOrigemId.trim();
-    final retificacaoId = retificacaoAtualId.trim();
 
-    // Retificação/revisão deve ser identificada pela modelagem nova:
-    // - a vistoria atual é RETIFICACAO/REVISAO;
-    // - ou a vistoria atual nasceu de uma vistoria original (vistoriaAtualOrigemId);
-    // - ou este sinistro/original aponta para uma retificação atual (retificacaoAtualId).
-    // Status REJEITADA sozinho não é usado aqui, porque rejeição e retificação
-    // são conceitos diferentes no novo fluxo operacional.
-    return status == InspectionStatus.rejected ||
-        tipo.contains('retificacao') ||
-        tipo.contains('retificação') ||
-        tipo.contains('revisao') ||
-        tipo.contains('revisão') ||
-        origemId.isNotEmpty ||
-        retificacaoId.isNotEmpty ||
+    // ATENÇÃO: vistoriaAtualOrigemId e retificacaoAtualId NÃO são usados aqui
+    // de propósito — os dois ficam gravados no sinistro para sempre depois
+    // que uma retificação é criada (nenhum fluxo os limpa), então usá-los
+    // pra classificar categoria prendia o sinistro em "Rejeitada" mesmo
+    // depois de reenviado, aprovado ou cancelado. Quem decide se ainda está
+    // em revisão é o estado ATUAL: rejeitada agora, ou retificação que ainda
+    // não voltou pra análise.
+    final isRejectedNow = status == InspectionStatus.rejected ||
         vistoriaStatus.contains('rejeitada') ||
         vistoriaStatus.contains('rejeitado') ||
-        vistoriaStatus.contains('rejected') ||
-        vistoriaStatus.contains('retificar') ||
-        vistoriaStatus.contains('retificacao') ||
-        vistoriaStatus.contains('retificação') ||
-        vistoriaStatus.contains('revisao') ||
-        vistoriaStatus.contains('revisão');
+        vistoriaStatus.contains('rejected');
+
+    final isRetificacaoTipo = tipo.contains('retificacao') ||
+        tipo.contains('retificação') ||
+        tipo.contains('revisao') ||
+        tipo.contains('revisão');
+
+    // Retificação só conta como "em revisão" enquanto o mecânico ainda está
+    // trabalhando nela (EM_ANDAMENTO) — assim que ela é reenviada
+    // (EM_ANALISE_OPERACIONAL), aprovada (FINALIZADA) ou cancelada, o card
+    // deve refletir esse novo estágio, não ficar preso em "Rejeitada".
+    final isRetificacaoEmAndamento =
+        isRetificacaoTipo && vistoriaStatus.contains('andamento');
+
+    return isRejectedNow || isRetificacaoEmAndamento;
   }
 
   bool get isCancelledCategory {

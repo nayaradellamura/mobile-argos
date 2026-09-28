@@ -1091,96 +1091,14 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                               const SizedBox(height: 14),
                               const _ChecklistCard(),
                               const SizedBox(height: 20),
-                              SizedBox(
-                                height: 54,
-                                child: ElevatedButton.icon(
-                                  onPressed: canCheckIn && !isCheckingIn
-                                      ? _registerCheckIn
-                                      : null,
-                                  icon: isCheckingIn
-                                      ? const SizedBox(
-                                          width: 18,
-                                          height: 18,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                            color: Colors.white,
-                                          ),
-                                        )
-                                      : Icon(
-                                          hasCheckIn
-                                              ? Icons.check_circle
-                                              : Icons.login_rounded,
-                                        ),
-                                  label: Text(
-                                    isCheckingIn
-                                        ? 'Realizando check-in...'
-                                        : isHumanAnalysis
-                                            ? 'Vistoria em analise humana'
-                                            : isAssignedToAnother
-                                            ? 'Vistoria vinculada a ${inspection.assignedToName}'
-                                            : hasCheckIn &&
-                                                    !inspection.hasAssignedUser
-                                                ? 'Assumir vistoria'
-                                                : hasCheckIn
-                                                    ? 'Check-in realizado às ${_formatTime(inspection.checkInAt!)}'
-                                                    : 'Realizar check-in e assumir vistoria',
-                                  ),
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: hasCheckIn
-                                        ? Colors.green
-                                        : isAssignedToAnother
-                                            ? const Color(0xFF9CA3AF)
-                                            : const Color(0xFF0057C0),
-                                    foregroundColor: Colors.white,
-                                    disabledBackgroundColor: hasCheckIn
-                                        ? Colors.green
-                                        : isAssignedToAnother
-                                            ? const Color(0xFF9CA3AF)
-                                            : const Color(0xFF0057C0),
-                                    disabledForegroundColor: Colors.white,
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(18),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(height: 10),
-                              SizedBox(
-                                height: 54,
-                                child: OutlinedButton.icon(
-                                  onPressed: canOpenChat ? _goToChat : null,
-                                  icon: Icon(
-                                    canOpenChat
-                                        ? Icons.smart_toy
-                                        : Icons.lock_outline,
-                                  ),
-                                  label: Text(
-                                    canOpenChat
-                                        ? 'Iniciar coleta no Chat IA'
-                                        : isHumanAnalysis
-                                            ? 'Vistoria em analise humana'
-                                            : isAssignedToAnother
-                                            ? 'Chat bloqueado para outro responsável'
-                                            : 'Faça check-in para iniciar o Chat IA',
-                                  ),
-                                  style: OutlinedButton.styleFrom(
-                                    foregroundColor: canOpenChat
-                                        ? const Color(0xFF0057C0)
-                                        : const Color(0xFF6B7280),
-                                    backgroundColor: canOpenChat
-                                        ? const Color(0xFFE5F6FF)
-                                        : const Color(0xFFE5E7EB),
-                                    side: BorderSide(
-                                      color: Colors.black.withOpacity(.05),
-                                    ),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(18),
-                                    ),
-                                  ),
-                                ),
-                              ),
+                              // Rejeitada/retificação em andamento: check-in
+                              // já foi feito na vistoria original e o chat
+                              // comum está bloqueado de propósito (ver
+                              // canOpenChat) — mostrar os dois botões aqui só
+                              // criava um 3º botão redundante e sempre
+                              // desabilitado. "Iniciar Retificação" ocupa o
+                              // lugar deles como ação principal.
                               if (canStartRetificacao) ...[
-                                const SizedBox(height: 10),
                                 SizedBox(
                                   height: 54,
                                   child: ElevatedButton.icon(
@@ -1190,6 +1108,95 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                     style: ElevatedButton.styleFrom(
                                       backgroundColor: Colors.deepOrange,
                                       foregroundColor: Colors.white,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(18),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ] else ...[
+                                SizedBox(
+                                  height: 54,
+                                  child: ElevatedButton.icon(
+                                    onPressed: canCheckIn && !isCheckingIn
+                                        ? _registerCheckIn
+                                        : null,
+                                    icon: isCheckingIn
+                                        ? const SizedBox(
+                                            width: 18,
+                                            height: 18,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: Colors.white,
+                                            ),
+                                          )
+                                        : Icon(
+                                            hasCheckIn
+                                                ? Icons.check_circle
+                                                : Icons.login_rounded,
+                                          ),
+                                    label: Text(
+                                      isCheckingIn
+                                          ? 'Realizando check-in...'
+                                          : isHumanAnalysis
+                                              ? 'Vistoria em analise humana'
+                                              : isAssignedToAnother
+                                              ? 'Vistoria vinculada a ${inspection.assignedToName}'
+                                              : hasCheckIn &&
+                                                      !inspection.hasAssignedUser
+                                                  ? 'Assumir vistoria'
+                                                  : hasCheckIn
+                                                      ? 'Check-in realizado às ${_formatTime(inspection.checkInAt!)}'
+                                                      : 'Realizar check-in e assumir vistoria',
+                                    ),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: hasCheckIn
+                                          ? Colors.green
+                                          : isAssignedToAnother
+                                              ? const Color(0xFF9CA3AF)
+                                              : const Color(0xFF0057C0),
+                                      foregroundColor: Colors.white,
+                                      disabledBackgroundColor: hasCheckIn
+                                          ? Colors.green
+                                          : isAssignedToAnother
+                                              ? const Color(0xFF9CA3AF)
+                                              : const Color(0xFF0057C0),
+                                      disabledForegroundColor: Colors.white,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(18),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 10),
+                                SizedBox(
+                                  height: 54,
+                                  child: OutlinedButton.icon(
+                                    onPressed: canOpenChat ? _goToChat : null,
+                                    icon: Icon(
+                                      canOpenChat
+                                          ? Icons.smart_toy
+                                          : Icons.lock_outline,
+                                    ),
+                                    label: Text(
+                                      canOpenChat
+                                          ? 'Iniciar coleta no Chat IA'
+                                          : isHumanAnalysis
+                                              ? 'Vistoria em analise humana'
+                                              : isAssignedToAnother
+                                              ? 'Chat bloqueado para outro responsável'
+                                              : 'Faça check-in para iniciar o Chat IA',
+                                    ),
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: canOpenChat
+                                          ? const Color(0xFF0057C0)
+                                          : const Color(0xFF6B7280),
+                                      backgroundColor: canOpenChat
+                                          ? const Color(0xFFE5F6FF)
+                                          : const Color(0xFFE5E7EB),
+                                      side: BorderSide(
+                                        color: Colors.black.withOpacity(.05),
+                                      ),
                                       shape: RoundedRectangleBorder(
                                         borderRadius: BorderRadius.circular(18),
                                       ),
