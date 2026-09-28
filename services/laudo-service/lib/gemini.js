@@ -68,6 +68,27 @@ relato mudou em relação à descrição inicial (item 2), o padrão de suficiê
 é mais alto: fotos que cubram também a região originalmente reportada como
 danificada, não só a região da nova versão do mecânico.
 
+Antes de tudo isso, faça uma checagem de autenticidade em CADA foto — isso
+não é opcional, é a primeira coisa a avaliar em cada imagem:
+- O veículo retratado bate com marca/modelo/cor informados no contexto
+  ("Veículo: ..." abaixo)? Uma foto de um veículo visivelmente diferente
+  (cor errada, modelo incompatível, sem nenhuma vista da placa em nenhuma
+  foto do conjunto) é motivo de incongruência, não só "achado a mais".
+- A foto tem sinais de ter sido tirada de uma TELA/MONITOR em vez do
+  veículo real (fraude comum: fotografar uma foto de outro sinistro, ou de
+  uma busca na internet, exibida numa tela) — procure por: padrão de
+  moiré/interferência, brilho ou reflexo típico de tela de LED/LCD, borda
+  de moldura de monitor ou celular visível no enquadramento, pixelização
+  ou bordas serrilhadas incompatíveis com uma foto tirada de um objeto
+  físico real, ou proporção/perspectiva que sugere fotografar uma tela
+  plana de frente. Se notar qualquer um desses sinais em qualquer foto,
+  isso é o achado mais grave possível e deve zerar a confiança no dano
+  correspondente àquela foto.
+Se qualquer uma dessas duas checagens falhar em qualquer foto, marque
+"incongruenciaDetectada" como true e descreva exatamente qual foto e qual
+sinal encontrado em "detalhesIncongruencia" — isso terá o mesmo peso que uma
+incongruência de relato (força revisão manual, ver regra abaixo).
+
 Se vier um "orçamento registrado pelo agente de campo" no contexto, trate-o
 como referência NÃO verificada — foi rascunhado por outro agente de IA ainda
 durante a vistoria, sem revisão humana. Cruze o valor com o que você vê nas
