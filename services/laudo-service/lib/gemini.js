@@ -1,33 +1,42 @@
-const { VertexAI } = require("@google-cloud/vertexai");
+// @google-cloud/vertexai (a SDK antiga) não sabe montar a URL pro endpoint
+// "global" — obrigatório pros modelos Gemini 3.x, que não existem em
+// endpoints regionais como us-central1. Sem essa troca, qualquer modelo 3.x
+// aqui falha com 404 "model not found" (confirmado em teste de canary antes
+// de ir pra produção). @google/genai é o SDK atual recomendado pela Google
+// pra Vertex AI/Gemini Enterprise (a antiga já está marcada como descontinuada).
+const { GoogleGenAI } = require("@google/genai");
 
 const PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || "fho-argos";
 const LOCATION = process.env.GOOGLE_CLOUD_LOCATION || "us-central1";
 // Mesmo modelo que o resto do backend já usa para revisão (functions/index.js,
-// GEMINI_REVIEW_MODEL) — mantém previsibilidade de custo/qualidade.
+// GEMINI_REVIEW_MODEL) — mantém previsibilidade de custo/qualidade. Se trocar
+// pra um modelo 3.x, GOOGLE_CLOUD_LOCATION também precisa virar "global".
 const MODEL = process.env.LAUDO_GEMINI_MODEL || "gemini-2.5-flash";
 const STORAGE_BUCKET =
   process.env.ARGOS_STORAGE_BUCKET || `${PROJECT_ID}.firebasestorage.app`;
 
-let cachedModel = null;
+const GENERATION_CONFIG = {
+  temperature: 0.2,
+  // 4096 estava curto demais pra vistorias com muitos danos — o Gemini
+  // cortava a resposta no meio de uma string, gerando JSON inválido
+  // (ver caso ARG-2026-0086: colisão traseira com bastante dano
+  // descrito). Dobrado com folga.
+  maxOutputTokens: 8192,
+  responseMimeType: "application/json",
+};
 
-function getModel() {
-  if (cachedModel) return cachedModel;
+let cachedClient = null;
 
-  const vertexAI = new VertexAI({ project: PROJECT_ID, location: LOCATION });
-  cachedModel = vertexAI.getGenerativeModel({
-    model: MODEL,
-    generationConfig: {
-      temperature: 0.2,
-      // 4096 estava curto demais pra vistorias com muitos danos — o Gemini
-      // cortava a resposta no meio de uma string, gerando JSON inválido
-      // (ver caso ARG-2026-0086: colisão traseira com bastante dano
-      // descrito). Dobrado com folga.
-      maxOutputTokens: 8192,
-      responseMimeType: "application/json",
-    },
+function getClient() {
+  if (cachedClient) return cachedClient;
+
+  cachedClient = new GoogleGenAI({
+    vertexai: true,
+    project: PROJECT_ID,
+    location: LOCATION,
   });
 
-  return cachedModel;
+  return cachedClient;
 }
 
 const SYSTEM_PROMPT = `Você é um perito técnico automotivo sênior, escrevendo o laudo
@@ -140,7 +149,7 @@ async function buildImageParts(fotos) {
  * bytes) + a transcrição, e retorna os achados já estruturados.
  */
 async function gerarAchadosTecnicos(context) {
-  const model = getModel();
+  const client = getClient();
 
   const transcricaoTexto = context.transcricao
     .map((m) => `[${m.autor}]: ${m.texto}`)
@@ -172,20 +181,18 @@ Transcrição da vistoria (mecânico + IA):
 ${transcricaoTexto || "(sem mensagens registradas)"}
 `.trim();
 
-  const result = await model.generateContent({
+  const result = await client.models.generateContent({
+    model: MODEL,
     contents: [
       {
         role: "user",
         parts: [{ text: SYSTEM_PROMPT }, { text: textoContexto }, ...imageParts],
       },
     ],
+    config: GENERATION_CONFIG,
   });
 
-  const rawText =
-    result?.response?.candidates?.[0]?.content?.parts
-      ?.map((p) => p.text || "")
-      .join("")
-      .trim() || "";
+  const rawText = (result?.text || "").trim();
 
   if (!rawText) {
     throw new Error("Gemini não retornou conteúdo para o laudo.");
