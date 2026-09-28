@@ -59,7 +59,13 @@ const VERTEX_LOCATION = "global";
 const GEMINI_REVIEW_MODEL = "gemini-3.8-flash";
 const GEMINI_REVIEW_GENERATION_CONFIG = {
   temperature: 0.1,
-  maxOutputTokens: 1024,
+  // 1024 cortava a transcrição no meio pra áudios mais longos — a resposta
+  // carrega transcricaoOriginal E transcricaoRevisada (quase duplicado) mais
+  // os tokens de "pensamento" do gemini-3.8-flash, que contam no mesmo teto.
+  // Mesmo problema já visto no laudo-service (ver lib/gemini.js) — 8192 dá
+  // folga de sobra pra um relato falado longo sem custar quase nada a mais
+  // (o teto raramente é atingido de verdade, só evita o corte quando é).
+  maxOutputTokens: 8192,
   responseMimeType: "application/json",
 };
 
