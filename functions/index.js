@@ -821,6 +821,27 @@ async function buildSinistroNotification({ db, sinistroId, before, after, isCrea
     };
   }
 
+  // Laudo técnico (laudo-service) terminou de gerar e encontrou incongruência
+  // entre o relato do mecânico e a descrição inicial do sinistro e/ou as
+  // fotos — precisa chegar ao analista como alerta, não ficar só num campo
+  // do Firestore que ninguém abre (RF24: suspeita de fraude/inconsistência).
+  const beforeLaudo = before?.laudoTecnico;
+  const afterLaudo = after.laudoTecnico;
+  const laudoAcabouDeFicarPronto =
+    beforeLaudo?.status !== "pronto" && afterLaudo?.status === "pronto";
+
+  if (laudoAcabouDeFicarPronto && afterLaudo?.achados?.incongruenciaDetectada === true) {
+    const detalhes = String(afterLaudo.achados.detalhesIncongruencia || "").trim();
+
+    return {
+      type: "laudo_incongruencia_detectada",
+      title: "⚠ Incongruência no laudo — revisão manual necessária",
+      body: detalhes
+        ? `${protocol}: ${detalhes}`
+        : `${protocol}: o laudo técnico encontrou uma incongruência entre o relato e as evidências. Abra o app para revisar.`,
+    };
+  }
+
   // Aprovacao (finalizar/route.ts) muda sinistro.status pra FINALIZADO —
   // merece uma mensagem propria e positiva, em vez de cair no aviso
   // generico de "status mudou" que rejeicao/cancelamento tambem usariam.

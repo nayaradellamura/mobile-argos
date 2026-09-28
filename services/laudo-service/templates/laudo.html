@@ -87,6 +87,26 @@
   }
   .severity-justificativa { margin-top: 8px; font-size: 10pt; color: #3a4855; }
 
+  /* Mesmo peso visual da faixa de severidade — a incongruência não pode
+     ficar menos visível que uma informação de rotina, senão o analista
+     passa direto por ela como aconteceu antes desta seção existir. */
+  .alert-box {
+    background: #fdf1f1;
+    border-left: 4px solid #d9364a;
+    padding: 12px 14px;
+    border-radius: 6px;
+    font-size: 10pt;
+    margin-top: 10px;
+  }
+  .alert-box .alert-title {
+    font-weight: 700;
+    color: #d9364a;
+    text-transform: uppercase;
+    font-size: 9pt;
+    letter-spacing: 0.03em;
+    margin-bottom: 6px;
+  }
+
   table.danos { width: 100%; border-collapse: collapse; margin-top: 6px; }
   table.danos th {
     text-align: left;
@@ -167,6 +187,20 @@
       <div class="severity-justificativa">{{justificativaClassificacao}}</div>
     </div>
 
+    {{#if incongruenciaDetectada}}
+    <div class="alert-box">
+      <div class="alert-title">⚠ Incongruência detectada — leitura obrigatória antes de aprovar</div>
+      {{detalhesIncongruencia}}
+    </div>
+    {{/if}}
+
+    {{#unless evidenciasSuficientes}}
+    <div class="alert-box">
+      <div class="alert-title">⚠ Evidências fotográficas insuficientes</div>
+      A quantidade e/ou o enquadramento das fotos enviadas não sustentam com segurança a classificação de severidade acima.
+    </div>
+    {{/unless}}
+
     <h2 class="section-title">Dados do Sinistro</h2>
     <div class="grid-2">
       <div class="field"><div class="label">Seguradora</div><div class="value">{{seguradoraNome}}</div></div>
@@ -175,6 +209,10 @@
       <div class="field"><div class="label">Documento</div><div class="value">{{clienteDocumento}}</div></div>
       <div class="field"><div class="label">Veículo</div><div class="value">{{veiculoModelo}} ({{veiculoAno}})</div></div>
       <div class="field"><div class="label">Placa / Cor</div><div class="value">{{veiculoPlaca}} — {{veiculoCor}}</div></div>
+    </div>
+    <div class="field" style="margin-top:6px;">
+      <div class="label">Descrição inicial do sinistro (reportada antes da vistoria)</div>
+      <div class="value">{{#if danosDescritos}}{{danosDescritos}}{{else}}Não informada{{/if}}</div>
     </div>
 
     <h2 class="section-title">Dados da Vistoria</h2>
@@ -210,7 +248,7 @@
     {{/if}}
 
     <h2 class="section-title">Recomendação</h2>
-    <div class="summary-box">{{recomendacoes}}</div>
+    <div class="{{#if precisaRevisaoManual}}alert-box{{else}}summary-box{{/if}}">{{recomendacoes}}</div>
 
     <h2 class="section-title">Evidências Fotográficas ({{fotos.length}})</h2>
     <div class="fotos-grid">

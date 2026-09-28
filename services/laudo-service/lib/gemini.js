@@ -46,11 +46,27 @@ monta", "média monta" ou "grande monta" — e explique o raciocínio por trás 
 classificação (isso é obrigatório: o analista precisa entender o "porquê", não
 só o resultado).
 
-Além disso, avalie explicitamente duas coisas: (1) se há alguma incongruência
-entre o que o mecânico relatou na transcrição e o que as fotos realmente
-mostram (ex: relato menciona um dano que nenhuma foto evidencia, ou o oposto);
-(2) se as fotos enviadas são suficientes, em quantidade e enquadramento, para
-sustentar com segurança a classificação de severidade dada.
+Além disso, avalie explicitamente TRÊS coisas (não duas — a terceira é
+frequentemente esquecida e é a mais grave das três):
+(1) se há alguma incongruência entre o que o mecânico relatou na transcrição
+e o que as fotos realmente mostram (ex: relato menciona um dano que nenhuma
+foto evidencia, ou o oposto);
+(2) se o relato do mecânico diverge de forma relevante da "Descrição inicial
+do sinistro" fornecida no contexto abaixo — ou seja, do que o cliente/
+seguradora reportou ao abrir o sinistro, ANTES da vistoria. Uma correção
+pontual de detalhe (ex: "não foi bem ali, foi um pouco mais acima") não conta.
+Conta quando o tipo de evento muda (colisão vira vandalismo, furto vira
+avaria mecânica, etc.) ou quando a região/natureza do dano relatado não bate
+com a inicial. Isso é potencialmente mais sério que a divergência foto-relato,
+porque pode indicar sinistro trocado, fraude, ou omissão do dano original —
+trate como incongruência mesmo que as fotos sozinhas corroborem a nova versão
+do mecânico, porque fotos insuficientes (ex: uma única foto) não provam que o
+dano original relatado pelo cliente não existe também;
+(3) se as fotos enviadas são suficientes, em quantidade e enquadramento, para
+sustentar com segurança a classificação de severidade dada — e, quando o
+relato mudou em relação à descrição inicial (item 2), o padrão de suficiência
+é mais alto: fotos que cubram também a região originalmente reportada como
+danificada, não só a região da nova versão do mecânico.
 
 Se vier um "orçamento registrado pelo agente de campo" no contexto, trate-o
 como referência NÃO verificada — foi rascunhado por outro agente de IA ainda
@@ -59,6 +75,16 @@ fotos (severidade alta deveria custar mais, por exemplo) e mencione essa
 comparação na justificativa, mas a classificação e o nível de confiança
 continuam sendo seu julgamento independente sobre as fotos e o relato — nunca
 copie a conclusão do outro agente sem confirmar pela evidência visual.
+
+REGRA OBRIGATÓRIA E NÃO NEGOCIÁVEL para o campo "recomendacoes": se
+"incongruenciaDetectada" for true OU "evidenciasSuficientes" for false, o
+texto de "recomendacoes" DEVE começar literalmente com "REVISÃO MANUAL
+NECESSÁRIA" seguido do motivo específico, e NUNCA pode recomendar aprovação
+direta — mesmo que a versão mais recente do mecânico pareça plausível e bem
+explicada. É terminantemente proibido a recomendação final contradizer o que
+você mesmo identificou nos campos de incongruência/suficiência de evidências:
+nunca escreva um "recomendacoes" que soe como aprovação quando
+incongruenciaDetectada for true.
 
 Responda ESTRITAMENTE em JSON com este formato, sem markdown, sem texto fora do JSON:
 {
@@ -70,10 +96,11 @@ Responda ESTRITAMENTE em JSON com este formato, sem markdown, sem texto fora do 
   "justificativaClassificacao": "explicação clara do porquê dessa classificação",
   "nivelConfianca": "alto|médio|baixo",
   "incongruenciaDetectada": <true|false>,
-  "detalhesIncongruencia": "se incongruenciaDetectada for true, explique qual; senão string vazia",
+  "detalhesIncongruencia": "se incongruenciaDetectada for true, explique qual (foto-relato e/ou relato-descrição inicial); senão string vazia",
+  "divergeDaDescricaoInicial": <true|false — item (2) acima, isolado, mesmo quando não fizer incongruenciaDetectada ser true>,
   "evidenciasSuficientes": <true|false>,
   "observacoesAdicionais": "qualquer coisa relevante relatada pelo mecânico que não virou um dano formal (ex: já sinalizou reparo anterior, pediu retorno, etc.), ou string vazia",
-  "recomendacoes": "recomendação objetiva para o analista (aprovar, pedir complementação, encaminhar para regulação manual, etc.)"
+  "recomendacoes": "recomendação objetiva para o analista — ver regra obrigatória acima sobre começar com 'REVISÃO MANUAL NECESSÁRIA' quando aplicável"
 }`;
 
 async function buildImageParts(fotos) {
@@ -143,11 +170,44 @@ ${transcricaoTexto || "(sem mensagens registradas)"}
     throw new Error("Gemini não retornou conteúdo para o laudo.");
   }
 
+  let achados;
   try {
-    return JSON.parse(rawText);
+    achados = JSON.parse(rawText);
   } catch (err) {
     throw new Error(`Gemini retornou JSON inválido: ${err.message}\n${rawText.slice(0, 500)}`);
   }
+
+  return enforceManualReviewOnRisk(achados);
+}
+
+// Trava determinística, não confiada só à instrução do prompt: o modelo pode
+// esquecer a regra, principalmente em vistorias longas perto do limite de
+// tokens. Se o próprio Gemini marcou incongruência ou evidência insuficiente
+// mas escreveu uma recomendação que não sinaliza revisão manual, corrige o
+// prefixo aqui — nunca deixa a recomendação final contradizer os achados.
+function enforceManualReviewOnRisk(achados) {
+  const precisaRevisao =
+    achados?.incongruenciaDetectada === true ||
+    achados?.evidenciasSuficientes === false;
+
+  if (!precisaRevisao) return achados;
+
+  const recomendacaoAtual = String(achados.recomendacoes || "").trim();
+  const jaSinaliza = /^REVIS[AÃ]O MANUAL NECESS[AÁ]RIA/i.test(recomendacaoAtual);
+
+  if (jaSinaliza) return achados;
+
+  const motivo =
+    achados.incongruenciaDetectada === true
+      ? achados.detalhesIncongruencia || "incongruência entre relato e evidências."
+      : "evidências fotográficas insuficientes para sustentar a classificação.";
+
+  return {
+    ...achados,
+    recomendacoes: `REVISÃO MANUAL NECESSÁRIA — ${motivo}${
+      recomendacaoAtual ? ` (avaliação original da IA: ${recomendacaoAtual})` : ""
+    }`,
+  };
 }
 
 module.exports = { gerarAchadosTecnicos };

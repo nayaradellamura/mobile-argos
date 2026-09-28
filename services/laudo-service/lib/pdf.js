@@ -63,6 +63,10 @@ async function renderLaudoPdf({ context, achados }) {
   const html = getTemplate(TEMPLATE_PATH)({
     ...context,
     ...achados,
+    // Deriva aqui, não no template: mistura de {{#if}}/{{#unless}} aninhados
+    // dentro de um atributo class vira sopa de sintaxe difícil de revisar.
+    precisaRevisaoManual:
+      achados.incongruenciaDetectada === true || achados.evidenciasSuficientes === false,
     dataEmissao: dataEmissaoAgora(),
     logoDataUri: getLogoDataUri(),
   });
