@@ -833,23 +833,28 @@ async function buildSinistroNotification({ db, sinistroId, before, after, isCrea
 
   // Laudo técnico (laudo-service) terminou de gerar e encontrou incongruência
   // entre o relato do mecânico e a descrição inicial do sinistro e/ou as
-  // fotos — precisa chegar ao analista como alerta, não ficar só num campo
-  // do Firestore que ninguém abre (RF24: suspeita de fraude/inconsistência).
+  // fotos. NÃO gera push aqui de propósito: esta função (notifySinistroChanges)
+  // só tem um canal de notificação, e ele manda pra credenciados/{id}.
+  // funcionariosUids — ou seja, pro MECÂNICO. Um alerta de incongruência/
+  // suspeita de fraude não pode chegar em quem pode ter sido a origem do
+  // problema. A visibilidade pro analista já existe por outro caminho: o
+  // bloco de alerta no PDF do laudo e o campo sinistro.laudoTecnico.achados
+  // no Firestore (ver services/laudo-service/templates/laudo.html). Um canal
+  // de push dedicado ao analista (RF24) ainda não existe neste projeto —
+  // precisaria de um jeito de achar quem é o analista do sinistro e o token
+  // dele, que hoje não está modelado aqui.
   const beforeLaudo = before?.laudoTecnico;
   const afterLaudo = after.laudoTecnico;
   const laudoAcabouDeFicarPronto =
     beforeLaudo?.status !== "pronto" && afterLaudo?.status === "pronto";
 
   if (laudoAcabouDeFicarPronto && afterLaudo?.achados?.incongruenciaDetectada === true) {
-    const detalhes = String(afterLaudo.achados.detalhesIncongruencia || "").trim();
+    console.log("Laudo com incongruência detectada (sem push — ver comentário acima):", {
+      sinistroId,
+      detalhes: afterLaudo.achados.detalhesIncongruencia,
+    });
 
-    return {
-      type: "laudo_incongruencia_detectada",
-      title: "⚠ Incongruência no laudo — revisão manual necessária",
-      body: detalhes
-        ? `${protocol}: ${detalhes}`
-        : `${protocol}: o laudo técnico encontrou uma incongruência entre o relato e as evidências. Abra o app para revisar.`,
-    };
+    return null;
   }
 
   // Aprovacao (finalizar/route.ts) muda sinistro.status pra FINALIZADO —
