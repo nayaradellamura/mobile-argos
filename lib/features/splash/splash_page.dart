@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:restart_app/restart_app.dart';
 import 'package:shorebird_code_push/shorebird_code_push.dart';
 
 class SplashPage extends StatefulWidget {
@@ -98,18 +97,20 @@ class _SplashPageState extends State<SplashPage> {
               try {
                 await shorebirdUpdater.update();
                 if (!mounted) return;
-                setState(() => _updateStatusText = 'Aplicando atualização...');
-                await _restartToApplyPatch();
+                setState(
+                  () => _updateStatusText =
+                      'Atualização baixada — abra o app de novo pra aplicar',
+                );
               } catch (e) {
                 debugPrint('Erro ao baixar patch do Shorebird: $e');
                 if (!mounted) return;
                 setState(() => _updateStatusText = null);
               }
             case UpdateStatus.restartRequired:
-              // Um patch de uma sessão anterior já foi baixado mas o app
-              // fechou antes de reiniciar sozinho -- aplica agora.
-              setState(() => _updateStatusText = 'Aplicando atualização...');
-              await _restartToApplyPatch();
+              setState(
+                () => _updateStatusText =
+                    'Atualização pronta — abra o app de novo pra aplicar',
+              );
             case UpdateStatus.upToDate:
               setState(() => _updateStatusText = 'App atualizado');
             case UpdateStatus.unavailable:
@@ -121,38 +122,6 @@ class _SplashPageState extends State<SplashPage> {
           if (!mounted) return;
           setState(() => _updateStatusText = null);
         });
-  }
-
-  // Um patch do Shorebird só entra em vigor quando o processo do app
-  // reinicia do zero -- é assim que o code push funciona, não tem como
-  // "trocar o código" com o app rodando. Em vez de só avisar e esperar o
-  // usuário fechar e abrir manualmente, reinicia sozinho aqui na splash
-  // (momento seguro: não tem nenhuma tela/estado do usuário em risco).
-  Future<void> _restartToApplyPatch() async {
-    try {
-      final result = await Restart.restartApp(mode: RestartMode.process);
-
-      if (!result.success) {
-        debugPrint(
-          'Restart automático não aplicado (${result.code}): '
-          '${result.message}. Seguindo sem reiniciar.',
-        );
-        if (mounted) {
-          setState(
-            () => _updateStatusText =
-                'Atualização pronta — abra o app de novo pra aplicar',
-          );
-        }
-      }
-    } catch (e) {
-      debugPrint('Erro ao reiniciar o app pra aplicar o patch: $e');
-      if (mounted) {
-        setState(
-          () => _updateStatusText =
-              'Atualização pronta — abra o app de novo pra aplicar',
-        );
-      }
-    }
   }
 
   @override
