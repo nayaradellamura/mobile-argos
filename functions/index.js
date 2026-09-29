@@ -954,9 +954,6 @@ function shouldIgnoreSinistroNotificationUpdate(before, after) {
     "activeViewersUpdatedAt",
     "viewersUpdatedAt",
     "lastViewerAt",
-    "lastMessage",
-    "lastMessageAt",
-    "lastMessageBy",
     "agentBusinessExpiresAt",
     "agentSessionTtlSeconds",
     "ttlBusinessHours",
@@ -1655,9 +1652,6 @@ function buildArgosSessionParameters({ inspectionId, sinistroId, vistoria = {}, 
     status_atualizado_em_sinistro: sinistro.statusUpdatedAt,
     chat_habilitado_sinistro: sinistro.chatEnabled,
     chat_status_sinistro: sinistro.chatStatus,
-    ultima_mensagem_sinistro: sinistro.lastMessage,
-    ultima_mensagem_em_sinistro: sinistro.lastMessageAt,
-    ultima_mensagem_por_sinistro: sinistro.lastMessageBy,
   });
 }
 
