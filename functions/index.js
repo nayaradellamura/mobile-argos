@@ -2159,6 +2159,28 @@ const TELEGRAM_CHAT_ID = defineSecret("TELEGRAM_CHAT_ID");
 // (ela é pública, como toda Cloud Function HTTP).
 const MONITORING_WEBHOOK_TOKEN = defineSecret("MONITORING_WEBHOOK_TOKEN");
 
+// Compartilhado entre telegramAlertRelay (alerta reativo) e hourlyDigest
+// (resumo periódico) -- os dois só sabem "mandar texto pro chat configurado".
+async function sendTelegramMessage(text) {
+  const resp = await fetch(
+    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN.value()}/sendMessage`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID.value(),
+        text,
+        parse_mode: "Markdown",
+      }),
+    }
+  );
+
+  if (!resp.ok) {
+    const errBody = await resp.text();
+    throw new Error(`Telegram recusou a mensagem (${resp.status}): ${errBody}`);
+  }
+}
+
 exports.telegramAlertRelay = onRequest(
   {
     region: "us-central1",
@@ -2205,33 +2227,121 @@ exports.telegramAlertRelay = onRequest(
 
       const text = lines.join("\n");
 
-      const telegramResp = await fetch(
-        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN.value()}/sendMessage`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: TELEGRAM_CHAT_ID.value(),
-            text,
-            parse_mode: "Markdown",
-          }),
-        }
-      );
-
-      if (!telegramResp.ok) {
-        const errBody = await telegramResp.text();
-        console.error("telegramAlertRelay: Telegram recusou a mensagem:", {
-          status: telegramResp.status,
-          body: errBody,
-        });
-        res.status(502).send("telegram_error");
-        return;
-      }
-
+      await sendTelegramMessage(text);
       res.status(200).send("ok");
     } catch (err) {
       console.error("telegramAlertRelay: erro inesperado:", err);
       res.status(500).send("internal_error");
     }
+  }
+);
+
+// ── Resumo periódico de atividade (7h às 22h, de hora em hora) ─────────────
+//
+// Diferente do telegramAlertRelay (reativo, só fala quando algo quebra),
+// este dá visibilidade da atividade normal do sistema: quantos sinistros
+// novos, check-ins, vistorias que mudaram de status e laudos gerados na
+// última hora. Fica de fora do horário de sono de propósito -- de madrugada
+// ninguém está olhando o Telegram mesmo.
+//
+// Consulta só o Firestore (não Cloud Logging/Monitoring) de propósito: evita
+// puxar uma dependência nova só pra isso, e os campos de timestamp que
+// interessam (createdAt, checkInAt, updatedAt, laudoTecnico.geradoEm) já
+// são gravados por todo o resto do sistema.
+const SP_HOUR_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Sao_Paulo",
+  hour: "2-digit",
+  hourCycle: "h23",
+});
+
+exports.dailyDigest = onSchedule(
+  {
+    schedule: "0 7,22 * * *",
+    region: "us-central1",
+    timeZone: "America/Sao_Paulo",
+    secrets: [TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID],
+  },
+  async () => {
+    const db = admin.firestore();
+    const now = new Date();
+
+    // Disparo das 7h cobre a madrugada (22h de ontem -> 7h de hoje, janela
+    // de 9h); disparo das 22h cobre o dia inteiro (7h -> 22h, janela de
+    // 15h). Calculado por duracao fixa a partir de agora, nao reconstruindo
+    // "ontem as 22h" -- Brasil nao tem mais horario de verao (UTC-3 o ano
+    // todo) e o Cloud Scheduler ja dispara na hora certa, entao subtrair um
+    // numero fixo de horas do momento atual chega na borda certa dos dois
+    // jeitos.
+    const spHour = parseInt(SP_HOUR_FORMATTER.format(now), 10);
+    const horasDeJanela = spHour === 7 ? 9 : 15;
+    const windowStart = new Date(now.getTime() - horasDeJanela * 60 * 60 * 1000);
+    const windowStartIso = windowStart.toISOString();
+    const windowStartTs = admin.firestore.Timestamp.fromDate(windowStart);
+
+    const fmtHour = (d) =>
+      d.toLocaleTimeString("pt-BR", {
+        timeZone: "America/Sao_Paulo",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+
+    // sinistro.createdAt e checkInAt sao strings ISO8601 (nao Timestamp) --
+    // comparacao lexicografica funciona porque o formato e largura fixa.
+    const [novosSinistrosSnap, checkinsSnap, vistoriasAtivasSnap, sinistrosSnap] =
+      await Promise.all([
+        db.collection("sinistro").where("createdAt", ">=", windowStartIso).get(),
+        db.collection("sinistro").where("checkInAt", ">=", windowStartIso).get(),
+        db.collection("vistorias").where("updatedAt", ">=", windowStartTs).get(),
+        db.collection("sinistro").get(),
+      ]);
+
+    const statusCount = {};
+    for (const doc of vistoriasAtivasSnap.docs) {
+      const status = String(doc.data().status || "desconhecido").toUpperCase();
+      statusCount[status] = (statusCount[status] || 0) + 1;
+    }
+
+    let laudosGerados = 0;
+    let laudosComIncongruencia = 0;
+    for (const doc of sinistrosSnap.docs) {
+      const laudo = doc.data().laudoTecnico;
+      const geradoEm = laudo?.geradoEm;
+      if (!geradoEm || typeof geradoEm.toMillis !== "function") continue;
+      if (geradoEm.toMillis() < windowStartTs.toMillis()) continue;
+
+      laudosGerados++;
+      if (laudo?.achados?.incongruenciaDetectada === true) laudosComIncongruencia++;
+    }
+
+    const semAtividade =
+      novosSinistrosSnap.size === 0 &&
+      checkinsSnap.size === 0 &&
+      vistoriasAtivasSnap.size === 0 &&
+      laudosGerados === 0;
+
+    const janela = `${fmtHour(windowStart)}–${fmtHour(now)}`;
+
+    if (semAtividade) {
+      await sendTelegramMessage(`🕐 *${janela}* — sem atividade no período.`);
+      return;
+    }
+
+    const statusLinhas = Object.entries(statusCount)
+      .map(([status, count]) => `    • ${friendlyStatusLabel(status) || status}: ${count}`)
+      .join("\n");
+
+    const lines = [
+      `🕐 *Resumo ${janela}*`,
+      `📋 Sinistros novos: ${novosSinistrosSnap.size}`,
+      `✅ Check-ins realizados: ${checkinsSnap.size}`,
+      vistoriasAtivasSnap.size > 0
+        ? `🔧 Vistorias com atividade: ${vistoriasAtivasSnap.size}\n${statusLinhas}`
+        : null,
+      laudosGerados > 0
+        ? `📄 Laudos gerados: ${laudosGerados}${laudosComIncongruencia > 0 ? ` (⚠ ${laudosComIncongruencia} com incongruência)` : ""}`
+        : null,
+    ].filter(Boolean);
+
+    await sendTelegramMessage(lines.join("\n"));
   }
 );
