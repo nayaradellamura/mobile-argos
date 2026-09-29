@@ -1,8 +1,8 @@
 const crypto = require("crypto");
-const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onCall, onRequest, HttpsError } = require("firebase-functions/v2/https");
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
-const { defineString } = require("firebase-functions/params");
+const { defineString, defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const { GoogleAuth } = require("google-auth-library");
 // @google-cloud/vertexai (a SDK antiga) nao sabe montar a URL pro endpoint
@@ -2139,5 +2139,99 @@ exports.checkVistoriaExpiration = onCall(
     const expired = await expireVistoriaIfDue(db, doc);
 
     return { expired };
+  }
+);
+
+// ── Monitoramento: relay Cloud Monitoring -> Telegram ──────────────────────
+//
+// O Cloud Monitoring não fala com o Telegram nativamente. Este endpoint é o
+// "notification channel" tipo webhook_tokenauth: o Monitoring chama esta URL
+// (com um Bearer token compartilhado, configurado no canal) toda vez que uma
+// politica de alerta abre ou fecha um incidente, e a gente traduz isso pra
+// uma mensagem no Telegram via Bot API.
+//
+// Token do bot e chat_id ficam no Secret Manager (nunca em texto no código
+// nem em variável de ambiente comum) -- ver README/setup do monitoramento.
+const TELEGRAM_BOT_TOKEN = defineSecret("TELEGRAM_BOT_TOKEN");
+const TELEGRAM_CHAT_ID = defineSecret("TELEGRAM_CHAT_ID");
+// Segredo compartilhado só entre o canal do Monitoring e esta função --
+// impede que qualquer um na internet spamme seu Telegram só de achar a URL
+// (ela é pública, como toda Cloud Function HTTP).
+const MONITORING_WEBHOOK_TOKEN = defineSecret("MONITORING_WEBHOOK_TOKEN");
+
+exports.telegramAlertRelay = onRequest(
+  {
+    region: "us-central1",
+    secrets: [TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, MONITORING_WEBHOOK_TOKEN],
+  },
+  async (req, res) => {
+    // O canal do tipo webhook_tokenauth do Cloud Monitoring manda o token
+    // como query string (?token=...), nao como header Authorization -- e o
+    // proprio comportamento documentado desse tipo de canal ("Token
+    // authentication includes a shared secret as a query string parameter").
+    // Aceita tambem via header Bearer pra facilitar teste manual com curl.
+    const tokenFromQuery = String(req.query?.token || "");
+    const authHeader = String(req.get("authorization") || "");
+    const tokenFromHeader = authHeader.replace(/^Bearer\s+/i, "");
+    const expected = MONITORING_WEBHOOK_TOKEN.value();
+
+    if (tokenFromQuery !== expected && tokenFromHeader !== expected) {
+      console.warn("telegramAlertRelay: token invalido/ausente, ignorando.");
+      res.status(401).send("unauthorized");
+      return;
+    }
+
+    try {
+      const incident = req.body?.incident || {};
+      const isResolved = incident.state === "closed";
+
+      const emoji = isResolved ? "✅" : "🚨";
+      const statusLabel = isResolved ? "RESOLVIDO" : "ALERTA";
+      const policyName = incident.policy_name || "Política sem nome";
+      const resourceName =
+        incident.resource_display_name ||
+        incident.resource_name ||
+        incident.resource_id ||
+        "";
+      const summary = incident.summary || "";
+      const url = incident.url || "";
+
+      const lines = [
+        `${emoji} *${statusLabel}* — ${policyName}`,
+        resourceName ? `Recurso: ${resourceName}` : null,
+        summary || null,
+        url ? url : null,
+      ].filter(Boolean);
+
+      const text = lines.join("\n");
+
+      const telegramResp = await fetch(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN.value()}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: TELEGRAM_CHAT_ID.value(),
+            text,
+            parse_mode: "Markdown",
+          }),
+        }
+      );
+
+      if (!telegramResp.ok) {
+        const errBody = await telegramResp.text();
+        console.error("telegramAlertRelay: Telegram recusou a mensagem:", {
+          status: telegramResp.status,
+          body: errBody,
+        });
+        res.status(502).send("telegram_error");
+        return;
+      }
+
+      res.status(200).send("ok");
+    } catch (err) {
+      console.error("telegramAlertRelay: erro inesperado:", err);
+      res.status(500).send("internal_error");
+    }
   }
 );
