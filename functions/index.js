@@ -1033,7 +1033,16 @@ async function sendPushToTokenEntries({ tokenEntries, title, body, data }) {
       data,
       android: {
         priority: "high",
-        notification: { sound: "default" },
+        // channelId novo de propósito: canal de notificação do Android, uma
+        // vez criado num aparelho, não pode ter suas configurações mudadas
+        // por push futuro (mesmo settando defaultVibrateTimings de novo) --
+        // só um channelId novo força o Android a criar o canal do zero com
+        // vibração garantida, inclusive pra quem já tinha o app instalado.
+        notification: {
+          sound: "default",
+          channelId: "argos_notificacoes_v2",
+          defaultVibrateTimings: true,
+        },
       },
     });
 
