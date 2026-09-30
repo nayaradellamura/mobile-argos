@@ -13,6 +13,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 
 import '../../services/argos_ai_service.dart';
+import '../../services/argos_connectivity_service.dart';
 import '../../services/user_audio_storage_service.dart';
 import '../../services/vistoria_chat_session_service.dart';
 import '../../shared/widgets/ellipsis_text.dart';
@@ -188,6 +189,13 @@ class _AiChatPageState extends State<AiChatPage> {
 
     widget.selectedTabIndexListenable?.addListener(_onSelectedTabIndexChanged);
 
+    // Retoma sozinho o envio em massa assim que a conexão volta -- sem
+    // isso, o pacote ficava salvo esperando o mecânico lembrar de reabrir
+    // essa vistoria e tocar "Enviar" de novo.
+    ArgosConnectivityService.instance.isOnline.addListener(
+      _handleConnectivityRestored,
+    );
+
     _bootstrapChatSession();
   }
 
@@ -195,6 +203,9 @@ class _AiChatPageState extends State<AiChatPage> {
   void dispose() {
     widget.selectedTabIndexListenable
         ?.removeListener(_onSelectedTabIndexChanged);
+    ArgosConnectivityService.instance.isOnline.removeListener(
+      _handleConnectivityRestored,
+    );
 
     bulkStatusText.dispose();
     vistoriaCompletionSubscription?.cancel();
@@ -1371,6 +1382,18 @@ class _AiChatPageState extends State<AiChatPage> {
       return;
     }
 
+    // O guiado depende do agente (ADK/Gemini) pra cada turno -- diferente
+    // do modo em massa, não tem como enfileirar offline. Falha rápido
+    // antes de limpar o campo de texto (senão o mecânico perderia o que
+    // escreveu sem nem saber por quê não foi).
+    if (!ArgosConnectivityService.instance.isOnline.value) {
+      _showSnack(
+        'Isso precisa de internet -- sua mensagem não foi enviada.',
+        backgroundColor: Colors.orange,
+      );
+      return;
+    }
+
     setState(() {
       messages.add(ChatMessage(type: ChatMessageType.user, text: text, createdAt: DateTime.now()));
 
@@ -1477,6 +1500,17 @@ class _AiChatPageState extends State<AiChatPage> {
     if (session == null) {
       _showSnack(
         'Selecione uma vistoria antes de anexar fotos.',
+        backgroundColor: Colors.orange,
+      );
+      return;
+    }
+
+    // Recusa antes de sequer abrir a câmera -- sem isso o mecânico tirava
+    // as fotos e só descobria que falhou (sem aviso nenhum, só um log) na
+    // hora do upload.
+    if (!ArgosConnectivityService.instance.isOnline.value) {
+      _showSnack(
+        'Isso precisa de internet para anexar fotos.',
         backgroundColor: Colors.orange,
       );
       return;
@@ -1612,6 +1646,40 @@ class _AiChatPageState extends State<AiChatPage> {
   /// upload -- reaproveitando literalmente as mesmas chamadas de serviço que
   /// o fluxo guiado já usa por item, só que em loop e sem notificar o
   /// agente a cada foto/áudio.
+  /// Chamado toda vez que `ArgosConnectivityService.isOnline` muda -- só
+  /// nos interessa a borda offline→online, e só quando tem um pacote em
+  /// massa parado esperando conexão nesta vistoria (o rascunho persistido
+  /// é a fonte da verdade, não o `BulkUploadSheet`, que pode nem estar
+  /// aberto nesse momento).
+  void _handleConnectivityRestored() {
+    if (!ArgosConnectivityService.instance.isOnline.value) return;
+    if (coletaModo != ColetaModo.emMassa) return;
+    if (isInspectionCompleted || isBulkProcessing) return;
+
+    final session = currentSession;
+    if (session == null) return;
+
+    unawaited(_autoResumePendingBulkSend(session));
+  }
+
+  Future<void> _autoResumePendingBulkSend(VistoriaSession session) async {
+    final rascunho = await VistoriaChatSessionService.instance
+        .fetchEnvioEmMassaRascunho(session.docId);
+
+    if (!mounted || isBulkProcessing) return;
+
+    final result = buildBulkUploadResultFromRascunho(rascunho);
+
+    final hasAnything = result.photos.isNotEmpty ||
+        result.audios.isNotEmpty ||
+        result.text.trim().isNotEmpty ||
+        result.orcamentoItems.isNotEmpty;
+
+    if (!hasAnything) return;
+
+    await _submitBulkPackage(session: session, result: result);
+  }
+
   Future<void> _openBulkUploadSheet() async {
     if (isInspectionCompleted || isBulkProcessing) return;
 
@@ -1652,6 +1720,22 @@ class _AiChatPageState extends State<AiChatPage> {
     required VistoriaSession session,
     required BulkUploadResult result,
   }) async {
+    // O rascunho já está seguro no Firestore (cada item foi sincronizado
+    // assim que entrou no BulkUploadSheet, isso funciona offline sozinho).
+    // O que NÃO funciona offline é o upload de verdade pro Storage nem a
+    // chamada ao agente pra transcrever áudio -- diferente de escrita
+    // Firestore comum, essas não enfileiram. Sem essa checagem, tocar
+    // "Enviar" offline subia nada, falhava calado (só um debugPrint) e
+    // ainda assim finalizava a vistoria como se tivesse dado tudo certo.
+    if (!ArgosConnectivityService.instance.isOnline.value) {
+      _showSnack(
+        'Sem conexão — o pacote já está salvo e vai ser enviado sozinho '
+        'assim que a internet voltar.',
+        backgroundColor: Colors.orange,
+      );
+      return;
+    }
+
     setState(() => isBulkProcessing = true);
     bulkStatusText.value = 'Enviando fotos...';
 
@@ -1828,6 +1912,16 @@ class _AiChatPageState extends State<AiChatPage> {
   Future<void> _startRecording() async {
     if (isRecording || isStartingRecording) return;
     if (isInspectionCompleted) return;
+
+    // Recusa antes de gravar -- transcrição e envio dependem do backend,
+    // gravar pra descobrir depois que falhou só desperdiça o áudio.
+    if (!ArgosConnectivityService.instance.isOnline.value) {
+      _showSnack(
+        'Isso precisa de internet para gravar áudio.',
+        backgroundColor: Colors.orange,
+      );
+      return;
+    }
 
     FocusScope.of(context).unfocus();
 

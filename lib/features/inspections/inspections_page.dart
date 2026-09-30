@@ -175,6 +175,9 @@ class _InspectionsPageState extends State<InspectionsPage> {
 
   @override
   void dispose() {
+    ArgosConnectivityService.instance.isOnline.removeListener(
+      _handleConnectivityChangedForFilter,
+    );
     _filterScrollController.dispose();
     _searchController.dispose();
     super.dispose();
@@ -233,6 +236,24 @@ void _scrollFilterCarouselTo(InspectionFilter filter) {
   void initState() {
     super.initState();
     _credenciadoFuture = _loadCredenciadoContext();
+    ArgosConnectivityService.instance.isOnline.addListener(
+      _handleConnectivityChangedForFilter,
+    );
+  }
+
+  /// "Pendentes" e "Análise" exigem ação que não funciona offline
+  /// (check-in é transação, análise não tem ação nenhuma pro mecânico) --
+  /// somem do carrossel quando fica offline. Se o filtro selecionado for
+  /// um desses, volta pra "Total" pra não deixar a lista filtrada por um
+  /// chip que sumiu da tela.
+  void _handleConnectivityChangedForFilter() {
+    if (ArgosConnectivityService.instance.isOnline.value) return;
+    if (_selectedFilter != InspectionFilter.pending &&
+        _selectedFilter != InspectionFilter.aiAnalysis) {
+      return;
+    }
+
+    setState(() => _selectedFilter = InspectionFilter.all);
   }
 
   Future<_CredenciadoContext> _loadCredenciadoContext() async {
@@ -477,6 +498,15 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
                 onCloseSearch: _closeSearch,
                 searchController: _searchController,
                 onSearchChanged: _onSearchChanged,
+                availableFilters: online
+                    ? InspectionFilter.values
+                    : const [
+                        InspectionFilter.all,
+                        InspectionFilter.inProgress,
+                        InspectionFilter.revision,
+                        InspectionFilter.cancelled,
+                        InspectionFilter.completed,
+                      ],
               );
             },
           ),
@@ -1140,58 +1170,81 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                   ),
                                 ),
                               ] else ...[
-                                SizedBox(
-                                  height: 54,
-                                  child: ElevatedButton.icon(
-                                    onPressed: canCheckIn && !isCheckingIn
-                                        ? _registerCheckIn
-                                        : null,
-                                    icon: isCheckingIn
-                                        ? const SizedBox(
-                                            width: 18,
-                                            height: 18,
-                                            child: CircularProgressIndicator(
-                                              strokeWidth: 2,
-                                              color: Colors.white,
-                                            ),
-                                          )
-                                        : Icon(
-                                            hasCheckIn
-                                                ? Icons.check_circle
-                                                : Icons.login_rounded,
+                                ValueListenableBuilder<bool>(
+                                  valueListenable:
+                                      ArgosConnectivityService.instance.isOnline,
+                                  builder: (context, online, _) {
+                                    // Check-in é transação (não enfileira
+                                    // offline) -- some/desabilita em vez de
+                                    // deixar tocar e falhar sem explicação.
+                                    // Se já tem check-in feito, o botão só
+                                    // mostra o estado passado, não precisa
+                                    // de rede pra isso.
+                                    final blockedByOffline =
+                                        !online && !hasCheckIn;
+
+                                    return SizedBox(
+                                      height: 54,
+                                      child: ElevatedButton.icon(
+                                        onPressed: canCheckIn &&
+                                                !isCheckingIn &&
+                                                !blockedByOffline
+                                            ? _registerCheckIn
+                                            : null,
+                                        icon: isCheckingIn
+                                            ? const SizedBox(
+                                                width: 18,
+                                                height: 18,
+                                                child: CircularProgressIndicator(
+                                                  strokeWidth: 2,
+                                                  color: Colors.white,
+                                                ),
+                                              )
+                                            : Icon(
+                                                blockedByOffline
+                                                    ? Icons.wifi_off_rounded
+                                                    : hasCheckIn
+                                                        ? Icons.check_circle
+                                                        : Icons.login_rounded,
+                                              ),
+                                        label: Text(
+                                          isCheckingIn
+                                              ? 'Realizando check-in...'
+                                              : blockedByOffline
+                                                  ? 'Check-in precisa de internet'
+                                                  : isHumanAnalysis
+                                                      ? 'Vistoria em analise humana'
+                                                      : isAssignedToAnother
+                                                      ? 'Vistoria vinculada a ${inspection.assignedToName}'
+                                                      : hasCheckIn &&
+                                                              !inspection.hasAssignedUser
+                                                          ? 'Assumir vistoria'
+                                                          : hasCheckIn
+                                                              ? 'Check-in realizado às ${_formatTime(inspection.checkInAt!)}'
+                                                              : 'Realizar check-in e assumir vistoria',
+                                        ),
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: hasCheckIn
+                                              ? Colors.green
+                                              : (isAssignedToAnother ||
+                                                      blockedByOffline)
+                                                  ? const Color(0xFF9CA3AF)
+                                                  : const Color(0xFF0057C0),
+                                          foregroundColor: Colors.white,
+                                          disabledBackgroundColor: hasCheckIn
+                                              ? Colors.green
+                                              : (isAssignedToAnother ||
+                                                      blockedByOffline)
+                                                  ? const Color(0xFF9CA3AF)
+                                                  : const Color(0xFF0057C0),
+                                          disabledForegroundColor: Colors.white,
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(18),
                                           ),
-                                    label: Text(
-                                      isCheckingIn
-                                          ? 'Realizando check-in...'
-                                          : isHumanAnalysis
-                                              ? 'Vistoria em analise humana'
-                                              : isAssignedToAnother
-                                              ? 'Vistoria vinculada a ${inspection.assignedToName}'
-                                              : hasCheckIn &&
-                                                      !inspection.hasAssignedUser
-                                                  ? 'Assumir vistoria'
-                                                  : hasCheckIn
-                                                      ? 'Check-in realizado às ${_formatTime(inspection.checkInAt!)}'
-                                                      : 'Realizar check-in e assumir vistoria',
-                                    ),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: hasCheckIn
-                                          ? Colors.green
-                                          : isAssignedToAnother
-                                              ? const Color(0xFF9CA3AF)
-                                              : const Color(0xFF0057C0),
-                                      foregroundColor: Colors.white,
-                                      disabledBackgroundColor: hasCheckIn
-                                          ? Colors.green
-                                          : isAssignedToAnother
-                                              ? const Color(0xFF9CA3AF)
-                                              : const Color(0xFF0057C0),
-                                      disabledForegroundColor: Colors.white,
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(18),
+                                        ),
                                       ),
-                                    ),
-                                  ),
+                                    );
+                                  },
                                 ),
                                 const SizedBox(height: 10),
                                 SizedBox(
@@ -3069,6 +3122,12 @@ class _InspectionsHeader extends StatelessWidget {
   final TextEditingController? searchController;
   final ValueChanged<String>? onSearchChanged;
 
+  /// Offline, "Pendentes" e "Análise" somem sozinhos -- pendente exige
+  /// check-in (que exige conexão) pra virar qualquer coisa, e análise não
+  /// tem ação nenhuma pro mecânico fazer offline. Default é a lista
+  /// inteira (online).
+  final List<InspectionFilter> availableFilters;
+
   const _InspectionsHeader({
     required this.total,
     this.filterController,
@@ -3083,6 +3142,7 @@ class _InspectionsHeader extends StatelessWidget {
     this.onCloseSearch,
     this.searchController,
     this.onSearchChanged,
+    this.availableFilters = InspectionFilter.values,
   });
 
   int _countFor(InspectionFilter filter) {
@@ -3092,7 +3152,7 @@ class _InspectionsHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final filters = InspectionFilter.values;
+    final filters = availableFilters;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),

@@ -111,6 +111,69 @@ class BulkUploadResult {
   });
 }
 
+/// Converte um rascunho persistido (`envioEmMassaRascunho`) num
+/// `BulkUploadResult` pronto pra (re)enviar -- usado tanto pra pré-popular o
+/// `BulkUploadSheet` quanto pela retomada automática quando a conexão volta
+/// (`ai_chat_page.dart:_handleConnectivityRestored`), sem duplicar o parsing
+/// nos dois lugares. Itens já `status: 'enviado'` são ignorados (já
+/// confirmados, não reenvia). `onMissingFile`, se passado, é chamado uma vez
+/// por item cujo arquivo local não existe mais (ex: usuário limpou dados do
+/// app entre uma tentativa e outra).
+BulkUploadResult buildBulkUploadResultFromRascunho(
+  Map<String, dynamic> rascunho, {
+  void Function(String tipo)? onMissingFile,
+}) {
+  final photos = <BulkPhotoItem>[];
+  final audios = <BulkAudioItem>[];
+  final orcamentoItems = <BulkOrcamentoItem>[];
+  var text = '';
+
+  for (final entry in rascunho.entries) {
+    final localId = entry.key;
+    final data = entry.value;
+
+    if (data is! Map) continue;
+    if (data['status'] == 'enviado') continue;
+
+    switch (data['tipo']?.toString() ?? '') {
+      case 'foto':
+        final path = data['localPath']?.toString() ?? '';
+        if (path.isNotEmpty && File(path).existsSync()) {
+          photos.add(BulkPhotoItem(localId: localId, path: path));
+        } else {
+          onMissingFile?.call('foto');
+        }
+      case 'audio':
+        final path = data['localPath']?.toString() ?? '';
+        if (path.isNotEmpty && File(path).existsSync()) {
+          audios.add(
+            BulkAudioItem(
+              localId: localId,
+              path: path,
+              durationSeconds: (data['durationSeconds'] is num)
+                  ? (data['durationSeconds'] as num).toInt()
+                  : 0,
+            ),
+          );
+        } else {
+          onMissingFile?.call('áudio');
+        }
+      case 'orcamento':
+        final item = BulkOrcamentoItem.fromRascunho(localId, data);
+        if (item != null) orcamentoItems.add(item);
+      case 'texto':
+        text = data['text']?.toString() ?? '';
+    }
+  }
+
+  return BulkUploadResult(
+    photos: photos,
+    audios: audios,
+    text: text,
+    orcamentoItems: orcamentoItems,
+  );
+}
+
 /// Modal de composição do modo "enviar tudo de uma vez" -- reaproveita a
 /// mesma `CameraPage` do fluxo guiado pra capturar fotos e o mesmo
 /// `RecordConfig` (aacLc/128kbps/44.1kHz mono) pra áudio, só que sem
@@ -177,45 +240,15 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
   }
 
   void _loadInitialDraft() {
-    for (final entry in widget.initialDraft.entries) {
-      final localId = entry.key;
-      final data = entry.value;
+    final result = buildBulkUploadResultFromRascunho(
+      widget.initialDraft,
+      onMissingFile: _missingLocalFilesWarning.add,
+    );
 
-      if (data is! Map) continue;
-      if (data['status'] == 'enviado') continue;
-
-      final tipo = data['tipo']?.toString() ?? '';
-
-      switch (tipo) {
-        case 'foto':
-          final path = data['localPath']?.toString() ?? '';
-          if (path.isNotEmpty && File(path).existsSync()) {
-            _photos.add(BulkPhotoItem(localId: localId, path: path));
-          } else {
-            _missingLocalFilesWarning.add('foto');
-          }
-        case 'audio':
-          final path = data['localPath']?.toString() ?? '';
-          if (path.isNotEmpty && File(path).existsSync()) {
-            _audios.add(
-              BulkAudioItem(
-                localId: localId,
-                path: path,
-                durationSeconds: (data['durationSeconds'] is num)
-                    ? (data['durationSeconds'] as num).toInt()
-                    : 0,
-              ),
-            );
-          } else {
-            _missingLocalFilesWarning.add('áudio');
-          }
-        case 'orcamento':
-          final item = BulkOrcamentoItem.fromRascunho(localId, data);
-          if (item != null) _orcamentoItems.add(item);
-        case 'texto':
-          _textController.text = data['text']?.toString() ?? '';
-      }
-    }
+    _photos.addAll(result.photos);
+    _audios.addAll(result.audios);
+    _orcamentoItems.addAll(result.orcamentoItems);
+    _textController.text = result.text;
 
     if (_missingLocalFilesWarning.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
