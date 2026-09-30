@@ -57,6 +57,14 @@ class _MainShellState extends State<MainShell> {
   /// sem rodar o bootstrap (e sem perguntar) de novo.
   int _chatRequestNonce = 0;
 
+  /// Sinaliza pro AiChatPage qual aba está selecionada agora, sem precisar
+  /// invalidar o cache de `pages` (que de propósito ignora troca de aba —
+  /// ver comentário em `pages`). O AiChatPage escuta isso pra recarregar a
+  /// lista de veículos com check-in sempre que a aba dele for reaberta, em
+  /// vez de só uma vez no initState (que ficava desatualizada quando o
+  /// check-in acontecia depois, na aba de Vistorias).
+  final ValueNotifier<int> _selectedIndexNotifier = ValueNotifier<int>(0);
+
   String get _emailKey => (widget.user.email ?? '').trim().toLowerCase();
 
   @override
@@ -95,6 +103,7 @@ class _MainShellState extends State<MainShell> {
     }
 
     _accountStatusSubscription?.cancel();
+    _selectedIndexNotifier.dispose();
 
     super.dispose();
   }
@@ -372,6 +381,7 @@ class _MainShellState extends State<MainShell> {
         ),
         sinistroId: selectedSinistroIdForChat,
         startRetificacao: selectedRetificacaoForChat,
+        selectedTabIndexListenable: _selectedIndexNotifier,
       ),
 
       ProfilePage(
@@ -391,6 +401,8 @@ class _MainShellState extends State<MainShell> {
       // já entrega initialProfileCompletionRequired e este bloco não aparece.
       return const SizedBox.expand();
     }
+
+    _selectedIndexNotifier.value = selectedIndex;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF3FBFF),
@@ -574,7 +586,7 @@ class _ArgosBottomNav extends StatelessWidget {
   Widget build(BuildContext context) {
     final items = [
       _NavItem(icon: Icons.assignment_turned_in, label: 'Vistorias'),
-      _NavItem(icon: Icons.smart_toy, label: 'Chat IA'),
+      _NavItem(icon: Icons.smart_toy, label: 'Argos IA'),
       _NavItem(icon: Icons.person, label: 'Perfil'),
     ];
 

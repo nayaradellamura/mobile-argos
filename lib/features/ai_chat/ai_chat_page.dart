@@ -6,6 +6,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:camera/camera.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:path_provider/path_provider.dart';
@@ -16,10 +17,18 @@ import '../../services/user_audio_storage_service.dart';
 import '../../services/vistoria_chat_session_service.dart';
 import '../../shared/widgets/ellipsis_text.dart';
 import '../camera/camera_page.dart';
+import 'bulk_upload_sheet.dart';
+import 'eye_processing_animation.dart';
 
 enum ChatMessageType { ai, user, photo, audio }
 
 enum ContinueVistoriaAction { continueNow, continueLater, startNew }
+
+/// Modo de coleta escolhido pelo mecânico ao abrir uma vistoria nova:
+/// `guiado` é o fluxo passo a passo de sempre (inalterado); `emMassa` pula a
+/// conversa turno-a-turno e deixa o mecânico montar um pacote (fotos, áudio,
+/// texto, orçamento) pra enviar de uma vez só.
+enum ColetaModo { guiado, emMassa }
 
 class ChatMessage {
   final ChatMessageType type;
@@ -48,6 +57,11 @@ class ChatMessage {
   /// Horário em que a mensagem foi criada/exibida no chat.
   final DateTime? createdAt;
 
+  /// true só na mensagem da pergunta bifurcada (guiado vs. em massa) --
+  /// renderiza os dois botões inline na bolha em vez de um dialog por cima
+  /// do chat.
+  final bool isColetaModoPrompt;
+
   const ChatMessage({
     required this.type,
     required this.text,
@@ -61,6 +75,7 @@ class ChatMessage {
     this.mp3DownloadUrl,
     this.audioStatus,
     this.createdAt,
+    this.isColetaModoPrompt = false,
   });
 
   ChatMessage copyWith({String? text}) {
@@ -95,10 +110,19 @@ class AiChatPage extends StatefulWidget {
   /// botão "Iniciar Retificação" na tela de resumo.
   final bool startRetificacao;
 
+  /// Índice da aba selecionada no MainShell (ver `_selectedIndexNotifier`).
+  /// Escutado só pra recarregar a lista de veículos com check-in disponível
+  /// sempre que o usuário reabre esta aba -- sem isso, a lista só era
+  /// buscada uma vez no initState e ficava desatualizada quando o check-in
+  /// acontecia depois, na aba de Vistorias (o IndexedStack do MainShell
+  /// mantém esta página montada o tempo todo, initState não roda de novo).
+  final ValueListenable<int>? selectedTabIndexListenable;
+
   const AiChatPage({
     super.key,
     this.sinistroId,
     this.startRetificacao = false,
+    this.selectedTabIndexListenable,
   });
 
   @override
@@ -124,6 +148,16 @@ class _AiChatPageState extends State<AiChatPage> {
   bool isRecording = false;
   bool isStartingRecording = false;
   bool isAiTyping = false;
+
+  /// null enquanto o mecânico não escolheu (ou a sessão foi retomada, onde a
+  /// escolha já não se aplica mais). Só `emMassa` habilita o botão de envio
+  /// em massa no composer.
+  ColetaModo? coletaModo;
+  bool awaitingColetaModoChoice = false;
+  bool isBulkProcessing = false;
+  final ValueNotifier<String> bulkStatusText = ValueNotifier<String>(
+    'Processando...',
+  );
 
   // Câmera começa travada — só libera quando o agente diz a frase exata de
   // liberação da leva de danos externos (_isPhotoReleaseText). Uma vez
@@ -152,11 +186,17 @@ class _AiChatPageState extends State<AiChatPage> {
       }
     });
 
+    widget.selectedTabIndexListenable?.addListener(_onSelectedTabIndexChanged);
+
     _bootstrapChatSession();
   }
 
   @override
   void dispose() {
+    widget.selectedTabIndexListenable
+        ?.removeListener(_onSelectedTabIndexChanged);
+
+    bulkStatusText.dispose();
     vistoriaCompletionSubscription?.cancel();
     recordingTimer?.cancel();
 
@@ -169,6 +209,20 @@ class _AiChatPageState extends State<AiChatPage> {
     scrollController.dispose();
 
     super.dispose();
+  }
+
+  static const int _kChatTabIndex = 1;
+
+  // Só recarrega quando: esta aba acabou de ficar visível, é a tela de
+  // escolha de veículo (sem sinistroId fixo) e não tem sessão/carregamento
+  // em andamento -- nunca interrompe uma conversa já aberta.
+  void _onSelectedTabIndexChanged() {
+    if (!mounted) return;
+    if (widget.selectedTabIndexListenable?.value != _kChatTabIndex) return;
+    if (widget.sinistroId != null) return;
+    if (isLoadingSession || currentSession != null) return;
+
+    _loadAvailableSinistros();
   }
 
   void _showSnack(
@@ -342,6 +396,154 @@ class _AiChatPageState extends State<AiChatPage> {
           ),
         );
     });
+  }
+
+  /// Pergunta bifurcada mostrada só uma vez, ao abrir uma vistoria nova de
+  /// verdade (nunca em retomada nem em retificação, que já saem antes deste
+  /// ponto em `_startVistoriaFromSinistro`/`_startRetificacaoFromSinistro`).
+  /// Vem como mensagem do próprio bot no chat (botões inline na bolha, ver
+  /// `_AiBubble`), não um dialog por cima -- e esconde o composer normal
+  /// enquanto a escolha não é feita (`awaitingColetaModoChoice`).
+  void _offerColetaModoChoice() {
+    if (currentSession == null) return;
+
+    setState(() {
+      awaitingColetaModoChoice = true;
+      messages.add(
+        ChatMessage(
+          type: ChatMessageType.ai,
+          text: 'Como você quer coletar essa vistoria?',
+          createdAt: DateTime.now(),
+          isColetaModoPrompt: true,
+        ),
+      );
+    });
+
+    _scrollToBottom();
+  }
+
+  Future<void> _handleColetaModoChosen(ColetaModo escolha) async {
+    final session = currentSession;
+
+    if (session == null || !awaitingColetaModoChoice) return;
+
+    setState(() {
+      coletaModo = escolha;
+      awaitingColetaModoChoice = false;
+    });
+
+    unawaited(
+      VistoriaChatSessionService.instance.setColetaModo(
+        vistoriaDocId: session.docId,
+        coletaModo: escolha == ColetaModo.emMassa ? 'em_massa' : 'guiado',
+      ),
+    );
+
+    if (escolha == ColetaModo.emMassa) {
+      setState(() {
+        messages.add(
+          ChatMessage(
+            type: ChatMessageType.ai,
+            text:
+                'Beleza! Toque no botão "Montar envio em massa" aqui embaixo '
+                'pra juntar fotos, áudio, observações e orçamento e mandar '
+                'tudo de uma vez.',
+            createdAt: DateTime.now(),
+          ),
+        );
+      });
+
+      _scrollToBottom();
+      return;
+    }
+
+    await _sendInitialOiToAgent();
+  }
+
+  /// Só pra vistorias em modo em massa ainda não enviadas -- oferece
+  /// continuar montando o pacote ou trocar pro chat guiado, em vez do
+  /// diálogo "continuar agora/mais tarde/nova" (que pressupõe um papo em
+  /// andamento, e aqui não tem nenhum).
+  Future<ColetaModo?> _askResumeBulkMode(VistoriaSession session) {
+    final placa = session.placa.trim().isEmpty ? 'Sem placa' : session.placa;
+
+    return showDialog<ColetaModo>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return Dialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+          ),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 60,
+                    height: 60,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFE5F6FF),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.upload_file_rounded,
+                      color: Color(0xFF0057C0),
+                      size: 30,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Envio em massa em andamento',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.spaceGrotesk(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: const Color(0xFF1F2937),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Você tinha começado a montar um pacote pra $placa e ainda '
+                  'não enviou. O que você quer fazer?',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xFF6B7280),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    height: 1.3,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                _VistoriaActionTile(
+                  icon: Icons.upload_file_rounded,
+                  title: 'Continuar envio em massa',
+                  subtitle: 'Volta pro botão de montar o pacote.',
+                  color: const Color(0xFF0057C0),
+                  filled: true,
+                  onTap: () =>
+                      Navigator.of(dialogContext).pop(ColetaModo.emMassa),
+                ),
+                const SizedBox(height: 10),
+                _VistoriaActionTile(
+                  icon: Icons.chat_bubble_rounded,
+                  title: 'Mudar para o chat guiado',
+                  subtitle: 'Descarta o pacote e conversa comigo passo a passo.',
+                  color: const Color(0xFF0057C0),
+                  onTap: () =>
+                      Navigator.of(dialogContext).pop(ColetaModo.guiado),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   Future<ContinueVistoriaAction?> _askVistoriaAction(
@@ -594,10 +796,12 @@ class _AiChatPageState extends State<AiChatPage> {
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(24),
           ),
-          title: const Text('Descartar vistoria atual?'),
+          title: const Text('Começar uma nova coleta?'),
           content: Text(
-            'A vistoria ${session.idvistoria} será marcada como abandonada.\n\n'
-            'O histórico não será apagado do banco, mas uma nova vistoria será iniciada para este veículo.',
+            'A vistoria ${session.idvistoria} será marcada como abandonada -- '
+            'isso não cancela o sinistro nem anula nada (só o analista no web '
+            'pode fazer isso). O histórico não é apagado, e uma nova coleta '
+            'começa agora pra este veículo.',
           ),
           actions: [
             TextButton(
@@ -607,10 +811,10 @@ class _AiChatPageState extends State<AiChatPage> {
             ElevatedButton(
               onPressed: () => Navigator.of(context).pop(true),
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.redAccent,
+                backgroundColor: Colors.deepOrange,
                 foregroundColor: Colors.white,
               ),
-              child: const Text('Cancelar e iniciar nova'),
+              child: const Text('Abandonar e iniciar nova'),
             ),
           ],
         );
@@ -652,6 +856,45 @@ class _AiChatPageState extends State<AiChatPage> {
             .checkVistoriaExpiration(idvistoria: openSession.docId);
 
         if (!mounted) return;
+
+        // Modo em massa não tem conversa pra "continuar agora"/"mais tarde"
+        // -- esse diálogo existe pra retomar um PAPO em andamento, e no modo
+        // em massa não existe papo nenhum, só um pacote que ainda não foi
+        // enviado. Em vez disso, pergunta só o que faz sentido aqui:
+        // continuar montando o pacote ou trocar pro chat guiado.
+        if (!alreadyExpired && openSession.isEmMassa) {
+          final resumeChoice = await _askResumeBulkMode(openSession);
+
+          if (!mounted) return;
+
+          if (resumeChoice == ColetaModo.guiado) {
+            unawaited(
+              VistoriaChatSessionService.instance.setColetaModo(
+                vistoriaDocId: openSession.docId,
+                coletaModo: 'guiado',
+              ),
+            );
+
+            setState(() {
+              coletaModo = ColetaModo.guiado;
+              _loadSessionIntoChat(openSession);
+              isLoadingSession = false;
+            });
+
+            _scrollToBottom();
+            await _sendInitialOiToAgent();
+            return;
+          }
+
+          setState(() {
+            coletaModo = ColetaModo.emMassa;
+            _loadSessionIntoChat(openSession);
+            isLoadingSession = false;
+          });
+
+          _scrollToBottom();
+          return;
+        }
 
         final action = alreadyExpired
             ? await _showVistoriaExpiredDialog(openSession)
@@ -695,9 +938,8 @@ class _AiChatPageState extends State<AiChatPage> {
               isLoadingSession = true;
             });
 
-            await VistoriaChatSessionService.instance.discardVistoria(
+            await VistoriaChatSessionService.instance.abandonVistoria(
               vistoriaDocId: openSession.docId,
-              hardDelete: false,
             );
           }
         }
@@ -724,7 +966,7 @@ class _AiChatPageState extends State<AiChatPage> {
       );
 
       if (shouldSendInitialOi && !hasAiReply) {
-        await _sendInitialOiToAgent();
+        _offerColetaModoChoice();
       }
     } catch (e) {
       debugPrint('Erro ao criar vistoria pelo sinistro: $e');
@@ -812,9 +1054,8 @@ class _AiChatPageState extends State<AiChatPage> {
               isLoadingSession = true;
             });
 
-            await VistoriaChatSessionService.instance.discardVistoria(
+            await VistoriaChatSessionService.instance.abandonVistoria(
               vistoriaDocId: openSession.docId,
-              hardDelete: false,
             );
           } else {
             setState(() {
@@ -1366,6 +1607,210 @@ class _AiChatPageState extends State<AiChatPage> {
     _scrollToBottom();
   }
 
+  /// Abre o modal de composição do modo "enviar tudo de uma vez"
+  /// (`BulkUploadSheet`) e, se o mecânico confirmar o envio, orquestra o
+  /// upload -- reaproveitando literalmente as mesmas chamadas de serviço que
+  /// o fluxo guiado já usa por item, só que em loop e sem notificar o
+  /// agente a cada foto/áudio.
+  Future<void> _openBulkUploadSheet() async {
+    if (isInspectionCompleted || isBulkProcessing) return;
+
+    final session = currentSession;
+
+    if (session == null) return;
+
+    FocusScope.of(context).unfocus();
+
+    // Busca direto do servidor (não confia no snapshot em memória de
+    // `session`) -- é exatamente o cenário que essa fila existe pra cobrir:
+    // uma tentativa anterior pode ter deixado itens marcados no Firestore
+    // depois que esta sessão já tinha sido carregada.
+    final draft = await VistoriaChatSessionService.instance
+        .fetchEnvioEmMassaRascunho(session.docId);
+
+    if (!mounted) return;
+
+    final result = await BulkUploadSheet.show(
+      context,
+      vistoriaDocId: session.docId,
+      initialDraft: draft,
+    );
+
+    if (result == null || !mounted) return;
+
+    final hasAnything = result.photos.isNotEmpty ||
+        result.audios.isNotEmpty ||
+        result.text.trim().isNotEmpty ||
+        result.orcamentoItems.isNotEmpty;
+
+    if (!hasAnything) return;
+
+    await _submitBulkPackage(session: session, result: result);
+  }
+
+  Future<void> _submitBulkPackage({
+    required VistoriaSession session,
+    required BulkUploadResult result,
+  }) async {
+    setState(() => isBulkProcessing = true);
+    bulkStatusText.value = 'Enviando fotos...';
+
+    try {
+      for (final photo in result.photos) {
+        try {
+          final uploadedImage =
+              await VistoriaChatSessionService.instance.uploadImageFile(
+            vistoriaDocId: session.docId,
+            imagePath: photo.path,
+          );
+
+          await VistoriaChatSessionService.instance.appendImageEvidence(
+            vistoriaDocId: session.docId,
+            imageUrl: uploadedImage.downloadUrl,
+            imagePath: photo.path,
+            imageId: uploadedImage.imageId,
+            storagePath: uploadedImage.storagePath,
+            fileName: uploadedImage.fileName,
+            contentType: uploadedImage.contentType,
+            sizeBytes: uploadedImage.sizeBytes,
+          );
+
+          await VistoriaChatSessionService.instance.appendChatMessage(
+            vistoriaDocId: session.docId,
+            role: 'photo',
+            text: 'Foto anexada à vistoria (envio em massa)',
+            extraData: {
+              'imageId': uploadedImage.imageId,
+              'url': uploadedImage.downloadUrl,
+              'storagePath': uploadedImage.storagePath,
+              'fileName': uploadedImage.fileName,
+            },
+          );
+
+          await VistoriaChatSessionService.instance
+              .markEnvioEmMassaRascunhoItemEnviado(
+            vistoriaDocId: session.docId,
+            localId: photo.localId,
+          );
+        } catch (e) {
+          debugPrint('Erro ao subir foto do envio em massa: $e');
+        }
+      }
+
+      if (result.audios.isNotEmpty) {
+        bulkStatusText.value = 'Ouvindo os áudios...';
+
+        for (final audio in result.audios) {
+          try {
+            final uploadedAudio = await UserAudioStorageService.instance
+                .uploadOriginalAudioForMp3Conversion(
+              localAudioPath: audio.path,
+              idvistoria: session.idvistoria,
+              sinistroId: session.sinistroId,
+              duration: Duration(seconds: audio.durationSeconds),
+            );
+
+            // Transcreve de verdade (o backend grava em chatmessages) --
+            // descartamos a resposta conversacional do agente de propósito:
+            // o modo em massa não mostra ida-e-volta com o ADK.
+            await ArgosAiService.instance.sendAudioMessage(
+              idvistoria: session.idvistoria,
+              sinistroId: session.sinistroId,
+              audioId: uploadedAudio.audioId,
+              storagePath: uploadedAudio.mp3StoragePath,
+              durationSeconds: audio.durationSeconds,
+            );
+
+            await VistoriaChatSessionService.instance
+                .markEnvioEmMassaRascunhoItemEnviado(
+              vistoriaDocId: session.docId,
+              localId: audio.localId,
+            );
+          } catch (e) {
+            debugPrint(
+              'Erro ao subir/transcrever áudio do envio em massa: $e',
+            );
+          }
+        }
+      }
+
+      if (result.text.trim().isNotEmpty) {
+        bulkStatusText.value = 'Registrando observações...';
+
+        await VistoriaChatSessionService.instance.appendChatMessage(
+          vistoriaDocId: session.docId,
+          role: 'user',
+          text: result.text.trim(),
+        );
+
+        await VistoriaChatSessionService.instance
+            .markEnvioEmMassaRascunhoItemEnviado(
+          vistoriaDocId: session.docId,
+          localId: kBulkTextRascunhoKey,
+        );
+      }
+
+      if (result.orcamentoItems.isNotEmpty) {
+        bulkStatusText.value = 'Calculando o orçamento...';
+
+        for (final item in result.orcamentoItems) {
+          await VistoriaChatSessionService.instance.appendOrcamentoMecanicoItem(
+            vistoriaDocId: session.docId,
+            peca: item.peca,
+            tipoIntervencao: item.tipoIntervencao,
+            valorPeca: item.valorPeca,
+            horasMaoObra: item.horasMaoObra,
+          );
+
+          await VistoriaChatSessionService.instance
+              .markEnvioEmMassaRascunhoItemEnviado(
+            vistoriaDocId: session.docId,
+            localId: item.localId,
+          );
+        }
+      }
+
+      bulkStatusText.value = 'Finalizando...';
+
+      await VistoriaChatSessionService.instance.clearEnvioEmMassaRascunho(
+        vistoriaDocId: session.docId,
+      );
+
+      await VistoriaChatSessionService.instance.submitForOperationalAnalysis(
+        vistoriaDocId: session.docId,
+      );
+
+      if (!mounted) return;
+
+      // Diferente do fluxo guiado (onde watchCompletionState só considera
+      // "completo" depois que o AGENTE preenche laudo_analitico durante a
+      // conversa), o modo em massa não tem agente conversando -- esse campo
+      // nunca seria preenchido por ninguém, e a tela de espera nunca
+      // apareceria se dependesse desse listener. Aqui a confirmação do
+      // próprio envio já é o sinal de "completo".
+      await vistoriaCompletionSubscription?.cancel();
+      vistoriaCompletionSubscription = null;
+
+      setState(() {
+        isBulkProcessing = false;
+        isInspectionCompleted = true;
+        completedInspectionStatus =
+            VistoriaChatSessionService.statusEmAnaliseOperacional;
+      });
+    } catch (e) {
+      debugPrint('Erro ao enviar pacote em massa: $e');
+
+      if (!mounted) return;
+
+      setState(() => isBulkProcessing = false);
+
+      _showSnack(
+        'Não foi possível concluir o envio. Tente novamente.',
+        backgroundColor: Colors.redAccent,
+      );
+    }
+  }
+
   Future<String> _createAudioFilePath() async {
     final directory = await getApplicationDocumentsDirectory();
 
@@ -1731,6 +2176,47 @@ class _AiChatPageState extends State<AiChatPage> {
     return '${minutes.toString().padLeft(2, '0')}:${remainingSeconds.toString().padLeft(2, '0')}';
   }
 
+  /// Três estados possíveis embaixo do chat:
+  /// 1. Pergunta bifurcada pendente -- nada aqui, os botões ficam inline na
+  ///    própria bolha (ver `_ChatBubble`/`_AiBubble`).
+  /// 2. Modo em massa escolhido e ainda não enviado -- some com
+  ///    câmera/texto/mic (não fazem sentido fora do modal) e mostra um único
+  ///    botão grande que abre o `BulkUploadSheet`.
+  /// 3. Guiado (ou vistoria antiga sem esse campo) -- composer de sempre.
+  Widget _buildComposerArea(String duration) {
+    if (awaitingColetaModoChoice) {
+      return const SizedBox.shrink(key: ValueKey('awaiting_choice'));
+    }
+
+    if (coletaModo == ColetaModo.emMassa) {
+      return _BulkComposerButton(
+        key: const ValueKey('bulk_composer'),
+        onTap: _openBulkUploadSheet,
+      );
+    }
+
+    if (isRecording) {
+      return _RecordingComposer(
+        key: const ValueKey('recording'),
+        duration: duration,
+        onCancel: _cancelRecording,
+        onSend: _finishRecording,
+      );
+    }
+
+    return _TextComposer(
+      key: const ValueKey('composer'),
+      controller: messageController,
+      hasText: hasText,
+      isStartingRecording: isStartingRecording,
+      cameraUnlocked: cameraUnlocked,
+      cameraPulsing: cameraPulsing,
+      onCameraTap: _openCamera,
+      onSendTap: _sendTextMessage,
+      onMicTap: _startRecording,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final duration = _formatDuration(recordingSeconds);
@@ -1739,11 +2225,13 @@ class _AiChatPageState extends State<AiChatPage> {
       return const SafeArea(child: _ChatSessionLoading());
     }
 
-    return SafeArea(
-      child: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 320),
-        switchInCurve: Curves.easeOutCubic,
-        switchOutCurve: Curves.easeInCubic,
+    return Stack(
+      children: [
+        SafeArea(
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 320),
+            switchInCurve: Curves.easeOutCubic,
+            switchOutCurve: Curves.easeInCubic,
         transitionBuilder: (child, animation) {
           final offsetAnimation = Tween<Offset>(
             begin: const Offset(-0.08, 0),
@@ -1819,6 +2307,10 @@ class _AiChatPageState extends State<AiChatPage> {
                                 message: message,
                                 onOpenCamera:
                                     isCameraReleaseMessage ? _openCamera : null,
+                                onChooseColetaModo: message.isColetaModoPrompt &&
+                                        awaitingColetaModoChoice
+                                    ? _handleColetaModoChosen
+                                    : null,
                               ),
                             );
                           },
@@ -1836,28 +2328,22 @@ class _AiChatPageState extends State<AiChatPage> {
                             ),
                           );
                         },
-                        child: isRecording
-                            ? _RecordingComposer(
-                                key: const ValueKey('recording'),
-                                duration: duration,
-                                onCancel: _cancelRecording,
-                                onSend: _finishRecording,
-                              )
-                            : _TextComposer(
-                                key: const ValueKey('composer'),
-                                controller: messageController,
-                                hasText: hasText,
-                                isStartingRecording: isStartingRecording,
-                                cameraUnlocked: cameraUnlocked,
-                                cameraPulsing: cameraPulsing,
-                                onCameraTap: _openCamera,
-                                onSendTap: _sendTextMessage,
-                                onMicTap: _startRecording,
-                              ),
+                        child: _buildComposerArea(duration),
                       ),
                     ],
                   ),
-      ),
+          ),
+        ),
+        if (isBulkProcessing)
+          Positioned.fill(
+            child: Container(
+              color: Colors.white.withOpacity(.94),
+              child: Center(
+                child: EyeProcessingAnimation(statusText: bulkStatusText),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -2665,7 +3151,15 @@ class _ChatBubble extends StatelessWidget {
   /// pra chamar direto daqui, já que esta é uma StatelessWidget à parte).
   final VoidCallback? onOpenCamera;
 
-  const _ChatBubble({required this.message, this.onOpenCamera});
+  /// Só não-nulo na bolha da pergunta bifurcada
+  /// (`message.isColetaModoPrompt`) -- renderiza os dois botões inline.
+  final void Function(ColetaModo)? onChooseColetaModo;
+
+  const _ChatBubble({
+    required this.message,
+    this.onOpenCamera,
+    this.onChooseColetaModo,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -2676,6 +3170,8 @@ class _ChatBubble extends StatelessWidget {
           boldLineIndexes: message.boldLineIndexes,
           createdAt: message.createdAt,
           onOpenCamera: onOpenCamera,
+          isColetaModoPrompt: message.isColetaModoPrompt,
+          onChooseColetaModo: onChooseColetaModo,
         );
 
       case ChatMessageType.user:
@@ -2708,12 +3204,16 @@ class _AiBubble extends StatelessWidget {
   final List<int> boldLineIndexes;
   final DateTime? createdAt;
   final VoidCallback? onOpenCamera;
+  final bool isColetaModoPrompt;
+  final void Function(ColetaModo)? onChooseColetaModo;
 
   const _AiBubble({
     required this.text,
     this.boldLineIndexes = const [],
     this.createdAt,
     this.onOpenCamera,
+    this.isColetaModoPrompt = false,
+    this.onChooseColetaModo,
   });
 
   @override
@@ -2789,6 +3289,20 @@ class _AiBubble extends StatelessWidget {
                     ),
                   ),
                 ],
+                if (isColetaModoPrompt && onChooseColetaModo != null) ...[
+                  const SizedBox(height: 12),
+                  _ColetaModoChoiceButton(
+                    icon: Icons.chat_bubble_rounded,
+                    label: 'Passo a passo',
+                    onTap: () => onChooseColetaModo!(ColetaModo.guiado),
+                  ),
+                  const SizedBox(height: 8),
+                  _ColetaModoChoiceButton(
+                    icon: Icons.upload_file_rounded,
+                    label: 'Enviar tudo de uma vez',
+                    onTap: () => onChooseColetaModo!(ColetaModo.emMassa),
+                  ),
+                ],
                 const SizedBox(height: 6),
                 Align(
                   alignment: Alignment.centerRight,
@@ -2825,6 +3339,51 @@ class _AiBubble extends StatelessWidget {
         if (entry.key < lines.length - 1) const TextSpan(text: '\n'),
       ];
     }).toList();
+  }
+}
+
+class _ColetaModoChoiceButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _ColetaModoChoiceButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: double.infinity,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0057C0),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: Colors.white, size: 16),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -3560,6 +4119,42 @@ String _formatAudioBubbleDuration(int seconds) {
   final remainingSeconds = seconds % 60;
 
   return '$minutes:${remainingSeconds.toString().padLeft(2, '0')}';
+}
+
+class _BulkComposerButton extends StatelessWidget {
+  final VoidCallback onTap;
+
+  const _BulkComposerButton({super.key, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 16),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(.96),
+        border: Border(top: BorderSide(color: Colors.black.withOpacity(.05))),
+      ),
+      child: SizedBox(
+        width: double.infinity,
+        height: 52,
+        child: ElevatedButton.icon(
+          onPressed: onTap,
+          icon: const Icon(Icons.upload_file_rounded),
+          label: const Text(
+            'Montar envio em massa',
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFF0057C0),
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _TextComposer extends StatelessWidget {

@@ -22,6 +22,7 @@ class VistoriaChatSessionService {
   static const String statusRejeitada = 'REJEITADA';
   static const String statusCancelada = 'CANCELADA';
   static const String statusExpirada = 'EXPIRADA';
+  static const String statusAbandonada = 'ABANDONADA';
 
   static const String tipoOriginal = 'ORIGINAL';
   static const String tipoRetificacao = 'RETIFICACAO';
@@ -550,6 +551,26 @@ class VistoriaChatSessionService {
     );
   }
 
+  /// "Começar nova" (botão do mecânico, sem sinistro nenhum sendo anulado --
+  /// isso é decisão do analista no web, não dele). Diferente de
+  /// `discardVistoria(hardDelete: false)`, que grava CANCELADA -- um status
+  /// que o resto do sistema trata como decisão do analista (encerramento
+  /// definitivo). ABANDONADA é o mesmo status que o job de expiração já usa
+  /// pra "essa tentativa parou, mas o mecânico pode simplesmente começar de
+  /// novo pelo botão comum" (ver `isExpiredOrAbandonedCategory` no app).
+  Future<void> abandonVistoria({required String vistoriaDocId}) async {
+    await _vistorias.doc(vistoriaDocId).set({
+      'status': statusAbandonada,
+      'abandonedAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _syncSinistroVistoriaStatus(
+      vistoriaDocId: vistoriaDocId,
+      status: statusAbandonada,
+    );
+  }
+
   Future<void> _deleteSubcollection(
     CollectionReference<Map<String, dynamic>> collection, {
     int batchSize = 450,
@@ -712,6 +733,108 @@ class VistoriaChatSessionService {
       'agentLastTurnAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
+  }
+
+  /// Persiste a escolha guiado/em_massa assim que o mecânico decide -- sem
+  /// isso, sair do app antes de confirmar o envio em massa faz a vistoria
+  /// esquecer o modo escolhido ao reabrir (ver ColetaModo em ai_chat_page).
+  Future<void> setColetaModo({
+    required String vistoriaDocId,
+    required String coletaModo,
+  }) async {
+    await _vistorias.doc(vistoriaDocId).set({
+      'coletaModo': coletaModo,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  /// Item de orçamento digitado pelo próprio mecânico (fluxo de envio em
+  /// massa) -- mesma lista que o ADK já preenche durante o fluxo guiado
+  /// (`orcamentoRascunho`), só com `origem: 'mecanico'` em vez de
+  /// `'vistoria'`. Não é um campo/modelo paralelo de propósito.
+  Future<void> appendOrcamentoMecanicoItem({
+    required String vistoriaDocId,
+    required String peca,
+    required String tipoIntervencao,
+    required double valorPeca,
+    required double horasMaoObra,
+  }) async {
+    await _vistorias.doc(vistoriaDocId).set({
+      'orcamentoRascunho': FieldValue.arrayUnion([
+        {
+          'peca': peca.trim(),
+          'tipoIntervencao': tipoIntervencao.trim(),
+          'valorPeca': valorPeca,
+          'horasMaoObra': horasMaoObra,
+          'origem': 'mecanico',
+        }
+      ]),
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  /// Rascunho persistido do modo em massa -- gravado a cada item
+  /// adicionado/removido no `BulkUploadSheet`, não só quando "Enviar" é
+  /// tocado. É o que sobrevive o app fechar/morrer no meio da montagem do
+  /// pacote (a persistência offline do Firestore já cobre isso sozinha,
+  /// tanto pra sem-internet quanto pra "app matou o processo") ou no meio
+  /// do envio em si (cada item sabe se já foi 'enviado', pra não duplicar
+  /// ao retomar). Mapa por `localId` em vez de array pra dar pra
+  /// atualizar/remover um item só sem reescrever a lista inteira.
+  Future<void> upsertEnvioEmMassaRascunhoItem({
+    required String vistoriaDocId,
+    required String localId,
+    required Map<String, dynamic> item,
+  }) async {
+    await _vistorias.doc(vistoriaDocId).set({
+      'envioEmMassaRascunho': {localId: item},
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  Future<void> removeEnvioEmMassaRascunhoItem({
+    required String vistoriaDocId,
+    required String localId,
+  }) async {
+    await _vistorias.doc(vistoriaDocId).update({
+      'envioEmMassaRascunho.$localId': FieldValue.delete(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> markEnvioEmMassaRascunhoItemEnviado({
+    required String vistoriaDocId,
+    required String localId,
+  }) async {
+    await _vistorias.doc(vistoriaDocId).update({
+      'envioEmMassaRascunho.$localId.status': 'enviado',
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  /// Lê o estado mais recente do rascunho direto do servidor -- usado no
+  /// início do envio pra saber, com certeza, o que já foi confirmado
+  /// enviado numa tentativa anterior interrompida (o `VistoriaSession` em
+  /// memória pode estar desatualizado se o rascunho mudou depois que a
+  /// sessão foi carregada).
+  Future<Map<String, dynamic>> fetchEnvioEmMassaRascunho(
+    String vistoriaDocId,
+  ) async {
+    final doc = await _vistorias.doc(vistoriaDocId).get();
+    final raw = doc.data()?['envioEmMassaRascunho'];
+
+    if (raw is! Map) return {};
+
+    return raw.map((key, value) => MapEntry(key.toString(), value));
+  }
+
+  Future<void> clearEnvioEmMassaRascunho({
+    required String vistoriaDocId,
+  }) async {
+    await _vistorias.doc(vistoriaDocId).update({
+      'envioEmMassaRascunho': FieldValue.delete(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
   }
 
   Future<UploadedImageEvidence> uploadImageFile({
@@ -1082,6 +1205,18 @@ class VistoriaSession {
   final DateTime? agentLastTurnAt;
   final DateTime? agentBusinessExpiresAt;
 
+  /// 'guiado' | 'em_massa' | '' (vistorias antigas, de antes desse campo
+  /// existir -- tratadas como guiado por compatibilidade). Persistido assim
+  /// que o mecânico escolhe, pra retomar corretamente se ele sair antes de
+  /// confirmar o envio em massa.
+  final String coletaModo;
+
+  /// Rascunho persistido do modo em massa (ver
+  /// `upsertEnvioEmMassaRascunhoItem`) -- snapshot de quando a sessão foi
+  /// carregada; pra ter certeza absoluta no início do envio, usar
+  /// `fetchEnvioEmMassaRascunho` direto.
+  final Map<String, dynamic> envioEmMassaRascunho;
+
   const VistoriaSession({
     required this.docId,
     required this.idvistoria,
@@ -1099,7 +1234,11 @@ class VistoriaSession {
     required this.chatMessages,
     this.agentLastTurnAt,
     this.agentBusinessExpiresAt,
+    this.coletaModo = '',
+    this.envioEmMassaRascunho = const {},
   });
+
+  bool get isEmMassa => coletaModo == 'em_massa';
 
   bool get isRetificacao =>
       tipoVistoria.toUpperCase() == VistoriaChatSessionService.tipoRetificacao;
@@ -1170,6 +1309,12 @@ class VistoriaSession {
       agentBusinessExpiresAt: VistoriaChatSessionService._dateValueOrNull(
         data['agentBusinessExpiresAt'],
       ),
+      coletaModo: VistoriaChatSessionService._str(data['coletaModo']),
+      envioEmMassaRascunho: (data['envioEmMassaRascunho'] is Map)
+          ? (data['envioEmMassaRascunho'] as Map).map(
+              (key, value) => MapEntry(key.toString(), value),
+            )
+          : const {},
     );
   }
 }
