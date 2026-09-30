@@ -31,6 +31,27 @@ class ChatPreviewInfo {
   });
 }
 
+class OrcamentoRascunhoItem {
+  final String peca;
+  final String tipoIntervencao;
+  final double valorPeca;
+  final double horasMaoObra;
+
+  /// 'vistoria' (o ADK montou durante o fluxo guiado) ou 'mecanico' (o
+  /// próprio mecânico digitou no modo de envio em massa).
+  final String origem;
+
+  const OrcamentoRascunhoItem({
+    required this.peca,
+    required this.tipoIntervencao,
+    required this.valorPeca,
+    required this.horasMaoObra,
+    required this.origem,
+  });
+
+  bool get isDoMecanico => origem == 'mecanico';
+}
+
 class LinkedVistoriaInfo {
   final String docId;
   final String idvistoria;
@@ -56,6 +77,10 @@ class LinkedVistoriaInfo {
   final DateTime? createdAt;
   final DateTime? updatedAt;
 
+  /// 'em_massa' | 'guiado' | '' (vistorias de antes desse campo existir).
+  final String coletaModo;
+  final List<OrcamentoRascunhoItem> orcamentoItems;
+
   const LinkedVistoriaInfo({
     required this.docId,
     required this.idvistoria,
@@ -80,6 +105,8 @@ class LinkedVistoriaInfo {
     required this.inspectorEmail,
     required this.createdAt,
     required this.updatedAt,
+    this.coletaModo = '',
+    this.orcamentoItems = const [],
   });
 
   factory LinkedVistoriaInfo.fromFirestore(
@@ -140,8 +167,12 @@ class LinkedVistoriaInfo {
       inspectorEmail: stringValue(data['inspectorEmail']),
       createdAt: parseFirestoreDateTime(data['createdAt']),
       updatedAt: parseFirestoreDateTime(data['updatedAt']),
+      coletaModo: stringValue(data['coletaModo']),
+      orcamentoItems: _extractOrcamentoItems(data['orcamentoRascunho']),
     );
   }
+
+  bool get isEmMassa => coletaModo == 'em_massa';
 
   bool get isRetificacao {
     final normalized = normalizeStatusText(tipoVistoria);
@@ -277,6 +308,24 @@ List<String> _extractImageBase64Previews(List<dynamic> images) {
   }
 
   return previews;
+}
+
+List<OrcamentoRascunhoItem> _extractOrcamentoItems(dynamic raw) {
+  if (raw is! List) return const [];
+
+  return raw.whereType<Map>().map((item) {
+    return OrcamentoRascunhoItem(
+      peca: stringValue(item['peca']),
+      tipoIntervencao: stringValue(item['tipoIntervencao']),
+      valorPeca: (item['valorPeca'] is num)
+          ? (item['valorPeca'] as num).toDouble()
+          : double.tryParse('${item['valorPeca']}') ?? 0,
+      horasMaoObra: (item['horasMaoObra'] is num)
+          ? (item['horasMaoObra'] as num).toDouble()
+          : double.tryParse('${item['horasMaoObra']}') ?? 0,
+      origem: stringValue(item['origem'], fallback: 'vistoria'),
+    );
+  }).toList();
 }
 
 List<AudioPreviewInfo> _extractAudioPreviews(List<dynamic> audios) {

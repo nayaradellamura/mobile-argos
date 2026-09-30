@@ -9,6 +9,7 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shimmer/shimmer.dart';
+import '../../services/argos_connectivity_service.dart';
 import '../../services/session_context_service.dart';
 import '../../services/sinistro_presence_service.dart';
 import '../../services/vistoria_chat_session_service.dart';
@@ -450,24 +451,34 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
     return SafeArea(
       child: Column(
         children: [
-          _InspectionsHeader(
-            total: scopedInspections.length,
-            counts: counts,
-            selectedFilter: _selectedFilter,
-            filterController: _filterScrollController,
-            onFilterChanged: _changeFilter,
-            onlyMine: _onlyMine,
-            onToggleOnlyMine: (value) {
-              setState(() {
-                _onlyMine = value;
-              });
+          ValueListenableBuilder<bool>(
+            // Ranking da equipe abre uma agregação fresca (MetricsPage),
+            // diferente do placar acima (calculado no cliente a partir do
+            // que já está em cache) -- some sozinho quando fica offline,
+            // sem precisar que o stream de vistorias reemita nada.
+            valueListenable: ArgosConnectivityService.instance.isOnline,
+            builder: (context, online, _) {
+              return _InspectionsHeader(
+                total: scopedInspections.length,
+                counts: counts,
+                selectedFilter: _selectedFilter,
+                filterController: _filterScrollController,
+                onFilterChanged: _changeFilter,
+                onlyMine: _onlyMine,
+                onToggleOnlyMine: (value) {
+                  setState(() {
+                    _onlyMine = value;
+                  });
+                },
+                onOpenRanking:
+                    online ? () => _openTeamRanking(credenciadoId) : null,
+                isSearching: _isSearching,
+                onToggleSearch: _toggleSearch,
+                onCloseSearch: _closeSearch,
+                searchController: _searchController,
+                onSearchChanged: _onSearchChanged,
+              );
             },
-            onOpenRanking: () => _openTeamRanking(credenciadoId),
-            isSearching: _isSearching,
-            onToggleSearch: _toggleSearch,
-            onCloseSearch: _closeSearch,
-            searchController: _searchController,
-            onSearchChanged: _onSearchChanged,
           ),
           Expanded(
             child: inspections.isEmpty
@@ -848,6 +859,20 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
       return;
     }
 
+    // Check-in é uma transação que precisa checar conflito de responsável
+    // em tempo real -- diferente de uma escrita comum, não enfileira
+    // sozinha offline (travaria/erraria sem feedback claro). Falha rápido
+    // com uma mensagem clara em vez de deixar tentar.
+    if (!ArgosConnectivityService.instance.isOnline.value) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Check-in precisa de conexão com a internet.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
     setState(() {
       isCheckingIn = true;
     });
@@ -1180,12 +1205,12 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                     ),
                                     label: Text(
                                       canOpenChat
-                                          ? 'Iniciar coleta no Chat IA'
+                                          ? 'Iniciar coleta no Argos IA'
                                           : isHumanAnalysis
                                               ? 'Vistoria em analise humana'
                                               : isAssignedToAnother
                                               ? 'Chat bloqueado para outro responsável'
-                                              : 'Faça check-in para iniciar o Chat IA',
+                                              : 'Faça check-in para iniciar o Argos IA',
                                     ),
                                     style: OutlinedButton.styleFrom(
                                       foregroundColor: canOpenChat
@@ -1541,9 +1566,12 @@ class _HistoryVistoriaCard extends StatelessWidget {
                     ),
                     const SizedBox(height: 4),
                     EllipsisText(
-                      date == null
-                          ? '${vistoria.statusLabel} • ${vistoria.tipoLabel}'
-                          : '${vistoria.statusLabel} • ${vistoria.tipoLabel} • ${_formatDateTime(date)}',
+                      [
+                        vistoria.statusLabel,
+                        vistoria.tipoLabel,
+                        if (vistoria.isEmMassa) 'Envio em massa',
+                        if (date != null) _formatDateTime(date),
+                      ].join(' • '),
                       style: const TextStyle(
                         color: Color(0xFF414755),
                         fontSize: 11,
@@ -1640,7 +1668,7 @@ class _TinyMetric extends StatelessWidget {
   }
 }
 
-enum _HistoryPreviewSection { chat, photos, audios }
+enum _HistoryPreviewSection { chat, photos, audios, orcamento }
 
 class _HistoryVistoriaPreview extends StatefulWidget {
   final LinkedVistoriaInfo vistoria;
@@ -1652,7 +1680,9 @@ class _HistoryVistoriaPreview extends StatefulWidget {
 }
 
 class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
-  _HistoryPreviewSection _selectedSection = _HistoryPreviewSection.chat;
+  late _HistoryPreviewSection _selectedSection = widget.vistoria.isEmMassa
+      ? _HistoryPreviewSection.photos
+      : _HistoryPreviewSection.chat;
 
   LinkedVistoriaInfo get vistoria => widget.vistoria;
 
@@ -1678,15 +1708,32 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
           Row(
             children: [
               Expanded(
-                child: _PreviewSelectorTile(
-                  icon: Icons.chat_bubble_outline,
-                  label: 'Chat',
-                  value: '${vistoria.chatCount}',
-                  isSelected: _selectedSection == _HistoryPreviewSection.chat,
-                  onTap: () {
-                    setState(() => _selectedSection = _HistoryPreviewSection.chat);
-                  },
-                ),
+                child: vistoria.isEmMassa
+                    ? _PreviewSelectorTile(
+                        icon: Icons.request_quote_outlined,
+                        label: 'Orçamento',
+                        value: '${vistoria.orcamentoItems.length}',
+                        isSelected:
+                            _selectedSection == _HistoryPreviewSection.orcamento,
+                        onTap: () {
+                          setState(
+                            () => _selectedSection =
+                                _HistoryPreviewSection.orcamento,
+                          );
+                        },
+                      )
+                    : _PreviewSelectorTile(
+                        icon: Icons.chat_bubble_outline,
+                        label: 'Chat',
+                        value: '${vistoria.chatCount}',
+                        isSelected:
+                            _selectedSection == _HistoryPreviewSection.chat,
+                        onTap: () {
+                          setState(
+                            () => _selectedSection = _HistoryPreviewSection.chat,
+                          );
+                        },
+                      ),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -1765,7 +1812,7 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
       case _HistoryPreviewSection.chat:
         return _PreviewBlock(
           key: const ValueKey('chat_preview'),
-          title: 'Chat IA',
+          title: 'Argos IA',
           icon: Icons.forum_outlined,
           child: _MiniChatPreview(vistoria: vistoria),
         );
@@ -1782,6 +1829,13 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
           title: 'Áudios enviados',
           icon: Icons.mic_none,
           child: _HistoryAudioPreviewList(vistoria: vistoria),
+        );
+      case _HistoryPreviewSection.orcamento:
+        return _PreviewBlock(
+          key: const ValueKey('orcamento_preview'),
+          title: 'Orçamento',
+          icon: Icons.request_quote_outlined,
+          child: _HistoryOrcamentoPreviewList(vistoria: vistoria),
         );
     }
   }
@@ -1984,7 +2038,7 @@ class _MiniChatPreview extends StatelessWidget {
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Text(
-                                      'Chat IA',
+                                      'Argos IA',
                                       style: GoogleFonts.spaceGrotesk(
                                         color: const Color(0xFF1F2937),
                                         fontSize: 17,
@@ -2516,6 +2570,96 @@ class _HistoryAudioPreviewListState extends State<_HistoryAudioPreviewList> {
           }).toList(),
         );
       },
+    );
+  }
+}
+
+class _HistoryOrcamentoPreviewList extends StatelessWidget {
+  final LinkedVistoriaInfo vistoria;
+
+  const _HistoryOrcamentoPreviewList({required this.vistoria});
+
+  @override
+  Widget build(BuildContext context) {
+    final items = vistoria.orcamentoItems;
+
+    if (items.isEmpty) {
+      return const Text(
+        'Nenhum item de orçamento registrado para esta vistoria.',
+        style: TextStyle(
+          color: Color(0xFF6B7280),
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+        ),
+      );
+    }
+
+    return Column(
+      children: [
+        for (final item in items)
+          Container(
+            margin: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0xFF0057C0).withOpacity(.08)),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      EllipsisText(
+                        item.peca.isEmpty ? 'Peça não informada' : item.peca,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 13,
+                          color: Color(0xFF1F2937),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      EllipsisText(
+                        '${item.tipoIntervencao.isEmpty ? "-" : item.tipoIntervencao} • '
+                        'R\$${item.valorPeca.toStringAsFixed(2)} • '
+                        '${item.horasMaoObra}h',
+                        style: const TextStyle(
+                          color: Color(0xFF6B7280),
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: item.isDoMecanico
+                        ? const Color(0xFFFFF3E0)
+                        : const Color(0xFFEFF7FD),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    item.isDoMecanico ? 'Mecânico' : 'IA',
+                    style: TextStyle(
+                      color: item.isDoMecanico
+                          ? Colors.deepOrange
+                          : const Color(0xFF0057C0),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 }
