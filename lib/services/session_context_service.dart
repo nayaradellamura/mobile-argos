@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
+import 'argos_connectivity_service.dart';
 import 'argos_push_notification_service.dart';
 
 /// Contexto do usuário logado: quem ele é e a qual oficina credenciada
@@ -152,11 +153,20 @@ class SessionContextService {
     );
 
     if (credenciadoId.isEmpty) {
+      // Mesma trava de "não tenta rede com certeza nenhuma offline" do
+      // `_getDataCacheFirst` -- sem conexão e sem nada em cache pra essa
+      // consulta específica, insistir só pendura a tela esperando um
+      // servidor que não dá pra alcançar.
+      if (!ArgosConnectivityService.instance.isOnline.value) {
+        throw const NoCredenciadoLinkedException();
+      }
+
       final credSnap = await FirebaseFirestore.instance
           .collection('credenciados')
           .where('funcionariosUids', arrayContains: uid)
           .limit(1)
-          .get();
+          .get()
+          .timeout(const Duration(seconds: 8));
 
       if (credSnap.docs.isEmpty) {
         throw const NoCredenciadoLinkedException();
@@ -198,7 +208,16 @@ class SessionContextService {
       // Sem cache local ainda — segue para a leitura normal (servidor).
     }
 
-    final snap = await ref.get();
+    // Bug real, achado testando offline: sem conexão E sem nada em cache
+    // pra essa doc específica, um `.get()` padrão pode ficar pendurado
+    // (não desiste rápido) -- travava a tela inteira em "Preparando
+    // sessão..." pra sempre. Falha rápido em vez de insistir com um
+    // servidor inalcançável.
+    if (!ArgosConnectivityService.instance.isOnline.value) {
+      return {};
+    }
+
+    final snap = await ref.get().timeout(const Duration(seconds: 8));
     return snap.data() ?? {};
   }
 

@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../../../services/sinistro_presence_service.dart';
+import '../../../services/vistoria_chat_session_service.dart';
 import 'inspection_parsing_utils.dart';
 
 enum InspectionStatus {
@@ -528,6 +529,15 @@ class InspectionCase {
         !isCancelledCategory &&
         !isCompletedCategory;
   }
+
+  /// A vistoria atual foi criada/está sendo processada 100% offline (ID
+  /// provisório, ver `VistoriaChatSessionService.createVistoriaOffline`) --
+  /// ainda não tem o número sequencial real nem terminou de subir pro
+  /// Storage. Some sozinho quando a vistoria termina de sincronizar
+  /// (reconciliação troca `vistoriaAtualId` pelo ID real).
+  bool get isPendingOfflineSync => vistoriaAtualId
+      .trim()
+      .startsWith(VistoriaChatSessionService.pendingVistoriaIdPrefix);
 
   bool get isPendingCategory {
     return checkInAt == null &&

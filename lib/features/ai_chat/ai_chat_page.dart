@@ -120,18 +120,11 @@ class AiChatPage extends StatefulWidget {
   /// mantém esta página montada o tempo todo, initState não roda de novo).
   final ValueListenable<int>? selectedTabIndexListenable;
 
-  /// Chamado quando o mecânico escolhe "Continuar mais tarde" no diálogo de
-  /// entrada offline (`_askOfflineEntryChoice`) -- troca a aba selecionada
-  /// no `MainShell` de volta pra "Vistorias" em vez de deixá-lo parado
-  /// aqui. Null (ex: em testes) simplesmente não navega.
-  final VoidCallback? onGoToInspections;
-
   const AiChatPage({
     super.key,
     this.sinistroId,
     this.startRetificacao = false,
     this.selectedTabIndexListenable,
-    this.onGoToInspections,
   });
 
   @override
@@ -160,6 +153,10 @@ class _AiChatPageState extends State<AiChatPage> {
 
   List<SinistroVistoriaOption> availableSinistros = [];
   bool isLoadingSession = true;
+
+  /// Trava de reentrância pra `_bootstrapChatSession` -- ver comentário no
+  /// início do método.
+  bool _isBootstrapping = false;
   bool isInspectionCompleted = false;
   String completedInspectionStatus = '';
 
@@ -181,6 +178,12 @@ class _AiChatPageState extends State<AiChatPage> {
   /// prosseguir de jeito nenhum aqui enquanto sem conexão. Esconde o
   /// composer inteiro (ver `_buildComposerArea`), só mostra o aviso.
   bool isBlockedOfflineGuidedHistory = false;
+
+  /// true enquanto abandona a vistoria guiada e cria a nova em massa
+  /// offline -- mostra uma tela dedicada de "convertendo" em vez do
+  /// "Preparando sessão..." genérico (que parecia travado sem explicação
+  /// nenhuma quando essa escrita demorava mais que o normal).
+  bool isConvertingToOfflineBulk = false;
 
   /// true depois que o mecânico toca "Enviar" no modo em massa estando
   /// offline -- o pacote já está seguro (rascunho persistido), só falta a
@@ -399,32 +402,31 @@ class _AiChatPageState extends State<AiChatPage> {
   }
 
   Future<void> _bootstrapChatSession() async {
+    // Reentrância: `_handleConnectivityRestored` pode chamar isto de novo
+    // (retry do bloqueio guiado) -- se a conexão "piscar" (confirma true,
+    // cai, confirma true de novo) rápido o bastante, duas execuções
+    // concorrentes tentando mostrar diálogo/mexer no mesmo estado ao
+    // mesmo tempo é exatamente o tipo de corrida que pode deixar a tela
+    // presa em "Carregando sessão..." pra sempre. Só a execução em
+    // andamento tem permissão de mexer em `isLoadingSession`/diálogos.
+    if (_isBootstrapping) return;
+    _isBootstrapping = true;
+
     setState(() {
       isLoadingSession = true;
     });
 
     try {
-      // Aviso explícito toda vez que o Argos IA é aberto offline -- antes
-      // disso a decisão (bloquear/criar/retomar) acontecia calada, sem o
-      // mecânico entender por quê algumas vistorias funcionam offline e
-      // outras não.
-      if (!ArgosConnectivityService.instance.isOnline.value) {
-        final shouldContinueOffline = await _askOfflineEntryChoice();
-
-        if (!mounted) return;
-
-        if (!shouldContinueOffline) {
-          setState(() {
-            isLoadingSession = false;
-            currentSession = null;
-            availableSinistros = const [];
-          });
-
-          widget.onGoToInspections?.call();
-          return;
-        }
-      }
-
+      // Nada de aviso genérico aqui antes de saber o que o mecânico quer
+      // fazer -- chegou a existir um diálogo bloqueando a ENTRADA inteira
+      // da aba offline (mesmo sem nenhuma vistoria escolhida ainda), mas
+      // isso era pura fricção: a lista abaixo (`_loadAvailableSinistros`)
+      // já funciona 100% do cache sem precisar de decisão nenhuma, e quem
+      // sabe de verdade o que fazer com uma vistoria específica offline é
+      // `_startVistoriaOffline` (bloqueia/retoma/cria conforme o histórico
+      // de CADA sinistro, com a mensagem certa pra cada caso) -- chamado
+      // logo abaixo, dentro de `_startVistoriaFromSinistro`, só quando o
+      // mecânico de fato escolheu um veículo.
       final directSinistroId = widget.sinistroId?.trim();
 
       if (directSinistroId != null && directSinistroId.isNotEmpty) {
@@ -453,6 +455,8 @@ class _AiChatPageState extends State<AiChatPage> {
             ),
           );
       });
+    } finally {
+      _isBootstrapping = false;
     }
   }
 
@@ -546,93 +550,6 @@ class _AiChatPageState extends State<AiChatPage> {
     }
 
     await _sendInitialOiToAgent();
-  }
-
-  /// Mostrado toda vez que o Argos IA é aberto offline (antes de decidir
-  /// qual vistoria/modo aplicar) -- explica a regra de negócio (guiado
-  /// depende do agente, que precisa de internet; só o envio em massa
-  /// funciona sem conexão) e deixa o mecânico escolher entre seguir mesmo
-  /// assim ou voltar e esperar a rede. Mesmo padrão visual dos outros
-  /// diálogos desta tela (`_askResumeBulkMode`/`_askVistoriaAction`).
-  Future<bool> _askOfflineEntryChoice() async {
-    final choice = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) {
-        return Dialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(28),
-          ),
-          insetPadding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Center(
-                  child: Container(
-                    width: 60,
-                    height: 60,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFFFFF7E6),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                      Icons.wifi_off_rounded,
-                      color: Color(0xFFB45309),
-                      size: 30,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'Você está offline',
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.spaceGrotesk(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: const Color(0xFF1F2937),
-                  ),
-                ),
-                const SizedBox(height: 6),
-                const Text(
-                  'O chat guiado com o agente precisa de internet pra '
-                  'funcionar. Sem conexão, só é possível trabalhar no modo '
-                  '"enviar tudo de uma vez".',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Color(0xFF6B7280),
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    height: 1.3,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                _VistoriaActionTile(
-                  icon: Icons.upload_file_rounded,
-                  title: 'Continuar offline',
-                  subtitle: 'Usa o envio em massa enquanto a rede não volta.',
-                  color: const Color(0xFF0057C0),
-                  filled: true,
-                  onTap: () => Navigator.of(dialogContext).pop(true),
-                ),
-                const SizedBox(height: 10),
-                _VistoriaActionTile(
-                  icon: Icons.arrow_back_rounded,
-                  title: 'Continuar mais tarde',
-                  subtitle: 'Volta pra tela principal e espera a internet.',
-                  color: const Color(0xFF6B7280),
-                  onTap: () => Navigator.of(dialogContext).pop(false),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-
-    return choice ?? false;
   }
 
   /// Só pra vistorias em modo em massa ainda não enviadas -- oferece
@@ -1187,6 +1104,79 @@ class _AiChatPageState extends State<AiChatPage> {
     VistoriaSession? openSession,
   ) async {
     if (openSession != null && !openSession.isEmMassa) {
+      final wantsAbandon =
+          await _askAbandonGuidedAndStartOfflineBulk(openSession);
+
+      if (!mounted) return;
+
+      if (wantsAbandon) {
+        // Fica NA MESMA TELA mostrando um estado de "convertendo" --
+        // precisa de currentSession != null pro build() não voltar pra
+        // lista de seleção (que é como o erro ficava "escondido" antes).
+        // Essa escrita específica já provou (testando no aparelho) que
+        // pode demorar bem mais que o normal, por isso o timeout generoso
+        // lá no serviço -- aqui só esperamos honestamente, mostrando que
+        // algo está acontecendo, em vez do "Preparando sessão..." genérico
+        // que parecia travado sem explicação.
+        setState(() {
+          isLoadingSession = false;
+          isConvertingToOfflineBulk = true;
+          currentSession = openSession;
+        });
+
+        try {
+          // Cria a vistoria NOVA primeiro -- o serviço já resolve rápido
+          // offline (não espera mais o Future de rede, só aplica local e
+          // segue -- ver `VistoriaChatSessionService._writeNoWaitOffline`).
+          // O abandono da antiga vira fire-and-forget logo abaixo: a nova
+          // já é a mais recente (`updatedAt`), então `findOpenVistoria` já
+          // prefere ela mesmo que o abandono ainda não tenha "chegado".
+          //
+          // Isso ficou rápido demais pro mecânico ler a mensagem da tela
+          // de "Convertendo vistoria" -- garante um tempo mínimo visível
+          // nela, mesmo que o trabalho de verdade já tenha terminado.
+          final session = await Future.wait([
+            VistoriaChatSessionService.instance.createVistoriaOffline(
+              sinistroId: sinistroId,
+            ),
+            Future<void>.delayed(const Duration(seconds: 15)),
+          ]).then((results) => results.first as VistoriaSession);
+
+          if (!mounted) return;
+
+          setState(() {
+            isConvertingToOfflineBulk = false;
+            coletaModo = ColetaModo.emMassa;
+            _loadSessionIntoChat(session);
+            isLoadingSession = false;
+          });
+
+          _scrollToBottom();
+
+          unawaited(
+            VistoriaChatSessionService.instance
+                .abandonVistoria(vistoriaDocId: openSession.docId)
+                .catchError((e) {
+              debugPrint('Abandonar vistoria antiga em segundo plano falhou: $e');
+            }),
+          );
+
+          return;
+        } catch (e) {
+          debugPrint('Abandonar+criar offline falhou: $e');
+
+          if (!mounted) return;
+
+          setState(() => isConvertingToOfflineBulk = false);
+
+          _showSnack(
+            'Isso está demorando mais que o esperado. Tente de novo em '
+            'alguns segundos.',
+            backgroundColor: Colors.orange,
+          );
+        }
+      }
+
       setState(() {
         // Precisa setar currentSession -- o build() decide entre a tela de
         // seleção de veículo e o chat com base só em `currentSession ==
@@ -1208,6 +1198,7 @@ class _AiChatPageState extends State<AiChatPage> {
             ),
           );
       });
+
       return;
     }
 
@@ -1215,10 +1206,14 @@ class _AiChatPageState extends State<AiChatPage> {
 
     if (openSession != null) {
       // Já em massa -- retoma direto, sem o diálogo de "mudar pra guiado"
-      // (opção que não existe offline).
+      // (opção que não existe offline). Se o pacote já tinha sido
+      // confirmado ("Enviar" tocado) antes de sair da tela, volta direto
+      // pro estado travado de "aguardando sincronização" -- não deixa
+      // reabrir o botão de montar um pacote que já foi confirmado.
       setState(() {
         coletaModo = ColetaModo.emMassa;
         _loadSessionIntoChat(openSession);
+        isAwaitingBulkSync = openSession.envioEmMassaConfirmadoOffline;
         isLoadingSession = false;
       });
 
@@ -1226,9 +1221,103 @@ class _AiChatPageState extends State<AiChatPage> {
       return;
     }
 
-    // Sem histórico nenhum pro sinistro -- cria do zero, direto em massa
-    // (bifurcação não faz sentido: guiado é inviável sem conexão). O ID é
-    // provisório (`temp-vist-...`) até reconciliar quando a rede voltar.
+    // Sem histórico nenhum pro sinistro -- cria do zero.
+    await _createFreshOfflineVistoria(sinistroId);
+  }
+
+  /// Variante offline de `_confirmStartNewVistoria` -- guiado é inviável
+  /// sem conexão, então em vez de só bloquear, oferece abandonar a
+  /// vistoria guiada em aberto e começar uma nova pelo envio em massa (o
+  /// único modo que funciona offline). Mesmo efeito de dados que o botão
+  /// "Começar nova" online -- `abandonVistoria` nunca cancela/anula o
+  /// sinistro, só o analista no web pode fazer isso.
+  Future<bool> _askAbandonGuidedAndStartOfflineBulk(
+    VistoriaSession session,
+  ) async {
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return Dialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+          ),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 60,
+                    height: 60,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFFFF7E6),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.wifi_off_rounded,
+                      color: Color(0xFFB45309),
+                      size: 30,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Vistoria guiada — sem rede',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.spaceGrotesk(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: const Color(0xFF1F2937),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'O chat guiado precisa de internet. Offline, só dá pra '
+                  'continuar pelo envio em massa.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Color(0xFF6B7280),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    height: 1.3,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                _VistoriaActionTile(
+                  icon: Icons.upload_file_rounded,
+                  title: 'Abandonar e usar envio em massa',
+                  subtitle: 'Começa agora. Não cancela o sinistro.',
+                  color: Colors.deepOrange,
+                  filled: true,
+                  onTap: () => Navigator.of(dialogContext).pop(true),
+                ),
+                const SizedBox(height: 10),
+                _VistoriaActionTile(
+                  icon: Icons.schedule_rounded,
+                  title: 'Esperar conexão',
+                  subtitle: 'Continua o chat guiado quando a rede voltar.',
+                  color: const Color(0xFF6B7280),
+                  onTap: () => Navigator.of(dialogContext).pop(false),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    return result ?? false;
+  }
+
+  /// Cria uma vistoria do zero offline (ID provisório, direto em modo em
+  /// massa) e carrega na tela -- compartilhado entre "sinistro sem
+  /// histórico nenhum" e "abandonou a vistoria guiada e quer começar de
+  /// novo". Bifurcação não faz sentido aqui: guiado é inviável sem conexão.
+  Future<void> _createFreshOfflineVistoria(String sinistroId) async {
     final session = await VistoriaChatSessionService.instance
         .createVistoriaOffline(sinistroId: sinistroId);
 
@@ -1994,6 +2083,16 @@ class _AiChatPageState extends State<AiChatPage> {
     if (!ArgosConnectivityService.instance.isOnline.value) {
       setState(() => isAwaitingBulkSync = true);
 
+      // Persistido (não só em memória nesta tela) -- se o mecânico sair e
+      // voltar antes de reconectar, uma instância nova do AiChatPage
+      // precisa saber que este pacote já foi confirmado, pra mostrar a
+      // tela travada em vez do botão de montar de novo.
+      unawaited(
+        VistoriaChatSessionService.instance.markEnvioEmMassaConfirmadoOffline(
+          vistoriaDocId: session.docId,
+        ),
+      );
+
       _showSnack(
         'Sem conexão — o pacote já está salvo e vai ser enviado sozinho '
         'assim que a internet voltar.',
@@ -2481,7 +2580,24 @@ class _AiChatPageState extends State<AiChatPage> {
                 options: availableSinistros,
                 onSelect: _handleSinistroSelected,
               )
-            : isAwaitingBulkSync
+            : isConvertingToOfflineBulk
+                ? Column(
+                    key: ValueKey(
+                      'chat_converting_${currentSession!.idvistoria}',
+                    ),
+                    children: [
+                      _ChatHeader(
+                        session: currentSession,
+                        onCloseChat: null,
+                      ),
+                      Expanded(
+                        child: _ConvertingToOfflineBulkScreen(
+                          placa: currentSession!.placa,
+                        ),
+                      ),
+                    ],
+                  )
+                : isAwaitingBulkSync
                 ? Column(
                     key: ValueKey(
                       'chat_awaiting_sync_${currentSession!.idvistoria}',
@@ -3292,14 +3408,10 @@ class _ChatHeader extends StatelessWidget {
     final idvistoria = session?.idvistoria.trim() ?? '';
     final placa = session?.placa.trim() ?? '';
 
-    // ID provisório (criado 100% offline, ainda sem o número sequencial
-    // real) não tem serventia nenhuma mostrado cru pro mecânico -- troca
-    // por um selo curto em vez do `temp-vist-...` completo.
-    final isPendingId = idvistoria.isNotEmpty &&
-        VistoriaChatSessionService.instance.isPendingVistoriaId(idvistoria);
-
+    // O formato VIS-OFFLINE-NNNN já é autoexplicativo -- não precisa de
+    // selo extra avisando que é provisório.
     final subtitle = [
-      if (idvistoria.isNotEmpty && !isPendingId) idvistoria,
+      if (idvistoria.isNotEmpty) idvistoria,
       if (placa.isNotEmpty) placa,
     ].join(' • ');
 
@@ -3389,28 +3501,6 @@ class _ChatHeader extends StatelessWidget {
                     fontWeight: FontWeight.w700,
                   ),
                 ),
-                if (isPendingId) ...[
-                  const SizedBox(height: 4),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFFF7E6),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: const Color(0xFFFBBF24)),
-                    ),
-                    child: const Text(
-                      'Nº provisório — sincroniza ao reconectar',
-                      style: TextStyle(
-                        color: Color(0xFFB45309),
-                        fontSize: 10.5,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ],
               ],
             ),
           ),
@@ -4442,20 +4532,44 @@ class _BulkComposerButton extends StatelessWidget {
 /// mecânico não deve conseguir editar o pacote por engano depois de já ter
 /// confirmado o envio; a retomada de verdade acontece sozinha
 /// (`_handleConnectivityRestored`) assim que a conexão voltar.
-class _BulkAwaitingSyncScreen extends StatelessWidget {
-  final VistoriaSession session;
-  final VoidCallback onBackToSelection;
+/// Tela cheia mostrada enquanto abandona a vistoria guiada e cria a nova
+/// em massa offline -- essa escrita específica pode demorar bem mais que
+/// o normal neste tipo de cenário (já confirmado testando no aparelho).
+/// Fica NA MESMA TELA em vez de navegar pra outro lugar, mostrando um
+/// spinner de verdade em vez do "Preparando sessão..." genérico, que
+/// parecia travado sem explicação nenhuma do que estava acontecendo.
+class _ConvertingToOfflineBulkScreen extends StatefulWidget {
+  final String placa;
 
-  const _BulkAwaitingSyncScreen({
-    required this.session,
-    required this.onBackToSelection,
-  });
+  const _ConvertingToOfflineBulkScreen({required this.placa});
+
+  @override
+  State<_ConvertingToOfflineBulkScreen> createState() =>
+      _ConvertingToOfflineBulkScreenState();
+}
+
+class _ConvertingToOfflineBulkScreenState
+    extends State<_ConvertingToOfflineBulkScreen>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final isPendingId = VistoriaChatSessionService.instance
-        .isPendingVistoriaId(session.idvistoria);
-
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(24, 32, 24, 28),
@@ -4477,17 +4591,31 @@ class _BulkAwaitingSyncScreen extends StatelessWidget {
                 ),
               ],
             ),
-            child: const Center(
-              child: Icon(
-                Icons.lock_clock_rounded,
-                color: Color(0xFFB45309),
-                size: 56,
+            // Vira de cabeça pra baixo na metade de cada volta -- simula
+            // a ampulheta sendo virada assim que a areia "acaba".
+            child: Center(
+              child: AnimatedBuilder(
+                animation: _controller,
+                builder: (context, child) {
+                  final t = _controller.value;
+
+                  return Transform.rotate(
+                    angle: t * 2 * 3.14159265,
+                    child: Icon(
+                      t < 0.5
+                          ? Icons.hourglass_top_rounded
+                          : Icons.hourglass_bottom_rounded,
+                      color: const Color(0xFFB45309),
+                      size: 48,
+                    ),
+                  );
+                },
               ),
             ),
           ),
           const SizedBox(height: 30),
           Text(
-            'Envio salvo, aguardando conexão',
+            'Convertendo vistoria',
             textAlign: TextAlign.center,
             style: GoogleFonts.spaceGrotesk(
               color: const Color(0xFF0F172A),
@@ -4496,73 +4624,131 @@ class _BulkAwaitingSyncScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 10),
-          const Text(
-            'Seu pacote já está salvo neste aparelho. Assim que a internet '
-            'voltar, o envio continua sozinho -- não precisa fazer nada.',
+          Text(
+            widget.placa.isEmpty
+                ? 'Abandonando o chat guiado e criando o envio em massa. '
+                    'Isso pode levar alguns instantes.'
+                : 'Abandonando o chat guiado de ${widget.placa} e criando '
+                    'o envio em massa. Isso pode levar alguns instantes.',
             textAlign: TextAlign.center,
-            style: TextStyle(
+            style: const TextStyle(
               color: Color(0xFF414755),
               fontWeight: FontWeight.w700,
               fontSize: 15,
               height: 1.35,
             ),
           ),
-          const SizedBox(height: 22),
-          Container(
-            width: double.infinity,
-            constraints: const BoxConstraints(maxWidth: 360),
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: const Color(0xFFFBBF24)),
-            ),
-            child: Column(
-              children: [
-                Text(
-                  session.placa.isEmpty ? session.idvistoria : session.placa,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: Color(0xFF0057C0),
-                    fontWeight: FontWeight.w900,
-                    fontSize: 18,
-                  ),
-                ),
-                if (isPendingId) ...[
-                  const SizedBox(height: 6),
-                  const Text(
-                    'Nº provisório — sincroniza junto',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: Color(0xFFB45309),
-                      fontWeight: FontWeight.w700,
-                      fontSize: 12.5,
-                    ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BulkAwaitingSyncScreen extends StatelessWidget {
+  final VistoriaSession session;
+  final VoidCallback onBackToSelection;
+
+  const _BulkAwaitingSyncScreen({
+    required this.session,
+    required this.onBackToSelection,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(24, 32, 24, 28),
+      decoration: const BoxDecoration(color: Color(0xFFF3FBFF)),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              width: 116,
+              height: 116,
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF7E6),
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFFB45309).withOpacity(.18),
+                    blurRadius: 28,
+                    spreadRadius: 8,
                   ),
                 ],
-              ],
-            ),
-          ),
-          const SizedBox(height: 24),
-          OutlinedButton(
-            onPressed: onBackToSelection,
-            style: OutlinedButton.styleFrom(
-              foregroundColor: const Color(0xFF0057C0),
-              side: const BorderSide(color: Color(0xFF0057C0)),
-              padding: const EdgeInsets.symmetric(
-                horizontal: 22,
-                vertical: 14,
               ),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
+              child: const Center(
+                child: Icon(
+                  Icons.lock_clock_rounded,
+                  color: Color(0xFFB45309),
+                  size: 56,
+                ),
               ),
             ),
-            child: const Text(
-              'Ver outras vistorias',
-              style: TextStyle(fontWeight: FontWeight.w900),
+            const SizedBox(height: 30),
+            Text(
+              'Envio guardado no aparelho',
+              textAlign: TextAlign.center,
+              style: GoogleFonts.spaceGrotesk(
+                color: const Color(0xFF0F172A),
+                fontWeight: FontWeight.w900,
+                fontSize: 24,
+              ),
             ),
-          ),
-        ],
+            const SizedBox(height: 10),
+            const Text(
+              'Assim que a internet voltar, o envio é concluído sozinho. '
+              'Pode continuar trabalhando normalmente.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Color(0xFF414755),
+                fontWeight: FontWeight.w700,
+                fontSize: 15,
+                height: 1.35,
+              ),
+            ),
+            const SizedBox(height: 22),
+            Container(
+              width: double.infinity,
+              constraints: const BoxConstraints(maxWidth: 360),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: const Color(0xFFFBBF24)),
+              ),
+              child: Text(
+                session.placa.isEmpty ? session.idvistoria : session.placa,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Color(0xFF0057C0),
+                  fontWeight: FontWeight.w900,
+                  fontSize: 18,
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton(
+              onPressed: onBackToSelection,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF0057C0),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 22,
+                  vertical: 14,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+              child: const Text(
+                'Ver outras vistorias',
+                style: TextStyle(fontWeight: FontWeight.w900),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

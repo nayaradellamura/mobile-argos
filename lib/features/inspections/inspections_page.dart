@@ -67,8 +67,6 @@ class _InspectionsPageState extends State<InspectionsPage> {
   // Snapshot mais recente da lista (antes do filtro de escopo), guardado só
   // pra ter o que varrer quando o listener de conectividade dispara -- o
   // stream não necessariamente reemite na hora exata em que a rede volta.
-  List<InspectionCase> _lastKnownInspections = const [];
-  final Set<String> _reconcilingTempVistoriaIds = <String>{};
 
   @override
   void didUpdateWidget(covariant InspectionsPage oldWidget) {
@@ -252,16 +250,13 @@ void _scrollFilterCarouselTo(InspectionFilter filter) {
   /// somem do carrossel quando fica offline. Se o filtro selecionado for
   /// um desses, volta pra "Total" pra não deixar a lista filtrada por um
   /// chip que sumiu da tela.
+  ///
+  /// A reconciliação de ID provisório (`VIS-OFFLINE-...`) saiu daqui -- o
+  /// `BulkSyncCoordinator` (singleton instanciado cedo em `main.dart`) já
+  /// escuta conectividade sozinho e cobre isso em qualquer tela, não só
+  /// com `InspectionsPage` montada. Ver `BulkSyncCoordinator.reconcileAllPendingIds`.
   void _handleConnectivityChangedForFilter() {
-    if (ArgosConnectivityService.instance.isOnline.value) {
-      // Reconecta -- varre o último snapshot conhecido atrás de vistorias
-      // criadas offline (docId `temp-vist-...`) esperando o número
-      // sequencial real. O stream de vistorias também deve reemitir sozinho
-      // ao reconectar, mas não dá pra confiar só nisso -- este é o gatilho
-      // garantido.
-      _reconcilePendingOfflineVistorias(_lastKnownInspections);
-      return;
-    }
+    if (ArgosConnectivityService.instance.isOnline.value) return;
 
     if (_selectedFilter != InspectionFilter.pending &&
         _selectedFilter != InspectionFilter.aiAnalysis) {
@@ -269,40 +264,6 @@ void _scrollFilterCarouselTo(InspectionFilter filter) {
     }
 
     setState(() => _selectedFilter = InspectionFilter.all);
-  }
-
-  /// Troca o ID provisório (`temp-vist-...`) de qualquer vistoria MINHA
-  /// (nunca mexe em vistoria de outro mecânico) criada offline pelo número
-  /// sequencial real, uma vez por ID (`_reconcilingTempVistoriaIds` evita
-  /// disparo duplo se `isOnline` piscar antes do doc provisório sumir do
-  /// cache). Ver `VistoriaChatSessionService.reconcilePendingVistoriaId`.
-  void _reconcilePendingOfflineVistorias(List<InspectionCase> inspections) {
-    if (!ArgosConnectivityService.instance.isOnline.value) return;
-
-    for (final inspection in inspections) {
-      if (!inspection.isAssignedToCurrentUser) continue;
-
-      final tempId = inspection.vistoriaAtualId.trim();
-
-      if (!VistoriaChatSessionService.instance.isPendingVistoriaId(tempId)) {
-        continue;
-      }
-
-      if (!_reconcilingTempVistoriaIds.add(tempId)) continue;
-
-      unawaited(
-        VistoriaChatSessionService.instance
-            .reconcilePendingVistoriaId(
-              tempDocId: tempId,
-              sinistroId: inspection.id,
-            )
-            .catchError((e) {
-          debugPrint('Erro ao reconciliar vistoria offline $tempId: $e');
-          _reconcilingTempVistoriaIds.remove(tempId);
-          return tempId;
-        }),
-      );
-    }
   }
 
   Future<_CredenciadoContext> _loadCredenciadoContext() async {
@@ -483,9 +444,6 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
     // abrir. Cada CircleAvatar/Image já lida com seu próprio placeholder
     // enquanto a foto chega.
     unawaited(_precachePeoplePhotosAfterFrame(inspections));
-
-    _lastKnownInspections = inspections;
-    _reconcilePendingOfflineVistorias(inspections);
 
     return _buildBodyForInspections(inspections, credenciadoId);
   }
@@ -1057,7 +1015,12 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
         !inspection.isCompletedCategory &&
         (!inspection.isCancelledCategory ||
             inspection.isExpiredOrAbandonedCategory) &&
-        !inspection.isRevisionCategory;
+        !inspection.isRevisionCategory &&
+        // Enquanto o ID ainda for provisório (temp-vist-...), a vistoria
+        // ainda não reconciliou pro número sequencial real -- esconde o
+        // botão até isso terminar, em vez de deixar reabrir no meio da
+        // sincronização.
+        !inspection.isPendingOfflineSync;
     final canStartRetificacao = isAssignedToMe &&
         inspection.isRevisionCategory &&
         widget.onStartRetificacao != null;
@@ -1306,12 +1269,16 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                     icon: Icon(
                                       canOpenChat
                                           ? Icons.smart_toy
-                                          : Icons.lock_outline,
+                                          : inspection.isPendingOfflineSync
+                                              ? Icons.cloud_sync_rounded
+                                              : Icons.lock_outline,
                                     ),
                                     label: Text(
                                       canOpenChat
                                           ? 'Iniciar coleta no Argos IA'
-                                          : isHumanAnalysis
+                                          : inspection.isPendingOfflineSync
+                                              ? 'Aguardando sincronização...'
+                                              : isHumanAnalysis
                                               ? 'Vistoria em analise humana'
                                               : isAssignedToAnother
                                               ? 'Chat bloqueado para outro responsável'
@@ -3878,6 +3845,27 @@ class _InspectionCardContent extends StatelessWidget {
                             ),
                           ),
                         ),
+                      // Some sozinho quando a vistoria termina de
+                      // sincronizar (ver `isPendingOfflineSync`).
+                      if (inspection.isPendingOfflineSync)
+                        Positioned(
+                          left: -2,
+                          top: -2,
+                          child: Container(
+                            width: 16,
+                            height: 16,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFB45309),
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white, width: 2),
+                            ),
+                            child: const Icon(
+                              Icons.cloud_off_rounded,
+                              color: Colors.white,
+                              size: 9,
+                            ),
+                          ),
+                        ),
                     ],
                   ),
                   const SizedBox(width: 12),
@@ -3909,19 +3897,25 @@ class _InspectionCardContent extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 14),
-              Row(
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   _StatusChip(
                     label: inspection.displayStatusLabel,
                     color: inspection.displayStatusColor,
                   ),
-                  const SizedBox(width: 8),
                   _StatusChip(
                     label: inspection.priority.label,
                     color: inspection.priority.color,
                   ),
-                  if (hasLinkedVistoria) ...[
-                    const SizedBox(width: 8),
+                  if (inspection.isPendingOfflineSync)
+                    const _StatusChip(
+                      label: 'Offline',
+                      color: Color(0xFFB45309),
+                    ),
+                  if (hasLinkedVistoria)
                     Container(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 9,
@@ -3951,7 +3945,6 @@ class _InspectionCardContent extends StatelessWidget {
                         ],
                       ),
                     ),
-                  ],
                 ],
               ),
               if (inspection.hasAssignedUser) ...[

@@ -40,6 +40,12 @@ class BulkSyncCoordinator {
   /// primeiro vence -- o segundo encontra o id já aqui e não faz nada.
   final Set<String> _processingVistoriaIds = <String>{};
 
+  /// Mesma proteção que `_processingVistoriaIds`, só que pra reconciliação
+  /// de ID provisório -- evita duas chamadas de `reconcilePendingVistoriaId`
+  /// em paralelo pro mesmo docId se `isOnline` piscar antes do doc
+  /// provisório sumir do cache local.
+  final Set<String> _reconcilingVistoriaIds = <String>{};
+
   final StreamController<String> _submittedController =
       StreamController<String>.broadcast();
 
@@ -55,12 +61,125 @@ class BulkSyncCoordinator {
 
   void _handleConnectivityChanged() {
     if (!ArgosConnectivityService.instance.isOnline.value) return;
-    unawaited(syncAllPending());
+    unawaited(_syncAndReconcileAllPending());
+  }
+
+  /// Dono único da query "minhas vistorias em massa em aberto" -- usada
+  /// tanto pra retomar envio pendente (`syncAllPending`) quanto pra
+  /// reconciliar ID provisório (`reconcileAllPendingIds`). Antes cada uma
+  /// fazia essa MESMA query sozinha a cada reconexão (2 leituras idênticas
+  /// no Firestore toda vez que a rede voltava); agora busca uma vez só e
+  /// aplica as duas checagens por doc.
+  Future<void> _syncAndReconcileAllPending() async {
+    final uid = _auth.currentUser?.uid ?? '';
+    if (uid.isEmpty) return;
+    if (!ArgosConnectivityService.instance.isOnline.value) return;
+
+    try {
+      final snapshot = await _fetchMyOpenBulkVistorias(uid);
+
+      for (final doc in snapshot.docs) {
+        _trySubmitIfPending(doc);
+        _tryReconcileIfPending(doc);
+      }
+    } catch (e) {
+      // Melhor esforço -- se a varredura falhar (ex: rede caiu nesse
+      // meio-tempo de novo), a próxima reconexão tenta de novo sozinha.
+      debugPrint('Erro ao varrer vistorias em massa pendentes: $e');
+    }
+  }
+
+  Future<QuerySnapshot<Map<String, dynamic>>> _fetchMyOpenBulkVistorias(
+    String uid,
+  ) {
+    return _db
+        .collection('vistorias')
+        .where('inspectorId', isEqualTo: uid)
+        .where('status', isEqualTo: VistoriaChatSessionService.statusEmAndamento)
+        .where('coletaModo', isEqualTo: 'em_massa')
+        .get();
+  }
+
+  void _tryReconcileIfPending(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
+    final tempId = doc.id;
+
+    if (!VistoriaChatSessionService.instance.isPendingVistoriaId(tempId)) {
+      return;
+    }
+
+    if (!_reconcilingVistoriaIds.add(tempId)) return;
+
+    final sinistroId = (doc.data()['sinistroId'] ?? '').toString();
+
+    unawaited(
+      VistoriaChatSessionService.instance
+          .reconcilePendingVistoriaId(
+            tempDocId: tempId,
+            sinistroId: sinistroId,
+          )
+          .catchError((e) {
+        debugPrint('Erro ao reconciliar vistoria offline $tempId: $e');
+        return tempId;
+      }).whenComplete(() => _reconcilingVistoriaIds.remove(tempId)),
+    );
+  }
+
+  void _trySubmitIfPending(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
+    final data = doc.data();
+    final rascunho = _asStringKeyedMap(data['envioEmMassaRascunho']);
+
+    final hasPending = rascunho.values.any(
+      (item) => item is Map && item['status'] != 'enviado',
+    );
+
+    if (!hasPending) return;
+
+    final result = buildBulkUploadResultFromRascunho(rascunho);
+
+    final hasAnything = result.photos.isNotEmpty ||
+        result.audios.isNotEmpty ||
+        result.text.trim().isNotEmpty ||
+        result.orcamentoItems.isNotEmpty;
+
+    if (!hasAnything) return;
+
+    unawaited(
+      submitPackage(
+        vistoriaDocId: doc.id,
+        sinistroId: (data['sinistroId'] ?? '').toString(),
+        idvistoria: (data['idvistoria'] ?? doc.id).toString(),
+        result: result,
+      ),
+    );
+  }
+
+  /// Troca o ID provisório (`VIS-OFFLINE-...`) de qualquer vistoria MINHA
+  /// criada offline pelo número sequencial real -- em QUALQUER tela, não só
+  /// quando `InspectionsPage` está montada. Versão standalone (própria
+  /// query) pra quem quiser chamar isso isoladamente; o gatilho real de
+  /// reconexão usa `_syncAndReconcileAllPending`, que faz UMA query só pra
+  /// isto e pra `syncAllPending` juntos.
+  Future<void> reconcileAllPendingIds() async {
+    final uid = _auth.currentUser?.uid ?? '';
+    if (uid.isEmpty) return;
+    if (!ArgosConnectivityService.instance.isOnline.value) return;
+
+    try {
+      final snapshot = await _fetchMyOpenBulkVistorias(uid);
+
+      for (final doc in snapshot.docs) {
+        _tryReconcileIfPending(doc);
+      }
+    } catch (e) {
+      debugPrint('Erro ao varrer vistorias offline pendentes de id real: $e');
+    }
   }
 
   /// Varre TODAS as vistorias em massa em aberto do mecânico logado atrás
   /// de rascunho ainda não enviado -- não depende de nenhuma tela estar
-  /// montada. Disparado sozinho ao reconectar; seguro de chamar de novo
+  /// montada. Versão standalone (própria query); o gatilho real de
+  /// reconexão usa `_syncAndReconcileAllPending`, que faz UMA query só pra
+  /// isto e pra `reconcileAllPendingIds` juntos. Seguro de chamar de novo
   /// manualmente (ex: ao abrir a lista de vistorias).
   Future<void> syncAllPending() async {
     final uid = _auth.currentUser?.uid ?? '';
@@ -68,40 +187,10 @@ class BulkSyncCoordinator {
     if (!ArgosConnectivityService.instance.isOnline.value) return;
 
     try {
-      final snapshot = await _db
-          .collection('vistorias')
-          .where('inspectorId', isEqualTo: uid)
-          .where('status', isEqualTo: VistoriaChatSessionService.statusEmAndamento)
-          .where('coletaModo', isEqualTo: 'em_massa')
-          .get();
+      final snapshot = await _fetchMyOpenBulkVistorias(uid);
 
       for (final doc in snapshot.docs) {
-        final data = doc.data();
-        final rascunho = _asStringKeyedMap(data['envioEmMassaRascunho']);
-
-        final hasPending = rascunho.values.any(
-          (item) => item is Map && item['status'] != 'enviado',
-        );
-
-        if (!hasPending) continue;
-
-        final result = buildBulkUploadResultFromRascunho(rascunho);
-
-        final hasAnything = result.photos.isNotEmpty ||
-            result.audios.isNotEmpty ||
-            result.text.trim().isNotEmpty ||
-            result.orcamentoItems.isNotEmpty;
-
-        if (!hasAnything) continue;
-
-        unawaited(
-          submitPackage(
-            vistoriaDocId: doc.id,
-            sinistroId: (data['sinistroId'] ?? '').toString(),
-            idvistoria: (data['idvistoria'] ?? doc.id).toString(),
-            result: result,
-          ),
-        );
+        _trySubmitIfPending(doc);
       }
     } catch (e) {
       // Melhor esforço -- se a varredura falhar (ex: rede caiu nesse

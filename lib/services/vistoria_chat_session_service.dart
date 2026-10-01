@@ -1,9 +1,13 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter/foundation.dart';
 
+import 'argos_connectivity_service.dart';
 import 'session_context_service.dart';
 
 class VistoriaChatSessionService {
@@ -107,15 +111,21 @@ class VistoriaChatSessionService {
           // da mesma oficina.
           final isMine = assignedToUid == ctx.uid;
 
-          // Só vistoria em andamento (o estado normal após o check-in) ou
-          // rejeitada (precisa de retificação) — exclui EM_ANALISE_OPERACIONAL
-          // (já enviada, nada a fazer no chat), FINALIZADA e CANCELADA.
+          // Em andamento (estado normal após o check-in), rejeitada
+          // (precisa de retificação), ou abandonada/expirada (o mecânico
+          // pode começar uma vistoria nova do zero pra ela, igual ao botão
+          // "Começar nova" já permite -- sem isso, uma vistoria abandonada
+          // simplesmente sumia desta lista e não dava pra selecionar o
+          // veículo de novo). Exclui EM_ANALISE_OPERACIONAL (já enviada),
+          // FINALIZADA e CANCELADA de verdade (decisão do analista).
           final isEmAndamento = vistoriaStatus.contains('ANDAMENTO');
           final isRejeitada = vistoriaStatus.contains('REJEITADA');
+          final isAbandonadaOuExpirada = vistoriaStatus.contains('ABANDONADA') ||
+              vistoriaStatus.contains('EXPIRADA');
 
           return _hasCheckIn(data['checkInAt']) &&
               isMine &&
-              (isEmAndamento || isRejeitada);
+              (isEmAndamento || isRejeitada || isAbandonadaOuExpirada);
         })
         .map(SinistroVistoriaOption.fromFirestore)
         .toList();
@@ -336,10 +346,22 @@ class VistoriaChatSessionService {
   /// transação contra `counters/vistorias_{year}`, que não enfileira
   /// offline como uma escrita comum). É só uma convenção de nome, não um
   /// campo novo no schema -- ver `reconcilePendingVistoriaId`.
-  static const String pendingVistoriaIdPrefix = 'temp-vist-';
+  ///
+  /// Formato `VIS-OFFLINE-NNNN` (4 dígitos aleatórios) pra seguir o mesmo
+  /// padrão visual de `VIS-YYYY-NNNN` -- risco de colisão aceito de
+  /// propósito (só 10 mil combinações): pedido explícito do usuário por
+  /// um número curto e legível pro mecânico, e o volume real de vistorias
+  /// offline simultâneas neste app é baixo o bastante pra isso não ser um
+  /// problema prático. Se colidir, o segundo a sincronizar sobrescreve o
+  /// primeiro -- mesma categoria de risco já aceita em
+  /// `reconcilePendingVistoriaId` (número sequencial "queimado").
+  static const String pendingVistoriaIdPrefix = 'VIS-OFFLINE-';
 
   bool isPendingVistoriaId(String vistoriaDocId) =>
       vistoriaDocId.startsWith(pendingVistoriaIdPrefix);
+
+  static String _randomOfflineSuffix() =>
+      Random().nextInt(10000).toString().padLeft(4, '0');
 
   /// Cria uma vistoria do zero 100% offline. Só chamada quando o sinistro
   /// já tem check-in feito (é assim que ele aparece em "Minhas vistorias" --
@@ -358,6 +380,55 @@ class VistoriaChatSessionService {
   /// Firestore (`_vistorias.doc().id`, sem chamada de rede), prefixado com
   /// `temp-vist-` -- ver `reconcilePendingVistoriaId` pra trocar pelo
   /// número sequencial real quando a conexão voltar.
+  ///
+  /// Roda uma escrita (set/update/batch.commit) -- confirmado com o log
+  /// verboso do próprio SDK (`FirebaseFirestore.setLoggingEnabled`) que a
+  /// escrita é aplicada ao cache local em menos de 100ms (o dado já fica
+  /// certo e visível pra qualquer leitura a partir daí), mas o `Future`
+  /// só resolve depois de um round-trip bem-sucedido com o servidor -- e
+  /// o SDK fica tentando de novo sozinho (backoff exponencial)
+  /// indefinidamente enquanto não há rede. Esperar por isso offline só
+  /// trava a UI à toa por um `Future` que não ia resolver tão cedo,
+  /// não importa o timeout. Online, espera normalmente (com um timeout de
+  /// segurança a mais, caso algo genuinamente trave).
+  Future<void> _writeNoWaitOffline(
+    Future<void> Function() write, {
+    required String debugLabel,
+  }) async {
+    if (ArgosConnectivityService.instance.isOnline.value) {
+      await write().timeout(const Duration(seconds: 45));
+      return;
+    }
+
+    unawaited(
+      write().catchError((e) {
+        debugPrint(
+          'Sincronização em segundo plano ($debugLabel) falhou -- dado '
+          'já estava correto no cache local: $e',
+        );
+      }),
+    );
+  }
+
+  /// Lê um doc tentando o cache primeiro quando offline -- um `.get()`
+  /// padrão (sem `Source.cache`) pode ficar pendurado indefinidamente sem
+  /// conexão quando não há nada em cache ainda pra essa doc específica
+  /// (bug real, achado testando `createVistoriaOffline`/`abandonVistoria`
+  /// offline -- travava a tela em "Preparando sessão..." pra sempre).
+  /// Online, comporta-se como um `.get()` normal, só com um timeout de
+  /// segurança a mais.
+  Future<DocumentSnapshot<Map<String, dynamic>>> _getCacheAware(
+    DocumentReference<Map<String, dynamic>> ref,
+  ) async {
+    final online = ArgosConnectivityService.instance.isOnline.value;
+
+    if (!online) {
+      return ref.get(const GetOptions(source: Source.cache));
+    }
+
+    return ref.get().timeout(const Duration(seconds: 8));
+  }
+
   Future<VistoriaSession> createVistoriaOffline({
     required String sinistroId,
   }) async {
@@ -368,14 +439,15 @@ class VistoriaChatSessionService {
     }
 
     final ctx = await _currentContext();
-    final sinistroDoc = await _sinistros.doc(cleanSinistroId).get();
+
+    final sinistroDoc = await _getCacheAware(_sinistros.doc(cleanSinistroId));
 
     if (!sinistroDoc.exists) {
       throw Exception('Sinistro não encontrado no cache: $cleanSinistroId');
     }
 
     final sinistro = sinistroDoc.data() ?? {};
-    final tempId = '$pendingVistoriaIdPrefix${_vistorias.doc().id}';
+    final tempId = '$pendingVistoriaIdPrefix${_randomOfflineSuffix()}';
     final now = DateTime.now();
     final agentExpiresAt = _addBusinessHours(now, 24);
 
@@ -504,7 +576,10 @@ class VistoriaChatSessionService {
       SetOptions(merge: true),
     );
 
-    await batch.commit();
+    await _writeNoWaitOffline(
+      () => batch.commit(),
+      debugLabel: 'criar vistoria offline $tempId',
+    );
 
     return VistoriaSession(
       docId: tempId,
@@ -550,6 +625,20 @@ class VistoriaChatSessionService {
     if (!doc.exists) return tempDocId;
 
     final data = Map<String, dynamic>.from(doc.data() ?? {});
+
+    // Não reconcilia enquanto o BulkSyncCoordinator ainda não terminou de
+    // subir o pacote pra este docId provisório -- se a migração copiasse o
+    // doc pro ID real e apagasse o antigo NO MEIO do upload, as escritas
+    // seguintes do coordenador (que ainda apontam pro ID antigo) cairiam
+    // num doc já apagado, perdendo dado. Só reconcilia depois que o
+    // rascunho estiver vazio/sem pendência -- a próxima varredura de
+    // conectividade tenta de novo.
+    final rascunhoAindaPendente = _asMap(data['envioEmMassaRascunho'])
+        .values
+        .any((item) => item is Map && item['status'] != 'enviado');
+
+    if (rascunhoAindaPendente) return tempDocId;
+
     final realId = await _createVistoriaId();
 
     data['idvistoria'] = realId;
@@ -803,11 +892,14 @@ class VistoriaChatSessionService {
   /// pra "essa tentativa parou, mas o mecânico pode simplesmente começar de
   /// novo pelo botão comum" (ver `isExpiredOrAbandonedCategory` no app).
   Future<void> abandonVistoria({required String vistoriaDocId}) async {
-    await _vistorias.doc(vistoriaDocId).set({
-      'status': statusAbandonada,
-      'abandonedAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    await _writeNoWaitOffline(
+      () => _vistorias.doc(vistoriaDocId).set({
+        'status': statusAbandonada,
+        'abandonedAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true)),
+      debugLabel: 'abandonar vistoria $vistoriaDocId',
+    );
 
     await _syncSinistroVistoriaStatus(
       vistoriaDocId: vistoriaDocId,
@@ -1077,8 +1169,29 @@ class VistoriaChatSessionService {
   }) async {
     await _vistorias.doc(vistoriaDocId).update({
       'envioEmMassaRascunho': FieldValue.delete(),
+      // Some junto -- a marca de "já confirmado, só esperando rede" não
+      // tem mais sentido depois que o rascunho de verdade já foi
+      // enviado/limpo.
+      'envioEmMassaConfirmadoOffline': FieldValue.delete(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
+  }
+
+  /// Marca que o mecânico já tocou "Enviar" pra este pacote enquanto
+  /// offline -- o pacote não é mais um rascunho em edição, é um envio
+  /// confirmado esperando só a rede voltar. Persistido (não só em memória
+  /// na tela) pra qualquer instância do `AiChatPage` que reabrir essa
+  /// vistoria saber mostrar a tela travada de "aguardando sincronização"
+  /// em vez do botão de montar o pacote de novo -- sem isso, sair e voltar
+  /// antes de reconectar deixava reabrir/editar um pacote que já tinha
+  /// sido confirmado.
+  Future<void> markEnvioEmMassaConfirmadoOffline({
+    required String vistoriaDocId,
+  }) async {
+    await _vistorias.doc(vistoriaDocId).set({
+      'envioEmMassaConfirmadoOffline': true,
+      'updatedAt': Timestamp.fromDate(DateTime.now()),
+    }, SetOptions(merge: true));
   }
 
   Future<UploadedImageEvidence> uploadImageFile({
@@ -1202,7 +1315,7 @@ class VistoriaChatSessionService {
     required String status,
     Map<String, dynamic> extra = const {},
   }) async {
-    final vistoriaDoc = await _vistorias.doc(vistoriaDocId).get();
+    final vistoriaDoc = await _getCacheAware(_vistorias.doc(vistoriaDocId));
     final data = vistoriaDoc.data() ?? <String, dynamic>{};
     final sinistroId = _str(data['sinistroId']);
 
@@ -1211,14 +1324,18 @@ class VistoriaChatSessionService {
     final tipoVistoria = _str(data['tipoVistoria'], fallback: tipoOriginal);
     final origemId = _str(data['vistoriaOrigemId']);
 
-    await _sinistros.doc(sinistroId).set({
-      'vistoriaAtualId': _str(data['idvistoria'], fallback: vistoriaDocId),
-      'vistoriaAtualStatus': status,
-      'vistoriaAtualTipo': tipoVistoria,
-      'vistoriaAtualOrigemId': origemId.isEmpty ? FieldValue.delete() : origemId,
-      'ultimaVistoriaAt': FieldValue.serverTimestamp(),
-      ...extra,
-    }, SetOptions(merge: true));
+    await _writeNoWaitOffline(
+      () => _sinistros.doc(sinistroId).set({
+        'vistoriaAtualId': _str(data['idvistoria'], fallback: vistoriaDocId),
+        'vistoriaAtualStatus': status,
+        'vistoriaAtualTipo': tipoVistoria,
+        'vistoriaAtualOrigemId':
+            origemId.isEmpty ? FieldValue.delete() : origemId,
+        'ultimaVistoriaAt': FieldValue.serverTimestamp(),
+        ...extra,
+      }, SetOptions(merge: true)),
+      debugLabel: 'sincronizar status do sinistro $sinistroId',
+    );
   }
 
   Future<_CurrentContext> _currentContext() async {
@@ -1262,6 +1379,13 @@ class VistoriaChatSessionService {
     final year = DateTime.now().year;
     final counterRef = _db.collection('counters').doc('vistorias_$year');
 
+    // Timeout de segurança -- uma transação exige round-trip com o
+    // servidor e, diferente de `.get()`/`.set()`, não tem fallback local
+    // nenhum. Se a conexão cair bem no meio (ex: `reconcilePendingVistoriaId`
+    // começou com `isOnline==true` e a rede sumiu um instante depois), ela
+    // fica esperando pra sempre -- e pode travar a fila de escrita do
+    // Firestore pro resto do processo, impedindo até escritas SIMPLES em
+    // outros documentos de completarem (bug real, achado testando).
     final nextNumber = await _db.runTransaction<int>((transaction) async {
       final snapshot = await transaction.get(counterRef);
       final data = snapshot.data();
@@ -1283,7 +1407,7 @@ class VistoriaChatSessionService {
       );
 
       return next;
-    });
+    }).timeout(const Duration(seconds: 15));
 
     return 'VIS-$year-${nextNumber.toString().padLeft(4, '0')}';
   }
@@ -1461,6 +1585,13 @@ class VistoriaSession {
   /// `fetchEnvioEmMassaRascunho` direto.
   final Map<String, dynamic> envioEmMassaRascunho;
 
+  /// true depois que o mecânico toca "Enviar" offline -- o pacote já foi
+  /// confirmado, só falta a rede. Persistido (ver
+  /// `markEnvioEmMassaConfirmadoOffline`) pra qualquer tela que reabrir
+  /// esta vistoria saber mostrar o estado travado, não o botão de montar
+  /// de novo.
+  final bool envioEmMassaConfirmadoOffline;
+
   const VistoriaSession({
     required this.docId,
     required this.idvistoria,
@@ -1480,6 +1611,7 @@ class VistoriaSession {
     this.agentBusinessExpiresAt,
     this.coletaModo = '',
     this.envioEmMassaRascunho = const {},
+    this.envioEmMassaConfirmadoOffline = false,
   });
 
   bool get isEmMassa => coletaModo == 'em_massa';
@@ -1559,6 +1691,8 @@ class VistoriaSession {
               (key, value) => MapEntry(key.toString(), value),
             )
           : const {},
+      envioEmMassaConfirmadoOffline:
+          data['envioEmMassaConfirmadoOffline'] == true,
     );
   }
 }

@@ -17,6 +17,7 @@ import 'features/auth/login_page.dart';
 import 'app/main_shell.dart';
 import 'package:argos_app/features/network/argos_network_gate.dart';
 import 'features/inspections/data/inspections_prefetch_service.dart';
+import 'services/bulk_sync_coordinator.dart';
 import 'services/session_context_service.dart';
 
 Future<void> main() async {
@@ -31,6 +32,12 @@ Future<void> main() async {
   );
 
   await ArgosPushNotificationService.instance.initialize();
+
+  // Instancia cedo (não só quando o Chat IA abre) -- o coordenador escuta
+  // conectividade sozinho desde o boot, então a sincronização/reconciliação
+  // de vistorias em massa pendentes dispara em qualquer tela, não só se o
+  // mecânico passar pelo Argos IA antes de reconectar.
+  BulkSyncCoordinator.instance;
 
   runApp(const ArgosApp());
 }
