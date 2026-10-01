@@ -382,6 +382,7 @@ class _MainShellState extends State<MainShell> {
         sinistroId: selectedSinistroIdForChat,
         startRetificacao: selectedRetificacaoForChat,
         selectedTabIndexListenable: _selectedIndexNotifier,
+        onGoToInspections: () => setState(() => selectedIndex = 0),
       ),
 
       ProfilePage(

@@ -64,6 +64,12 @@ class _InspectionsPageState extends State<InspectionsPage> {
   final Set<String> _precachedAvatarUrls = <String>{};
   String? _lastOpenedNotificationSinistroId;
 
+  // Snapshot mais recente da lista (antes do filtro de escopo), guardado só
+  // pra ter o que varrer quando o listener de conectividade dispara -- o
+  // stream não necessariamente reemite na hora exata em que a rede volta.
+  List<InspectionCase> _lastKnownInspections = const [];
+  final Set<String> _reconcilingTempVistoriaIds = <String>{};
+
   @override
   void didUpdateWidget(covariant InspectionsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -247,13 +253,56 @@ void _scrollFilterCarouselTo(InspectionFilter filter) {
   /// um desses, volta pra "Total" pra não deixar a lista filtrada por um
   /// chip que sumiu da tela.
   void _handleConnectivityChangedForFilter() {
-    if (ArgosConnectivityService.instance.isOnline.value) return;
+    if (ArgosConnectivityService.instance.isOnline.value) {
+      // Reconecta -- varre o último snapshot conhecido atrás de vistorias
+      // criadas offline (docId `temp-vist-...`) esperando o número
+      // sequencial real. O stream de vistorias também deve reemitir sozinho
+      // ao reconectar, mas não dá pra confiar só nisso -- este é o gatilho
+      // garantido.
+      _reconcilePendingOfflineVistorias(_lastKnownInspections);
+      return;
+    }
+
     if (_selectedFilter != InspectionFilter.pending &&
         _selectedFilter != InspectionFilter.aiAnalysis) {
       return;
     }
 
     setState(() => _selectedFilter = InspectionFilter.all);
+  }
+
+  /// Troca o ID provisório (`temp-vist-...`) de qualquer vistoria MINHA
+  /// (nunca mexe em vistoria de outro mecânico) criada offline pelo número
+  /// sequencial real, uma vez por ID (`_reconcilingTempVistoriaIds` evita
+  /// disparo duplo se `isOnline` piscar antes do doc provisório sumir do
+  /// cache). Ver `VistoriaChatSessionService.reconcilePendingVistoriaId`.
+  void _reconcilePendingOfflineVistorias(List<InspectionCase> inspections) {
+    if (!ArgosConnectivityService.instance.isOnline.value) return;
+
+    for (final inspection in inspections) {
+      if (!inspection.isAssignedToCurrentUser) continue;
+
+      final tempId = inspection.vistoriaAtualId.trim();
+
+      if (!VistoriaChatSessionService.instance.isPendingVistoriaId(tempId)) {
+        continue;
+      }
+
+      if (!_reconcilingTempVistoriaIds.add(tempId)) continue;
+
+      unawaited(
+        VistoriaChatSessionService.instance
+            .reconcilePendingVistoriaId(
+              tempDocId: tempId,
+              sinistroId: inspection.id,
+            )
+            .catchError((e) {
+          debugPrint('Erro ao reconciliar vistoria offline $tempId: $e');
+          _reconcilingTempVistoriaIds.remove(tempId);
+          return tempId;
+        }),
+      );
+    }
   }
 
   Future<_CredenciadoContext> _loadCredenciadoContext() async {
@@ -434,6 +483,9 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
     // abrir. Cada CircleAvatar/Image já lida com seu próprio placeholder
     // enquanto a foto chega.
     unawaited(_precachePeoplePhotosAfterFrame(inspections));
+
+    _lastKnownInspections = inspections;
+    _reconcilePendingOfflineVistorias(inspections);
 
     return _buildBodyForInspections(inspections, credenciadoId);
   }

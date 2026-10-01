@@ -14,6 +14,7 @@ import 'package:record/record.dart';
 
 import '../../services/argos_ai_service.dart';
 import '../../services/argos_connectivity_service.dart';
+import '../../services/bulk_sync_coordinator.dart';
 import '../../services/user_audio_storage_service.dart';
 import '../../services/vistoria_chat_session_service.dart';
 import '../../shared/widgets/ellipsis_text.dart';
@@ -119,11 +120,18 @@ class AiChatPage extends StatefulWidget {
   /// mantém esta página montada o tempo todo, initState não roda de novo).
   final ValueListenable<int>? selectedTabIndexListenable;
 
+  /// Chamado quando o mecânico escolhe "Continuar mais tarde" no diálogo de
+  /// entrada offline (`_askOfflineEntryChoice`) -- troca a aba selecionada
+  /// no `MainShell` de volta pra "Vistorias" em vez de deixá-lo parado
+  /// aqui. Null (ex: em testes) simplesmente não navega.
+  final VoidCallback? onGoToInspections;
+
   const AiChatPage({
     super.key,
     this.sinistroId,
     this.startRetificacao = false,
     this.selectedTabIndexListenable,
+    this.onGoToInspections,
   });
 
   @override
@@ -140,6 +148,16 @@ class _AiChatPageState extends State<AiChatPage> {
   VistoriaSession? currentSession;
   StreamSubscription<VistoriaChatCompletionState>?
       vistoriaCompletionSubscription;
+
+  /// Escuta `BulkSyncCoordinator.onPackageSubmitted` -- único jeito
+  /// confiável de saber que o pacote em massa desta vistoria terminou de
+  /// enviar, já que `watchCompletionState` não serve pro modo em massa
+  /// (exige `laudo_analitico`, que só o agente guiado preenche). Dispara
+  /// tanto quando o próprio toque em "Enviar" termina quanto quando a
+  /// varredura automática em segundo plano (sem esta tela nem montada)
+  /// processa esta mesma vistoria primeiro.
+  StreamSubscription<String>? _bulkSubmittedSubscription;
+
   List<SinistroVistoriaOption> availableSinistros = [];
   bool isLoadingSession = true;
   bool isInspectionCompleted = false;
@@ -156,6 +174,21 @@ class _AiChatPageState extends State<AiChatPage> {
   ColetaModo? coletaModo;
   bool awaitingColetaModoChoice = false;
   bool isBulkProcessing = false;
+
+  /// true quando, offline, a vistoria em aberto pro sinistro começou pelo
+  /// chat guiado (ou ainda não tinha `coletaModo` definido) -- guiado
+  /// depende do agente (ADK), que precisa de internet, então não dá pra
+  /// prosseguir de jeito nenhum aqui enquanto sem conexão. Esconde o
+  /// composer inteiro (ver `_buildComposerArea`), só mostra o aviso.
+  bool isBlockedOfflineGuidedHistory = false;
+
+  /// true depois que o mecânico toca "Enviar" no modo em massa estando
+  /// offline -- o pacote já está seguro (rascunho persistido), só falta a
+  /// internet voltar. Troca o botão de envio por um aviso travado (ver
+  /// `_buildComposerArea`) pra não deixar reabrir/editar o pacote por
+  /// engano enquanto ele já foi "confirmado". Sai sozinho assim que
+  /// `_handleConnectivityRestored` retoma o envio de verdade.
+  bool isAwaitingBulkSync = false;
   final ValueNotifier<String> bulkStatusText = ValueNotifier<String>(
     'Processando...',
   );
@@ -189,14 +222,34 @@ class _AiChatPageState extends State<AiChatPage> {
 
     widget.selectedTabIndexListenable?.addListener(_onSelectedTabIndexChanged);
 
-    // Retoma sozinho o envio em massa assim que a conexão volta -- sem
-    // isso, o pacote ficava salvo esperando o mecânico lembrar de reabrir
-    // essa vistoria e tocar "Enviar" de novo.
+    // O envio de verdade (upload + finalização) é feito pelo
+    // BulkSyncCoordinator, que já se retoma sozinho ao reconectar
+    // independente desta tela estar montada -- aqui só precisamos saber
+    // QUANDO isso termina, pra virar a UI pra "concluído" se for esta
+    // mesma vistoria.
+    _bulkSubmittedSubscription =
+        BulkSyncCoordinator.instance.onPackageSubmitted.listen(
+      _handleBulkPackageSubmitted,
+    );
+
+    // Vistoria guiada bloqueada offline -- assim que a conexão volta, isso
+    // ainda precisa de um retry local (refazer o bootstrap pra cair no
+    // ramo online de verdade), diferente do envio em massa.
     ArgosConnectivityService.instance.isOnline.addListener(
       _handleConnectivityRestored,
     );
 
-    _bootstrapChatSession();
+    // Adiado pro pós-frame -- `_bootstrapChatSession` pode abrir um
+    // `showDialog` (aviso offline), que precisa de um `context` com as
+    // dependências (Theme/Localizations) já resolvidas. Chamado direto
+    // aqui, ainda dentro do `initState`, estourava "dependOnInherited...
+    // called before initState() completed" (bug real, achado testando no
+    // aparelho). `isLoadingSession` já nasce `true`, então não muda nada
+    // visualmente adiar por um frame.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _bootstrapChatSession();
+    });
   }
 
   @override
@@ -206,6 +259,7 @@ class _AiChatPageState extends State<AiChatPage> {
     ArgosConnectivityService.instance.isOnline.removeListener(
       _handleConnectivityRestored,
     );
+    _bulkSubmittedSubscription?.cancel();
 
     bulkStatusText.dispose();
     vistoriaCompletionSubscription?.cancel();
@@ -350,6 +404,27 @@ class _AiChatPageState extends State<AiChatPage> {
     });
 
     try {
+      // Aviso explícito toda vez que o Argos IA é aberto offline -- antes
+      // disso a decisão (bloquear/criar/retomar) acontecia calada, sem o
+      // mecânico entender por quê algumas vistorias funcionam offline e
+      // outras não.
+      if (!ArgosConnectivityService.instance.isOnline.value) {
+        final shouldContinueOffline = await _askOfflineEntryChoice();
+
+        if (!mounted) return;
+
+        if (!shouldContinueOffline) {
+          setState(() {
+            isLoadingSession = false;
+            currentSession = null;
+            availableSinistros = const [];
+          });
+
+          widget.onGoToInspections?.call();
+          return;
+        }
+      }
+
       final directSinistroId = widget.sinistroId?.trim();
 
       if (directSinistroId != null && directSinistroId.isNotEmpty) {
@@ -396,6 +471,8 @@ class _AiChatPageState extends State<AiChatPage> {
       isLoadingSession = false;
       isInspectionCompleted = false;
       completedInspectionStatus = '';
+      isAwaitingBulkSync = false;
+      isBlockedOfflineGuidedHistory = false;
       isAiTyping = false;
       messages
         ..clear()
@@ -469,6 +546,93 @@ class _AiChatPageState extends State<AiChatPage> {
     }
 
     await _sendInitialOiToAgent();
+  }
+
+  /// Mostrado toda vez que o Argos IA é aberto offline (antes de decidir
+  /// qual vistoria/modo aplicar) -- explica a regra de negócio (guiado
+  /// depende do agente, que precisa de internet; só o envio em massa
+  /// funciona sem conexão) e deixa o mecânico escolher entre seguir mesmo
+  /// assim ou voltar e esperar a rede. Mesmo padrão visual dos outros
+  /// diálogos desta tela (`_askResumeBulkMode`/`_askVistoriaAction`).
+  Future<bool> _askOfflineEntryChoice() async {
+    final choice = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return Dialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+          ),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 60,
+                    height: 60,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFFFF7E6),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.wifi_off_rounded,
+                      color: Color(0xFFB45309),
+                      size: 30,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Você está offline',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.spaceGrotesk(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: const Color(0xFF1F2937),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'O chat guiado com o agente precisa de internet pra '
+                  'funcionar. Sem conexão, só é possível trabalhar no modo '
+                  '"enviar tudo de uma vez".',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Color(0xFF6B7280),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    height: 1.3,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                _VistoriaActionTile(
+                  icon: Icons.upload_file_rounded,
+                  title: 'Continuar offline',
+                  subtitle: 'Usa o envio em massa enquanto a rede não volta.',
+                  color: const Color(0xFF0057C0),
+                  filled: true,
+                  onTap: () => Navigator.of(dialogContext).pop(true),
+                ),
+                const SizedBox(height: 10),
+                _VistoriaActionTile(
+                  icon: Icons.arrow_back_rounded,
+                  title: 'Continuar mais tarde',
+                  subtitle: 'Volta pra tela principal e espera a internet.',
+                  color: const Color(0xFF6B7280),
+                  onTap: () => Navigator.of(dialogContext).pop(false),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    return choice ?? false;
   }
 
   /// Só pra vistorias em modo em massa ainda não enviadas -- oferece
@@ -854,6 +1018,18 @@ class _AiChatPageState extends State<AiChatPage> {
 
       if (!mounted) return;
 
+      // findOpenVistoria já é 100% offline-safe (query no cache local +
+      // expiração calculada localmente, auto-expira via escrita simples,
+      // não transação) -- diferente do resto deste método, que depende de
+      // checkVistoriaExpiration (Cloud Function) e createOrResumeFromSinistro
+      // (transação pro número sequencial), nenhum dos dois funciona sem
+      // rede. Por isso o ramo offline é tratado à parte, sem reusar esses
+      // dois.
+      if (!ArgosConnectivityService.instance.isOnline.value) {
+        await _startVistoriaOffline(sinistroId, openSession);
+        return;
+      }
+
       if (openSession != null) {
         setState(() {
           isLoadingSession = false;
@@ -997,6 +1173,74 @@ class _AiChatPageState extends State<AiChatPage> {
           );
       });
     }
+  }
+
+  /// Ramo offline de `_startVistoriaFromSinistro`. `openSession` já veio de
+  /// `findOpenVistoria` (100% local, já descartou sessões expiradas) --
+  /// aqui só decide com base na regra de negócio: guiado precisa do agente
+  /// (ADK), que não funciona sem internet, então:
+  /// - sem histórico nenhum (ou já era em massa) -> pode elaborar offline;
+  /// - histórico de chat guiado em aberto -> bloqueia, sem entrar no
+  ///   composer.
+  Future<void> _startVistoriaOffline(
+    String sinistroId,
+    VistoriaSession? openSession,
+  ) async {
+    if (openSession != null && !openSession.isEmMassa) {
+      setState(() {
+        // Precisa setar currentSession -- o build() decide entre a tela de
+        // seleção de veículo e o chat com base só em `currentSession ==
+        // null`. Sem isso, o aviso de bloqueio nunca chegava a aparecer: a
+        // tela ficava presa na lista de seleção, parecendo que "não
+        // acontecia nada" ao tocar no veículo (bug real, achado testando
+        // no aparelho).
+        currentSession = openSession;
+        isLoadingSession = false;
+        isBlockedOfflineGuidedHistory = true;
+        messages
+          ..clear()
+          ..add(
+            ChatMessage(
+              type: ChatMessageType.ai,
+              text: 'Esta vistoria foi iniciada pelo chat guiado, que '
+                  'depende de internet pra funcionar. Conecte-se para '
+                  'continuar de onde parou.',
+            ),
+          );
+      });
+      return;
+    }
+
+    setState(() => isBlockedOfflineGuidedHistory = false);
+
+    if (openSession != null) {
+      // Já em massa -- retoma direto, sem o diálogo de "mudar pra guiado"
+      // (opção que não existe offline).
+      setState(() {
+        coletaModo = ColetaModo.emMassa;
+        _loadSessionIntoChat(openSession);
+        isLoadingSession = false;
+      });
+
+      _scrollToBottom();
+      return;
+    }
+
+    // Sem histórico nenhum pro sinistro -- cria do zero, direto em massa
+    // (bifurcação não faz sentido: guiado é inviável sem conexão). O ID é
+    // provisório (`temp-vist-...`) até reconciliar quando a rede voltar.
+    final session = await VistoriaChatSessionService.instance
+        .createVistoriaOffline(sinistroId: sinistroId);
+
+    if (!mounted) return;
+
+    setState(() {
+      coletaModo = ColetaModo.emMassa;
+      _loadSessionIntoChat(session);
+      isLoadingSession = false;
+    });
+
+    _scrollToBottom();
   }
 
   /// Caminho separado de propósito de _startVistoriaFromSinistro — não passa
@@ -1653,31 +1897,40 @@ class _AiChatPageState extends State<AiChatPage> {
   /// aberto nesse momento).
   void _handleConnectivityRestored() {
     if (!ArgosConnectivityService.instance.isOnline.value) return;
-    if (coletaModo != ColetaModo.emMassa) return;
-    if (isInspectionCompleted || isBulkProcessing) return;
 
-    final session = currentSession;
-    if (session == null) return;
-
-    unawaited(_autoResumePendingBulkSend(session));
+    // Tela bloqueada (vistoria guiada em aberto, offline) -- assim que a
+    // conexão volta, refaz o bootstrap do zero: agora cai no ramo online
+    // normal (`_askVistoriaAction`/diálogo de retomada), que é quem
+    // realmente sabe lidar com uma sessão guiada em aberto. O envio em
+    // massa pendente NÃO é tratado aqui -- isso é o `BulkSyncCoordinator`
+    // (singleton, sobrevive a troca de tela) que faz sozinho, pra TODAS as
+    // vistorias pendentes do mecânico, não só a que porventura estiver
+    // montada nesta tela (ver `_handleBulkPackageSubmitted`).
+    if (isBlockedOfflineGuidedHistory) {
+      unawaited(_bootstrapChatSession());
+    }
   }
 
-  Future<void> _autoResumePendingBulkSend(VistoriaSession session) async {
-    final rascunho = await VistoriaChatSessionService.instance
-        .fetchEnvioEmMassaRascunho(session.docId);
+  /// Chamado pelo `BulkSyncCoordinator` quando QUALQUER pacote em massa
+  /// termina de enviar -- só reage se for a vistoria que esta tela está
+  /// mostrando agora. Cobre tanto o envio disparado pelo próprio toque em
+  /// "Enviar" (`_submitBulkPackage`) quanto o que a varredura automática em
+  /// segundo plano processou sozinha, sem esta tela ter feito nada.
+  void _handleBulkPackageSubmitted(String vistoriaDocId) {
+    if (!mounted) return;
+    if (currentSession?.docId != vistoriaDocId) return;
+    if (isInspectionCompleted) return;
 
-    if (!mounted || isBulkProcessing) return;
+    unawaited(vistoriaCompletionSubscription?.cancel());
+    vistoriaCompletionSubscription = null;
 
-    final result = buildBulkUploadResultFromRascunho(rascunho);
-
-    final hasAnything = result.photos.isNotEmpty ||
-        result.audios.isNotEmpty ||
-        result.text.trim().isNotEmpty ||
-        result.orcamentoItems.isNotEmpty;
-
-    if (!hasAnything) return;
-
-    await _submitBulkPackage(session: session, result: result);
+    setState(() {
+      isBulkProcessing = false;
+      isAwaitingBulkSync = false;
+      isInspectionCompleted = true;
+      completedInspectionStatus =
+          VistoriaChatSessionService.statusEmAnaliseOperacional;
+    });
   }
 
   Future<void> _openBulkUploadSheet() async {
@@ -1716,6 +1969,17 @@ class _AiChatPageState extends State<AiChatPage> {
     await _submitBulkPackage(session: session, result: result);
   }
 
+  /// O upload de verdade (fotos/áudios/texto/orçamento + finalização) mora
+  /// inteiro no `BulkSyncCoordinator` -- um singleton que sobrevive a troca
+  /// de tela, igual o `ArgosConnectivityService`. Isso é o que permite a
+  /// retomada automática funcionar mesmo que o mecânico saia desta tela
+  /// entre o "Enviar offline" e a reconexão (limitação real que existia
+  /// antes, quando esse código vivia só aqui dentro). A transição pra
+  /// "concluído" não acontece aqui dentro -- acontece em
+  /// `_handleBulkPackageSubmitted`, disparada pelo
+  /// `onPackageSubmitted` do coordenador, pra funcionar igual nos dois
+  /// casos (enviado por este toque ou por uma varredura em segundo plano
+  /// que ganhou a corrida).
   Future<void> _submitBulkPackage({
     required VistoriaSession session,
     required BulkUploadResult result,
@@ -1728,6 +1992,8 @@ class _AiChatPageState extends State<AiChatPage> {
     // "Enviar" offline subia nada, falhava calado (só um debugPrint) e
     // ainda assim finalizava a vistoria como se tivesse dado tudo certo.
     if (!ArgosConnectivityService.instance.isOnline.value) {
+      setState(() => isAwaitingBulkSync = true);
+
       _showSnack(
         'Sem conexão — o pacote já está salvo e vai ser enviado sozinho '
         'assim que a internet voltar.',
@@ -1736,151 +2002,20 @@ class _AiChatPageState extends State<AiChatPage> {
       return;
     }
 
-    setState(() => isBulkProcessing = true);
+    setState(() {
+      isAwaitingBulkSync = false;
+      isBulkProcessing = true;
+    });
     bulkStatusText.value = 'Enviando fotos...';
 
     try {
-      for (final photo in result.photos) {
-        try {
-          final uploadedImage =
-              await VistoriaChatSessionService.instance.uploadImageFile(
-            vistoriaDocId: session.docId,
-            imagePath: photo.path,
-          );
-
-          await VistoriaChatSessionService.instance.appendImageEvidence(
-            vistoriaDocId: session.docId,
-            imageUrl: uploadedImage.downloadUrl,
-            imagePath: photo.path,
-            imageId: uploadedImage.imageId,
-            storagePath: uploadedImage.storagePath,
-            fileName: uploadedImage.fileName,
-            contentType: uploadedImage.contentType,
-            sizeBytes: uploadedImage.sizeBytes,
-          );
-
-          await VistoriaChatSessionService.instance.appendChatMessage(
-            vistoriaDocId: session.docId,
-            role: 'photo',
-            text: 'Foto anexada à vistoria (envio em massa)',
-            extraData: {
-              'imageId': uploadedImage.imageId,
-              'url': uploadedImage.downloadUrl,
-              'storagePath': uploadedImage.storagePath,
-              'fileName': uploadedImage.fileName,
-            },
-          );
-
-          await VistoriaChatSessionService.instance
-              .markEnvioEmMassaRascunhoItemEnviado(
-            vistoriaDocId: session.docId,
-            localId: photo.localId,
-          );
-        } catch (e) {
-          debugPrint('Erro ao subir foto do envio em massa: $e');
-        }
-      }
-
-      if (result.audios.isNotEmpty) {
-        bulkStatusText.value = 'Ouvindo os áudios...';
-
-        for (final audio in result.audios) {
-          try {
-            final uploadedAudio = await UserAudioStorageService.instance
-                .uploadOriginalAudioForMp3Conversion(
-              localAudioPath: audio.path,
-              idvistoria: session.idvistoria,
-              sinistroId: session.sinistroId,
-              duration: Duration(seconds: audio.durationSeconds),
-            );
-
-            // Transcreve de verdade (o backend grava em chatmessages) --
-            // descartamos a resposta conversacional do agente de propósito:
-            // o modo em massa não mostra ida-e-volta com o ADK.
-            await ArgosAiService.instance.sendAudioMessage(
-              idvistoria: session.idvistoria,
-              sinistroId: session.sinistroId,
-              audioId: uploadedAudio.audioId,
-              storagePath: uploadedAudio.mp3StoragePath,
-              durationSeconds: audio.durationSeconds,
-            );
-
-            await VistoriaChatSessionService.instance
-                .markEnvioEmMassaRascunhoItemEnviado(
-              vistoriaDocId: session.docId,
-              localId: audio.localId,
-            );
-          } catch (e) {
-            debugPrint(
-              'Erro ao subir/transcrever áudio do envio em massa: $e',
-            );
-          }
-        }
-      }
-
-      if (result.text.trim().isNotEmpty) {
-        bulkStatusText.value = 'Registrando observações...';
-
-        await VistoriaChatSessionService.instance.appendChatMessage(
-          vistoriaDocId: session.docId,
-          role: 'user',
-          text: result.text.trim(),
-        );
-
-        await VistoriaChatSessionService.instance
-            .markEnvioEmMassaRascunhoItemEnviado(
-          vistoriaDocId: session.docId,
-          localId: kBulkTextRascunhoKey,
-        );
-      }
-
-      if (result.orcamentoItems.isNotEmpty) {
-        bulkStatusText.value = 'Calculando o orçamento...';
-
-        for (final item in result.orcamentoItems) {
-          await VistoriaChatSessionService.instance.appendOrcamentoMecanicoItem(
-            vistoriaDocId: session.docId,
-            peca: item.peca,
-            tipoIntervencao: item.tipoIntervencao,
-            valorPeca: item.valorPeca,
-            horasMaoObra: item.horasMaoObra,
-          );
-
-          await VistoriaChatSessionService.instance
-              .markEnvioEmMassaRascunhoItemEnviado(
-            vistoriaDocId: session.docId,
-            localId: item.localId,
-          );
-        }
-      }
-
-      bulkStatusText.value = 'Finalizando...';
-
-      await VistoriaChatSessionService.instance.clearEnvioEmMassaRascunho(
+      await BulkSyncCoordinator.instance.submitPackage(
         vistoriaDocId: session.docId,
+        sinistroId: session.sinistroId,
+        idvistoria: session.idvistoria,
+        result: result,
+        onStatus: (status) => bulkStatusText.value = status,
       );
-
-      await VistoriaChatSessionService.instance.submitForOperationalAnalysis(
-        vistoriaDocId: session.docId,
-      );
-
-      if (!mounted) return;
-
-      // Diferente do fluxo guiado (onde watchCompletionState só considera
-      // "completo" depois que o AGENTE preenche laudo_analitico durante a
-      // conversa), o modo em massa não tem agente conversando -- esse campo
-      // nunca seria preenchido por ninguém, e a tela de espera nunca
-      // apareceria se dependesse desse listener. Aqui a confirmação do
-      // próprio envio já é o sinal de "completo".
-      await vistoriaCompletionSubscription?.cancel();
-      vistoriaCompletionSubscription = null;
-
-      setState(() {
-        isBulkProcessing = false;
-        isInspectionCompleted = true;
-        completedInspectionStatus =
-            VistoriaChatSessionService.statusEmAnaliseOperacional;
-      });
     } catch (e) {
       debugPrint('Erro ao enviar pacote em massa: $e');
 
@@ -2278,7 +2413,7 @@ class _AiChatPageState extends State<AiChatPage> {
   ///    botão grande que abre o `BulkUploadSheet`.
   /// 3. Guiado (ou vistoria antiga sem esse campo) -- composer de sempre.
   Widget _buildComposerArea(String duration) {
-    if (awaitingColetaModoChoice) {
+    if (awaitingColetaModoChoice || isBlockedOfflineGuidedHistory) {
       return const SizedBox.shrink(key: ValueKey('awaiting_choice'));
     }
 
@@ -2346,7 +2481,26 @@ class _AiChatPageState extends State<AiChatPage> {
                 options: availableSinistros,
                 onSelect: _handleSinistroSelected,
               )
-            : isInspectionCompleted
+            : isAwaitingBulkSync
+                ? Column(
+                    key: ValueKey(
+                      'chat_awaiting_sync_${currentSession!.idvistoria}',
+                    ),
+                    children: [
+                      _ChatHeader(
+                        session: currentSession,
+                        onCloseChat: _closeCurrentChatAndBackToSelection,
+                      ),
+                      Expanded(
+                        child: _BulkAwaitingSyncScreen(
+                          session: currentSession!,
+                          onBackToSelection:
+                              _closeCurrentChatAndBackToSelection,
+                        ),
+                      ),
+                    ],
+                  )
+                : isInspectionCompleted
                 ? Column(
                     key: ValueKey(
                       'chat_completed_${currentSession!.idvistoria}',
@@ -3138,8 +3292,14 @@ class _ChatHeader extends StatelessWidget {
     final idvistoria = session?.idvistoria.trim() ?? '';
     final placa = session?.placa.trim() ?? '';
 
+    // ID provisório (criado 100% offline, ainda sem o número sequencial
+    // real) não tem serventia nenhuma mostrado cru pro mecânico -- troca
+    // por um selo curto em vez do `temp-vist-...` completo.
+    final isPendingId = idvistoria.isNotEmpty &&
+        VistoriaChatSessionService.instance.isPendingVistoriaId(idvistoria);
+
     final subtitle = [
-      if (idvistoria.isNotEmpty) idvistoria,
+      if (idvistoria.isNotEmpty && !isPendingId) idvistoria,
       if (placa.isNotEmpty) placa,
     ].join(' • ');
 
@@ -3229,6 +3389,28 @@ class _ChatHeader extends StatelessWidget {
                     fontWeight: FontWeight.w700,
                   ),
                 ),
+                if (isPendingId) ...[
+                  const SizedBox(height: 4),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFF7E6),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFFFBBF24)),
+                    ),
+                    child: const Text(
+                      'Nº provisório — sincroniza ao reconectar',
+                      style: TextStyle(
+                        color: Color(0xFFB45309),
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -4246,6 +4428,141 @@ class _BulkComposerButton extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Tela cheia mostrada no lugar do chat quando o pacote em massa já foi
+/// "confirmado" estando offline -- não é mais um rascunho editável, é um
+/// envio pendente esperando rede. Mesmo padrão visual/estrutural de
+/// `_InspectionCompletedView` (ícone grande num círculo, título, card com
+/// a placa, botão pra voltar), só que em tom âmbar (aguardando) em vez de
+/// verde (concluído). Sem nenhum botão de reabrir o pacote de propósito: o
+/// mecânico não deve conseguir editar o pacote por engano depois de já ter
+/// confirmado o envio; a retomada de verdade acontece sozinha
+/// (`_handleConnectivityRestored`) assim que a conexão voltar.
+class _BulkAwaitingSyncScreen extends StatelessWidget {
+  final VistoriaSession session;
+  final VoidCallback onBackToSelection;
+
+  const _BulkAwaitingSyncScreen({
+    required this.session,
+    required this.onBackToSelection,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isPendingId = VistoriaChatSessionService.instance
+        .isPendingVistoriaId(session.idvistoria);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(24, 32, 24, 28),
+      decoration: const BoxDecoration(color: Color(0xFFF3FBFF)),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 116,
+            height: 116,
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFF7E6),
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFFB45309).withOpacity(.18),
+                  blurRadius: 28,
+                  spreadRadius: 8,
+                ),
+              ],
+            ),
+            child: const Center(
+              child: Icon(
+                Icons.lock_clock_rounded,
+                color: Color(0xFFB45309),
+                size: 56,
+              ),
+            ),
+          ),
+          const SizedBox(height: 30),
+          Text(
+            'Envio salvo, aguardando conexão',
+            textAlign: TextAlign.center,
+            style: GoogleFonts.spaceGrotesk(
+              color: const Color(0xFF0F172A),
+              fontWeight: FontWeight.w900,
+              fontSize: 24,
+            ),
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            'Seu pacote já está salvo neste aparelho. Assim que a internet '
+            'voltar, o envio continua sozinho -- não precisa fazer nada.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Color(0xFF414755),
+              fontWeight: FontWeight.w700,
+              fontSize: 15,
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 22),
+          Container(
+            width: double.infinity,
+            constraints: const BoxConstraints(maxWidth: 360),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: const Color(0xFFFBBF24)),
+            ),
+            child: Column(
+              children: [
+                Text(
+                  session.placa.isEmpty ? session.idvistoria : session.placa,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xFF0057C0),
+                    fontWeight: FontWeight.w900,
+                    fontSize: 18,
+                  ),
+                ),
+                if (isPendingId) ...[
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Nº provisório — sincroniza junto',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Color(0xFFB45309),
+                      fontWeight: FontWeight.w700,
+                      fontSize: 12.5,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+          OutlinedButton(
+            onPressed: onBackToSelection,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: const Color(0xFF0057C0),
+              side: const BorderSide(color: Color(0xFF0057C0)),
+              padding: const EdgeInsets.symmetric(
+                horizontal: 22,
+                vertical: 14,
+              ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+            ),
+            child: const Text(
+              'Ver outras vistorias',
+              style: TextStyle(fontWeight: FontWeight.w900),
+            ),
+          ),
+        ],
       ),
     );
   }

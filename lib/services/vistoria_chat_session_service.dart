@@ -331,6 +331,250 @@ class VistoriaChatSessionService {
     );
   }
 
+  /// Prefixo que marca um docId de vistoria como provisório -- criado
+  /// 100% offline, ainda sem o número sequencial real (esse exige uma
+  /// transação contra `counters/vistorias_{year}`, que não enfileira
+  /// offline como uma escrita comum). É só uma convenção de nome, não um
+  /// campo novo no schema -- ver `reconcilePendingVistoriaId`.
+  static const String pendingVistoriaIdPrefix = 'temp-vist-';
+
+  bool isPendingVistoriaId(String vistoriaDocId) =>
+      vistoriaDocId.startsWith(pendingVistoriaIdPrefix);
+
+  /// Cria uma vistoria do zero 100% offline. Só chamada quando o sinistro
+  /// já tem check-in feito (é assim que ele aparece em "Minhas vistorias" --
+  /// check-in e atribuição são gravados juntos pela mesma transação, então
+  /// nunca existe uma vistoria alcançável por aqui sem check-in já
+  /// confirmado online antes) -- por isso este método NUNCA precisa chamar
+  /// a transação de check-in.
+  ///
+  /// Nasce sempre em modo `em_massa`: o guiado depende do agente (ADK), que
+  /// exige internet, então bifurcar não faz sentido offline.
+  ///
+  /// Usa `_db.batch()`, não `runTransaction` -- batch enfileira no cache
+  /// local igual uma escrita comum; transação exige round-trip com o
+  /// servidor, por isso `_createVistoriaId()` (usado no fluxo online) não
+  /// serve aqui. O docId é um ID aleatório gerado localmente pelo próprio
+  /// Firestore (`_vistorias.doc().id`, sem chamada de rede), prefixado com
+  /// `temp-vist-` -- ver `reconcilePendingVistoriaId` pra trocar pelo
+  /// número sequencial real quando a conexão voltar.
+  Future<VistoriaSession> createVistoriaOffline({
+    required String sinistroId,
+  }) async {
+    final cleanSinistroId = sinistroId.trim();
+
+    if (cleanSinistroId.isEmpty) {
+      throw ArgumentError('sinistroId vazio.');
+    }
+
+    final ctx = await _currentContext();
+    final sinistroDoc = await _sinistros.doc(cleanSinistroId).get();
+
+    if (!sinistroDoc.exists) {
+      throw Exception('Sinistro não encontrado no cache: $cleanSinistroId');
+    }
+
+    final sinistro = sinistroDoc.data() ?? {};
+    final tempId = '$pendingVistoriaIdPrefix${_vistorias.doc().id}';
+    final now = DateTime.now();
+    final agentExpiresAt = _addBusinessHours(now, 24);
+
+    final clienteSnapshot = _asMap(sinistro['clienteSnapshot']);
+    final veiculoSnapshot = _asMap(sinistro['veiculoSnapshot']);
+    final credenciadoSnapshot = _asMap(sinistro['credenciadoSnapshot']);
+
+    final placa = _str(
+      veiculoSnapshot['placa'],
+      fallback: _str(
+        sinistro['plate'],
+        fallback: _str(sinistro['placa']),
+      ),
+    );
+
+    final veiculo = _vehicleName(
+      marca: _str(veiculoSnapshot['marca']),
+      modelo: _str(
+        veiculoSnapshot['modelo'],
+        fallback: _str(
+          sinistro['vehicle'],
+          fallback: _str(sinistro['veiculo']),
+        ),
+      ),
+    );
+
+    final cliente = _str(
+      clienteSnapshot['nomeCompleto'],
+      fallback: _str(
+        sinistro['owner'],
+        fallback: _str(sinistro['cliente']),
+      ),
+    );
+
+    final credenciado = _str(
+      credenciadoSnapshot['name'],
+      fallback: _str(
+        sinistro['credenciadoNome'],
+        fallback: _str(
+          sinistro['workshop'],
+          fallback: ctx.credenciadoNome,
+        ),
+      ),
+    );
+
+    final agentParameters = {
+      'id_vistoria': tempId,
+      'sinistro_id': cleanSinistroId,
+      'placa_veiculo': placa,
+      'modelo_veiculo': veiculo,
+      'cliente_nome': cliente,
+      'oficina_nome': credenciado,
+      'prioridade_sinistro': _str(sinistro['priority']),
+      'status_sinistro': _str(sinistro['status']),
+      'tipo_sinistro': _str(sinistro['claimType']),
+      'tipo_vistoria': tipoOriginal,
+    };
+
+    // `Timestamp.fromDate`, não `FieldValue.serverTimestamp()`, em
+    // createdAt/updatedAt/agentLastTurnAt -- esse último fica `null` no
+    // cache local até sincronizar, e `findOpenVistoria` ordena sessões por
+    // `updatedAt` pra escolher a mais recente. Precisa de um valor de
+    // verdade já, enquanto ainda offline.
+    final data = {
+      'idvistoria': tempId,
+      'sinistroId': cleanSinistroId,
+      'status': statusEmAndamento,
+      'coletaModo': 'em_massa',
+      'credenciadoId': ctx.credenciadoId,
+      'credenciadoNome': ctx.credenciadoNome,
+      'tipoVistoria': tipoOriginal,
+      'checkInAt': _str(sinistro['checkInAt']),
+      'cliente': cliente,
+      'credenciado': credenciado,
+      'data': _formatDate(now),
+      'hora': _formatTime(now),
+      'descricaoArtigos': _str(
+        sinistro['damageDescription'],
+        fallback: _str(sinistro['descricaoArtigos']),
+      ),
+      'local': _str(
+        credenciadoSnapshot['address'],
+        fallback: _str(sinistro['local']),
+      ),
+      'observacoes': _str(
+        sinistro['observations'],
+        fallback: _str(sinistro['observacoes']),
+      ),
+      'placa': placa,
+      'veiculo': veiculo,
+      'inspectorId': ctx.uid,
+      'inspectorName': ctx.nome,
+      'inspectorEmail': ctx.email,
+      'audios': <Map<String, dynamic>>[],
+      'images': <Map<String, dynamic>>[],
+      'chatmessages': <Map<String, dynamic>>[],
+      'lastAudioNumber': 0,
+      'laudo': '',
+      'pdfLaudoUrl': '',
+      'agentParameters': agentParameters,
+      'agentSessionPolicy': {
+        'description': 'Sessão do agente Argos vinculada à vistoria.',
+        'ttlBusinessHours': 24,
+        'workdays': [1, 2, 3, 4, 5],
+      },
+      'agentSessionTtlSeconds': 86400,
+      'agentLastTurnAt': Timestamp.fromDate(now),
+      'agentBusinessExpiresAt': Timestamp.fromDate(agentExpiresAt),
+      'createdAt': Timestamp.fromDate(now),
+      'updatedAt': Timestamp.fromDate(now),
+    };
+
+    final batch = _db.batch();
+
+    batch.set(_vistorias.doc(tempId), data);
+    batch.set(
+      _sinistros.doc(cleanSinistroId),
+      {
+        'vistoriaAtualId': tempId,
+        'vistoriaAtualStatus': statusEmAndamento,
+        'vistoriaAtualTipo': tipoOriginal,
+        'vistoriaAtualOrigemId': FieldValue.delete(),
+        'retificacaoAtualId': FieldValue.delete(),
+        'ultimaVistoriaAt': Timestamp.fromDate(now),
+      },
+      SetOptions(merge: true),
+    );
+
+    await batch.commit();
+
+    return VistoriaSession(
+      docId: tempId,
+      idvistoria: tempId,
+      sinistroId: cleanSinistroId,
+      placa: placa,
+      veiculo: veiculo,
+      cliente: cliente,
+      credenciado: credenciado,
+      status: statusEmAndamento,
+      tipoVistoria: tipoOriginal,
+      vistoriaOrigemId: '',
+      ajustesNecessarios: '',
+      contextoVistoriaAnterior: '',
+      chatMessages: const [],
+      coletaModo: 'em_massa',
+    );
+  }
+
+  /// Troca o docId provisório (`temp-vist-...`, criado por
+  /// `createVistoriaOffline`) pelo número sequencial real, assim que a
+  /// conexão volta. Como todos os dados de uma vistoria são campos simples
+  /// no próprio doc (sem subcoleção nenhuma -- `chatmessages`/`images`/
+  /// `audios`/`orcamentoRascunho`/`envioEmMassaRascunho` são tudo campo), a
+  /// "migração" é só copiar o doc inteiro pra um doc novo com o ID real e
+  /// apagar o provisório, atomicamente com o ponteiro do sinistro.
+  ///
+  /// Só deve ser chamado já confirmadamente online (é aqui que
+  /// `_createVistoriaId()` -- a transação real -- roda pela primeira vez
+  /// nesse fluxo). Se o app morrer entre o `_createVistoriaId()` e o resto
+  /// do batch, aquele número sequencial fica "queimado" (nunca associado a
+  /// nenhuma vistoria) -- risco já aceito hoje no caminho online
+  /// (`createOrResumeFromSinistro`/`createRetificacaoFromVistoria`), não é
+  /// uma fragilidade nova.
+  Future<String> reconcilePendingVistoriaId({
+    required String tempDocId,
+    required String sinistroId,
+  }) async {
+    if (!isPendingVistoriaId(tempDocId)) return tempDocId;
+
+    final doc = await _vistorias.doc(tempDocId).get();
+
+    if (!doc.exists) return tempDocId;
+
+    final data = Map<String, dynamic>.from(doc.data() ?? {});
+    final realId = await _createVistoriaId();
+
+    data['idvistoria'] = realId;
+    data['updatedAt'] = FieldValue.serverTimestamp();
+
+    final agentParameters = _asMap(data['agentParameters']);
+
+    if (agentParameters.isNotEmpty) {
+      data['agentParameters'] = {
+        ...agentParameters,
+        'id_vistoria': realId,
+      };
+    }
+
+    final batch = _db.batch();
+
+    batch.set(_vistorias.doc(realId), data);
+    batch.update(_sinistros.doc(sinistroId), {'vistoriaAtualId': realId});
+    batch.delete(_vistorias.doc(tempDocId));
+
+    await batch.commit();
+
+    return realId;
+  }
+
   Future<VistoriaSession> createRetificacaoFromVistoria({
     required VistoriaSession original,
     required String ajustesNecessarios,

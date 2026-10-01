@@ -11,8 +11,8 @@ import 'package:record/record.dart';
 import '../../services/vistoria_chat_session_service.dart';
 import '../camera/camera_page.dart';
 
-const int kBulkMaxPhotos = 5;
-const int kBulkMaxAudios = 5;
+const int kBulkMaxPhotos = 10;
+const int kBulkMaxAudios = 10;
 
 /// Chave fixa do item de texto livre no rascunho -- só existe um por vez,
 /// diferente de foto/áudio/orçamento (que são listas), então não precisa de
@@ -631,7 +631,8 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
                   child: Align(
                     alignment: Alignment.centerLeft,
                     child: Text(
-                      'Fotos, áudios, texto e orçamento — sem conversa passo a passo. Até 5 fotos e 5 áudios.',
+                      'Fotos, áudios, texto e orçamento — sem conversa passo a passo. '
+                      'Até $kBulkMaxPhotos fotos e $kBulkMaxAudios áudios.',
                       style: TextStyle(
                         color: Color(0xFF6B7280),
                         fontSize: 12,
