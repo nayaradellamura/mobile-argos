@@ -111,21 +111,23 @@ class VistoriaChatSessionService {
           // da mesma oficina.
           final isMine = assignedToUid == ctx.uid;
 
-          // Em andamento (estado normal após o check-in), rejeitada
-          // (precisa de retificação), ou abandonada/expirada (o mecânico
-          // pode começar uma vistoria nova do zero pra ela, igual ao botão
-          // "Começar nova" já permite -- sem isso, uma vistoria abandonada
-          // simplesmente sumia desta lista e não dava pra selecionar o
-          // veículo de novo). Exclui EM_ANALISE_OPERACIONAL (já enviada),
-          // FINALIZADA e CANCELADA de verdade (decisão do analista).
+          // Em andamento (aguardando vistoria, estado normal após o
+          // check-in), ou abandonada/expirada (o mecânico pode começar uma
+          // vistoria nova do zero pra ela, igual ao botão "Começar nova" já
+          // permite -- sem isso, uma vistoria abandonada simplesmente
+          // sumia desta lista e não dava pra selecionar o veículo de
+          // novo). REJEITADA fica de fora de propósito -- já tem entrada
+          // própria (botão "Iniciar Retificação" na tela de resumo do
+          // sinistro, startRetificação: true), duplicar aqui só confundia.
+          // Exclui também EM_ANALISE_OPERACIONAL (já enviada), FINALIZADA e
+          // CANCELADA de verdade (decisão do analista).
           final isEmAndamento = vistoriaStatus.contains('ANDAMENTO');
-          final isRejeitada = vistoriaStatus.contains('REJEITADA');
           final isAbandonadaOuExpirada = vistoriaStatus.contains('ABANDONADA') ||
               vistoriaStatus.contains('EXPIRADA');
 
           return _hasCheckIn(data['checkInAt']) &&
               isMine &&
-              (isEmAndamento || isRejeitada || isAbandonadaOuExpirada);
+              (isEmAndamento || isAbandonadaOuExpirada);
         })
         .map(SinistroVistoriaOption.fromFirestore)
         .toList();
