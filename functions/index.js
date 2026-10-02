@@ -831,6 +831,58 @@ async function buildSinistroNotification({ db, sinistroId, before, after, isCrea
     };
   }
 
+  // Vistoria criada 100% offline (ID provisório VIS-OFFLINE-...) acabou de
+  // ser reconciliada pro número sequencial real assim que a conexão voltou
+  // (ver BulkSyncCoordinator.reconcileAllPendingIds/reconcilePendingVistoriaId)
+  // -- só muda vistoriaAtualId, nunca vistoriaAtualStatus, então sem esse
+  // caso caía no fallback genérico "Vistoria atualizada" e o mecânico nunca
+  // ficava sabendo que os dados feitos sem internet realmente chegaram no
+  // servidor. Pode disparar ANTES ou DEPOIS do aviso de "enviada para
+  // análise" logo abaixo, dependendo se o pacote já tinha sido confirmado
+  // offline ou não -- por isso o texto não presume nenhuma ordem.
+  const beforeVistoriaAtualId = String(before?.vistoriaAtualId || "");
+  const afterVistoriaAtualId = String(after.vistoriaAtualId || "");
+
+  if (
+    beforeVistoriaAtualId.startsWith("VIS-OFFLINE-") &&
+    !afterVistoriaAtualId.startsWith("VIS-OFFLINE-") &&
+    afterVistoriaAtualId
+  ) {
+    return {
+      type: "vistoria_offline_sincronizada",
+      title: "Vistoria offline sincronizada",
+      body: `${protocol}: os dados feitos sem internet foram sincronizados com o sistema.`,
+    };
+  }
+
+  // Envio confirmado (guiado terminando a conversa OU pacote em massa
+  // subindo via BulkSyncCoordinator, inclusive o que ficou pendente
+  // offline e sincronizou sozinho sem o app aberto) -- sem esse caso caía
+  // no fallback genérico "Status atualizado", que não confirmava pro
+  // mecânico que o envio realmente chegou.
+  if (
+    beforeVistoriaStatus !== "EM_ANALISE_OPERACIONAL" &&
+    afterVistoriaStatus === "EM_ANALISE_OPERACIONAL"
+  ) {
+    return {
+      type: "vistoria_em_analise",
+      title: "Vistoria enviada para análise",
+      body: `${protocol} foi enviada com sucesso e está em análise pelo time de operações.`,
+    };
+  }
+
+  // "Começar nova"/abandono do chat guiado offline (ver abandonVistoria) --
+  // sem esse caso caía no fallback genérico, e o mecânico não ficava
+  // sabendo que a tentativa anterior foi encerrada (nem que pode iniciar
+  // uma nova a qualquer momento).
+  if (beforeVistoriaStatus !== "ABANDONADA" && afterVistoriaStatus === "ABANDONADA") {
+    return {
+      type: "vistoria_abandonada",
+      title: "Vistoria abandonada",
+      body: `${protocol}: a coleta foi interrompida. Inicie uma nova vistoria quando puder.`,
+    };
+  }
+
   // Laudo técnico (laudo-service) terminou de gerar e encontrou incongruência
   // entre o relato do mecânico e a descrição inicial do sinistro e/ou as
   // fotos. NÃO gera push aqui de propósito: esta função (notifySinistroChanges)
@@ -959,6 +1011,13 @@ function shouldIgnoreSinistroNotificationUpdate(before, after) {
     "ttlBusinessHours",
     "workdays",
     "updatedAt",
+    // _syncSinistroVistoriaStatus (vistoria_chat_session_service.dart) grava
+    // isto em TODA chamada, mesmo quando o status não muda de verdade (ex:
+    // BulkSyncCoordinator reprocessando a mesma vistoria em reconexões
+    // sucessivas) -- sem isso, uma reconfirmação sem mudança real caía no
+    // aviso genérico "Vistoria atualizada" repetidamente (bug real, achado
+    // 2026-10-02: notificação em loop pra ARG-2026-0066/0100).
+    "ultimaVistoriaAt",
   ]);
 
   const changedFields = getChangedTopLevelFields(before, after);
