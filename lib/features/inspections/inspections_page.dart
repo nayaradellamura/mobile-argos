@@ -514,8 +514,8 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
                         InspectionFilter.all,
                         InspectionFilter.inProgress,
                         InspectionFilter.revision,
-                        InspectionFilter.cancelled,
                         InspectionFilter.completed,
+                        InspectionFilter.cancelled,
                       ],
               );
             },
@@ -1007,14 +1007,15 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     // retificação abaixo.
     // Expirada/abandonada não bloqueia o botão comum — o mecânico deve
     // conseguir começar uma vistoria nova direto por aqui (createOrResume
-    // já cria uma do zero quando não acha nenhuma EM_ANDAMENTO). Só
-    // cancelada de verdade (decisão do analista) continua bloqueando.
+    // já cria uma do zero quando não acha nenhuma EM_ANDAMENTO). Isso já
+    // vem de graça agora: expirada/abandonada não conta mais como
+    // isCancelledCategory (ver InspectionCase.primaryCategory), só
+    // cancelamento de verdade (decisão do analista) bloqueia.
     final canOpenChat = hasCheckIn &&
         isAssignedToMe &&
         !isHumanAnalysis &&
         !inspection.isCompletedCategory &&
-        (!inspection.isCancelledCategory ||
-            inspection.isExpiredOrAbandonedCategory) &&
+        !inspection.isCancelledCategory &&
         !inspection.isRevisionCategory &&
         // Enquanto o ID ainda for provisório (temp-vist-...), a vistoria
         // ainda não reconciliou pro número sequencial real -- esconde o

@@ -111,6 +111,19 @@ extension InspectionStatusX on InspectionStatus {
   }
 }
 
+// Ordem de RESOLUÇÃO (não é a ordem de exibição dos chips -- ver
+// InspectionFilter, que define a ordem que aparece na tela): do estado
+// mais definitivo pro mais preliminar. Usada por InspectionCase.primaryCategory
+// pra decidir qual categoria vence quando mais de uma condição bate.
+enum InspectionLifecycleCategory {
+  completed,
+  cancelled,
+  revision,
+  aiAnalysis,
+  inProgress,
+  pending,
+}
+
 enum InspectionPriority { low, medium, high }
 
 extension InspectionPriorityX on InspectionPriority {
@@ -393,11 +406,29 @@ class InspectionCase {
     return assignedUid.isNotEmpty && assignedUid != currentUid;
   }
 
-  bool get isCompletedCategory {
+  // Única fonte da verdade pra categoria de um sinistro -- antes, cada
+  // isXCategory calculava sua própria condição de forma independente, o que
+  // deixava sobrepor categorias (ex: isRevisionCategory e isCancelledCategory
+  // podiam vir `true` juntas se `status` e `vistoriaAtualStatus`, dois campos
+  // escritos por caminhos diferentes, ficassem dessincronizados por um
+  // instante) -- o card contava em dois filtros ao mesmo tempo e podia
+  // mostrar um selo diferente do filtro em que estava. Agora é uma escada só,
+  // do estado mais definitivo pro mais preliminar: a primeira condição que
+  // bater vence, ninguém mais é checado (ver conversa de redesign 2026-10-02).
+  InspectionLifecycleCategory get primaryCategory {
+    if (_isApproved) return InspectionLifecycleCategory.completed;
+    if (_isCancelledOnly) return InspectionLifecycleCategory.cancelled;
+    if (_isRejectedNow) return InspectionLifecycleCategory.revision;
+    if (_isInAnalysis) return InspectionLifecycleCategory.aiAnalysis;
+    if (checkInAt != null) return InspectionLifecycleCategory.inProgress;
+    return InspectionLifecycleCategory.pending;
+  }
+
+  // "finalizada" no STATUS da vistoria é o valor real gravado quando a
+  // aprovação acontece — não é um estágio intermediário de análise.
+  bool get _isApproved {
     final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
 
-    // "finalizada" no STATUS da vistoria é o valor real gravado quando a
-    // aprovação acontece — não é um estágio intermediário de análise.
     return status == InspectionStatus.approved ||
         status == InspectionStatus.finalized ||
         vistoriaStatus.contains('aprovada') ||
@@ -408,15 +439,41 @@ class InspectionCase {
         vistoriaStatus.contains('finalized');
   }
 
-  bool get isAiAnalysisCategory {
-    // Concluída/revisão/cancelada têm prioridade: uma vistoria já aprovada
-    // não deve continuar caindo no filtro "Em análise" só porque o campo
-    // vistoriaAtualStatus (denormalizado, escrito por outro sistema) ainda
-    // guarda um texto antigo como "em_analise".
-    if (isCompletedCategory || isRevisionCategory || isCancelledCategory) {
-      return false;
-    }
+  // Só cancelamento de verdade (decisão do analista) -- expirada/abandonada
+  // migraram pra "Andamento" (ver _isExpiredOrAbandoned/isInProgressCategory):
+  // não são uma decisão de ninguém, são só "essa tentativa parou e o
+  // mecânico pode simplesmente começar de novo", o que é conceitualmente
+  // muito mais perto de "ainda em aberto" do que de "encerrado".
+  bool get _isCancelledOnly {
+    final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
 
+    return status == InspectionStatus.cancelled ||
+        vistoriaStatus.contains('cancelada') ||
+        vistoriaStatus.contains('cancelado') ||
+        vistoriaStatus.contains('cancelled');
+  }
+
+  // Só rejeitada AGORA -- uma retificação que o mecânico já começou a
+  // trabalhar (EM_ANDAMENTO) não conta mais como "em revisão", conta como
+  // "em andamento" (é literalmente o mesmo status de qualquer vistoria
+  // sendo feita). "Revisão" passa a significar só "precisa agir", não
+  // "história passou por uma rejeição algum dia".
+  bool get _isRejectedNow {
+    final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
+
+    return status == InspectionStatus.rejected ||
+        vistoriaStatus.contains('rejeitada') ||
+        vistoriaStatus.contains('rejeitado') ||
+        vistoriaStatus.contains('rejected');
+  }
+
+  // Lista FECHADA de valores que significam análise -- antes tinha um
+  // coringa ("qualquer vistoriaAtualStatus não vazio que não contém
+  // 'andamento'") que jogava qualquer status não mapeado (typo, valor novo
+  // do backend) pra "Análise" por acidente. Agora um status desconhecido cai
+  // em Andamento/Pendente (conforme checkInAt), nunca mais finge ser análise
+  // sem ser.
+  bool get _isInAnalysis {
     final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
 
     return status == InspectionStatus.submitted ||
@@ -424,111 +481,91 @@ class InspectionCase {
         vistoriaStatus.contains('análise') ||
         vistoriaStatus.contains('em_analise_operacional') ||
         vistoriaStatus.contains('review') ||
-        vistoriaStatus.contains('submitted') ||
-        (vistoriaStatus.isNotEmpty &&
-            !vistoriaStatus.contains('em_andamento') &&
-            !vistoriaStatus.contains('andamento'));
+        vistoriaStatus.contains('submitted');
   }
 
-  bool get isRevisionCategory {
-    final tipo = normalizeStatusText(vistoriaAtualTipo);
-    final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
+  bool get isCompletedCategory =>
+      primaryCategory == InspectionLifecycleCategory.completed;
 
-    // ATENÇÃO: vistoriaAtualOrigemId e retificacaoAtualId NÃO são usados aqui
-    // de propósito — os dois ficam gravados no sinistro para sempre depois
-    // que uma retificação é criada (nenhum fluxo os limpa), então usá-los
-    // pra classificar categoria prendia o sinistro em "Rejeitada" mesmo
-    // depois de reenviado, aprovado ou cancelado. Quem decide se ainda está
-    // em revisão é o estado ATUAL: rejeitada agora, ou retificação que ainda
-    // não voltou pra análise.
-    final isRejectedNow = status == InspectionStatus.rejected ||
-        vistoriaStatus.contains('rejeitada') ||
-        vistoriaStatus.contains('rejeitado') ||
-        vistoriaStatus.contains('rejected');
+  bool get isCancelledCategory =>
+      primaryCategory == InspectionLifecycleCategory.cancelled;
 
-    final isRetificacaoTipo = tipo.contains('retificacao') ||
-        tipo.contains('retificação') ||
-        tipo.contains('revisao') ||
-        tipo.contains('revisão');
+  bool get isRevisionCategory =>
+      primaryCategory == InspectionLifecycleCategory.revision;
 
-    // Retificação só conta como "em revisão" enquanto o mecânico ainda está
-    // trabalhando nela (EM_ANDAMENTO) — assim que ela é reenviada
-    // (EM_ANALISE_OPERACIONAL), aprovada (FINALIZADA) ou cancelada, o card
-    // deve refletir esse novo estágio, não ficar preso em "Rejeitada".
-    final isRetificacaoEmAndamento =
-        isRetificacaoTipo && vistoriaStatus.contains('andamento');
+  bool get isAiAnalysisCategory =>
+      primaryCategory == InspectionLifecycleCategory.aiAnalysis;
 
-    return isRejectedNow || isRetificacaoEmAndamento;
-  }
+  bool get isInProgressCategory =>
+      primaryCategory == InspectionLifecycleCategory.inProgress;
 
-  bool get isCancelledCategory {
-    final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
-
-    return status == InspectionStatus.cancelled ||
-        vistoriaStatus.contains('cancelada') ||
-        vistoriaStatus.contains('cancelado') ||
-        vistoriaStatus.contains('cancelled') ||
-        vistoriaStatus.contains('expirada') ||
-        vistoriaStatus.contains('expirado') ||
-        vistoriaStatus.contains('expired') ||
-        vistoriaStatus.contains('abandonada') ||
-        vistoriaStatus.contains('abandonado');
-  }
+  bool get isPendingCategory =>
+      primaryCategory == InspectionLifecycleCategory.pending;
 
   // Badge de status mostrado nos cards/resumo do sinistro. Não pode usar só
-  // `status.label` (o status CRU do sinistro): cancelamento/expiração/revisão
-  // só ficam gravados em vistoriaAtualStatus (denormalizado pela vistoria),
-  // o sinistro em si segue "EM_ANDAMENTO" — sem isso o card mostra
-  // "Em andamento" pra uma vistoria já cancelada.
+  // `status.label` (o status CRU do sinistro): cancelamento/revisão só
+  // ficam gravados em vistoriaAtualStatus (denormalizado pela vistoria), o
+  // sinistro em si segue "EM_ANDAMENTO" — sem isso o card mostra "Em
+  // andamento" pra uma vistoria já cancelada.
   String get displayStatusLabel {
-    if (isCancelledCategory) {
-      final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
-      if (vistoriaStatus.contains('expirada') ||
-          vistoriaStatus.contains('expirado')) return 'Expirada';
-      if (vistoriaStatus.contains('abandonada') ||
-          vistoriaStatus.contains('abandonado')) return 'Abandonada';
-      return 'Cancelada';
+    switch (primaryCategory) {
+      case InspectionLifecycleCategory.cancelled:
+        return 'Cancelada';
+      case InspectionLifecycleCategory.revision:
+        return 'Rejeitada';
+      case InspectionLifecycleCategory.completed:
+        return 'Finalizada';
+      case InspectionLifecycleCategory.aiAnalysis:
+        return 'Em analise';
+      case InspectionLifecycleCategory.inProgress:
+        if (_isExpired) return 'Expirada';
+        if (_isAbandoned) return 'Abandonada';
+        return status.label;
+      case InspectionLifecycleCategory.pending:
+        return status.label;
     }
-    if (isRevisionCategory) return 'Rejeitada';
-    if (isCompletedCategory) return 'Finalizada';
-    if (isAiAnalysisCategory) return 'Em analise';
-    return status.label;
   }
 
   Color get displayStatusColor {
-    if (isCancelledCategory) {
-      final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
-      if (vistoriaStatus.contains('expirada') ||
-          vistoriaStatus.contains('expirado')) return Colors.deepOrange;
-      return Colors.grey;
+    switch (primaryCategory) {
+      case InspectionLifecycleCategory.cancelled:
+        return Colors.grey;
+      case InspectionLifecycleCategory.revision:
+        return Colors.redAccent;
+      case InspectionLifecycleCategory.completed:
+        return Colors.green;
+      case InspectionLifecycleCategory.aiAnalysis:
+        return Colors.purple;
+      case InspectionLifecycleCategory.inProgress:
+        if (_isExpired) return Colors.deepOrange;
+        if (_isAbandoned) return Colors.grey;
+        return status.color;
+      case InspectionLifecycleCategory.pending:
+        return status.color;
     }
-    if (isRevisionCategory) return Colors.redAccent;
-    if (isCompletedCategory) return Colors.green;
-    if (isAiAnalysisCategory) return Colors.purple;
-    return status.color;
   }
 
-  // Expirou por inatividade (24h úteis) ou foi abandonada — diferente de
-  // CANCELADA (decisão do analista, sem um caminho de reinício definido):
-  // aqui o mecânico deve poder simplesmente começar uma vistoria nova pelo
-  // botão comum, sem precisar de um fluxo dedicado como a retificação.
-  bool get isExpiredOrAbandonedCategory {
+  bool get _isExpired {
     final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
 
     return vistoriaStatus.contains('expirada') ||
         vistoriaStatus.contains('expirado') ||
-        vistoriaStatus.contains('expired') ||
-        vistoriaStatus.contains('abandonada') ||
+        vistoriaStatus.contains('expired');
+  }
+
+  bool get _isAbandoned {
+    final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
+
+    return vistoriaStatus.contains('abandonada') ||
         vistoriaStatus.contains('abandonado');
   }
 
-  bool get isInProgressCategory {
-    return checkInAt != null &&
-        !isAiAnalysisCategory &&
-        !isRevisionCategory &&
-        !isCancelledCategory &&
-        !isCompletedCategory;
-  }
+  // Expirou por inatividade (24h úteis) ou foi abandonada -- continua
+  // existindo como sinalizador à parte (não é mais uma categoria de filtro
+  // própria, ver primaryCategory) porque ainda é útil pra decisão de
+  // negócio em outros lugares (ex: VistoriaChatSessionService) e pro selo
+  // "Expirada"/"Abandonada" dentro da categoria Andamento.
+  bool get isExpiredOrAbandonedCategory => _isExpired || _isAbandoned;
 
   /// A vistoria atual foi criada/está sendo processada 100% offline (ID
   /// provisório, ver `VistoriaChatSessionService.createVistoriaOffline`) --
@@ -538,14 +575,6 @@ class InspectionCase {
   bool get isPendingOfflineSync => vistoriaAtualId
       .trim()
       .startsWith(VistoriaChatSessionService.pendingVistoriaIdPrefix);
-
-  bool get isPendingCategory {
-    return checkInAt == null &&
-        !isAiAnalysisCategory &&
-        !isRevisionCategory &&
-        !isCancelledCategory &&
-        !isCompletedCategory;
-  }
 
   InspectionCase copyWith({
     InspectionStatus? status,
