@@ -499,6 +499,16 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
                 onToggleOnlyMine: (value) {
                   setState(() {
                     _onlyMine = value;
+
+                    // "Pendente" não faz sentido em "Minhas vistorias" --
+                    // atribuição e check-in acontecem juntos na mesma
+                    // transação (claimSinistroForCurrentUser), então nunca
+                    // existe um sinistro meu sem check-in. Se o filtro
+                    // selecionado era esse, volta pra "Todas" pra não ficar
+                    // preso numa categoria que acabou de sumir da tela.
+                    if (value && _selectedFilter == InspectionFilter.pending) {
+                      _selectedFilter = InspectionFilter.all;
+                    }
                   });
                 },
                 onOpenRanking:
@@ -3251,17 +3261,6 @@ class _InspectionsHeader extends StatelessWidget {
                 ),
             ],
           ),
-          if (!isSearching) ...[
-            const SizedBox(height: 2),
-            const Text(
-              'Toque em uma categoria para filtrar',
-              style: TextStyle(
-                color: Color(0xFF414755),
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
           const SizedBox(height: 10),
           if (isSearching && searchController != null)
             // Com o teclado aberto, sobra pouco espaço na tela — esconde o
@@ -3283,21 +3282,43 @@ class _InspectionsHeader extends StatelessWidget {
             ],
             SizedBox(
               height: 92,
-              child: ListView.separated(
+              child: ListView.builder(
                 controller: filterController,
                 scrollDirection: Axis.horizontal,
                 itemCount: filters.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 10),
                 itemBuilder: (context, index) {
                   final filter = filters[index];
+                  final isLast = index == filters.length - 1;
 
-                  return _InspectionFilterCard(
-                    filter: filter,
-                    count: _countFor(filter),
-                    isSelected: selectedFilter == filter,
-                    onTap: onFilterChanged == null
-                        ? null
-                        : () => onFilterChanged!(filter),
+                  // "Pendente" não faz sentido em "Minhas vistorias" --
+                  // atribuição e check-in acontecem juntos na mesma
+                  // transação, então nunca existe um sinistro meu sem
+                  // check-in. Em vez de só sumir, encolhe suavemente (e
+                  // volta do mesmo jeito ao trocar pra "Oficina").
+                  final hidden = filter == InspectionFilter.pending && onlyMine;
+
+                  final card = Padding(
+                    padding: EdgeInsets.only(right: isLast ? 0 : 10),
+                    child: _InspectionFilterCard(
+                      filter: filter,
+                      count: _countFor(filter),
+                      isSelected: selectedFilter == filter,
+                      onTap: onFilterChanged == null
+                          ? null
+                          : () => onFilterChanged!(filter),
+                    ),
+                  );
+
+                  return AnimatedSize(
+                    duration: const Duration(milliseconds: 280),
+                    curve: Curves.easeOutCubic,
+                    child: AnimatedOpacity(
+                      duration: const Duration(milliseconds: 200),
+                      opacity: hidden ? 0 : 1,
+                      child: hidden
+                          ? const SizedBox(height: 92, width: 0)
+                          : card,
+                    ),
                   );
                 },
               ),
