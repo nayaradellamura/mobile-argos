@@ -181,6 +181,12 @@ class _AiChatPageState extends State<AiChatPage> {
   bool awaitingColetaModoChoice = false;
   bool isBulkProcessing = false;
 
+  /// true depois que já ofereceu "abandonar e usar envio em massa" uma vez
+  /// nesta queda de conexão (ver `_handleOfflineDuringGuidedChat`) -- evita
+  /// reabrir o mesmo diálogo a cada toque enquanto a rede não volta.
+  /// Reseta em `_handleConnectivityRestored`.
+  bool _offlineGuidedPromptShown = false;
+
   /// true quando, offline, a vistoria em aberto pro sinistro começou pelo
   /// chat guiado (ou ainda não tinha `coletaModo` definido) -- guiado
   /// depende do agente (ADK), que precisa de internet, então não dá pra
@@ -1155,71 +1161,12 @@ class _AiChatPageState extends State<AiChatPage> {
       if (!mounted) return;
 
       if (wantsAbandon) {
-        // Fica NA MESMA TELA mostrando um estado de "convertendo" --
-        // precisa de currentSession != null pro build() não voltar pra
-        // lista de seleção (que é como o erro ficava "escondido" antes).
-        // Essa escrita específica já provou (testando no aparelho) que
-        // pode demorar bem mais que o normal, por isso o timeout generoso
-        // lá no serviço -- aqui só esperamos honestamente, mostrando que
-        // algo está acontecendo, em vez do "Preparando sessão..." genérico
-        // que parecia travado sem explicação.
-        setState(() {
-          isLoadingSession = false;
-          isConvertingToOfflineBulk = true;
-          currentSession = openSession;
-        });
+        final switched = await _abandonGuidedAndSwitchToOfflineBulk(
+          openSession: openSession,
+          sinistroId: sinistroId,
+        );
 
-        try {
-          // Cria a vistoria NOVA primeiro -- o serviço já resolve rápido
-          // offline (não espera mais o Future de rede, só aplica local e
-          // segue -- ver `VistoriaChatSessionService._writeNoWaitOffline`).
-          // O abandono da antiga vira fire-and-forget logo abaixo: a nova
-          // já é a mais recente (`updatedAt`), então `findOpenVistoria` já
-          // prefere ela mesmo que o abandono ainda não tenha "chegado".
-          //
-          // Isso ficou rápido demais pro mecânico ler a mensagem da tela
-          // de "Convertendo vistoria" -- garante um tempo mínimo visível
-          // nela, mesmo que o trabalho de verdade já tenha terminado.
-          final session = await Future.wait([
-            VistoriaChatSessionService.instance.createVistoriaOffline(
-              sinistroId: sinistroId,
-            ),
-            Future<void>.delayed(const Duration(seconds: 15)),
-          ]).then((results) => results.first as VistoriaSession);
-
-          if (!mounted) return;
-
-          setState(() {
-            isConvertingToOfflineBulk = false;
-            coletaModo = ColetaModo.emMassa;
-            _loadSessionIntoChat(session);
-            isLoadingSession = false;
-          });
-
-          _scrollToBottom();
-
-          unawaited(
-            VistoriaChatSessionService.instance
-                .abandonVistoria(vistoriaDocId: openSession.docId)
-                .catchError((e) {
-              debugPrint('Abandonar vistoria antiga em segundo plano falhou: $e');
-            }),
-          );
-
-          return;
-        } catch (e) {
-          debugPrint('Abandonar+criar offline falhou: $e');
-
-          if (!mounted) return;
-
-          setState(() => isConvertingToOfflineBulk = false);
-
-          _showSnack(
-            'Isso está demorando mais que o esperado. Tente de novo em '
-            'alguns segundos.',
-            backgroundColor: Colors.orange,
-          );
-        }
+        if (switched) return;
       }
 
       setState(() {
@@ -1356,6 +1303,115 @@ class _AiChatPageState extends State<AiChatPage> {
     );
 
     return result ?? false;
+  }
+
+  /// Executa de verdade o "abandonar e usar envio em massa" depois que
+  /// `_askAbandonGuidedAndStartOfflineBulk` confirmou -- extraído pra ser
+  /// chamado tanto ao reabrir o app offline com uma guiada em aberto
+  /// (`_startVistoriaOffline`) quanto ao tentar mandar mensagem/foto/áudio
+  /// no meio de uma conversa guiada que ficou sem rede (`_handleOfflineDuringGuidedChat`).
+  /// Retorna `true` se trocou com sucesso (o chamador deve parar por aqui,
+  /// a tela já está mostrando a vistoria nova); `false` se falhou (o
+  /// chamador decide o que fazer -- normalmente cair no aviso de bloqueio).
+  Future<bool> _abandonGuidedAndSwitchToOfflineBulk({
+    required VistoriaSession openSession,
+    required String sinistroId,
+  }) async {
+    // Fica NA MESMA TELA mostrando um estado de "convertendo" -- precisa
+    // de currentSession != null pro build() não voltar pra lista de
+    // seleção (que é como o erro ficava "escondido" antes). Essa escrita
+    // específica já provou (testando no aparelho) que pode demorar bem
+    // mais que o normal, por isso o timeout generoso lá no serviço -- aqui
+    // só esperamos honestamente, mostrando que algo está acontecendo, em
+    // vez do "Preparando sessão..." genérico que parecia travado sem
+    // explicação.
+    setState(() {
+      isLoadingSession = false;
+      isConvertingToOfflineBulk = true;
+      currentSession = openSession;
+    });
+
+    try {
+      // Cria a vistoria NOVA primeiro -- o serviço já resolve rápido
+      // offline (não espera mais o Future de rede, só aplica local e
+      // segue -- ver `VistoriaChatSessionService._writeNoWaitOffline`).
+      // O abandono da antiga vira fire-and-forget logo abaixo: a nova já
+      // é a mais recente (`updatedAt`), então `findOpenVistoria` já
+      // prefere ela mesmo que o abandono ainda não tenha "chegado".
+      //
+      // Isso ficou rápido demais pro mecânico ler a mensagem da tela de
+      // "Convertendo vistoria" -- garante um tempo mínimo visível nela,
+      // mesmo que o trabalho de verdade já tenha terminado.
+      final session = await Future.wait([
+        VistoriaChatSessionService.instance.createVistoriaOffline(
+          sinistroId: sinistroId,
+        ),
+        Future<void>.delayed(const Duration(seconds: 15)),
+      ]).then((results) => results.first as VistoriaSession);
+
+      if (!mounted) return true;
+
+      setState(() {
+        isConvertingToOfflineBulk = false;
+        coletaModo = ColetaModo.emMassa;
+        _loadSessionIntoChat(session);
+        isLoadingSession = false;
+      });
+
+      _scrollToBottom();
+
+      unawaited(
+        VistoriaChatSessionService.instance
+            .abandonVistoria(vistoriaDocId: openSession.docId)
+            .catchError((e) {
+          debugPrint('Abandonar vistoria antiga em segundo plano falhou: $e');
+        }),
+      );
+
+      return true;
+    } catch (e) {
+      debugPrint('Abandonar+criar offline falhou: $e');
+
+      if (!mounted) return false;
+
+      setState(() => isConvertingToOfflineBulk = false);
+
+      _showSnack(
+        'Isso está demorando mais que o esperado. Tente de novo em '
+        'alguns segundos.',
+        backgroundColor: Colors.orange,
+      );
+
+      return false;
+    }
+  }
+
+  /// Chamado quando o mecânico tenta mandar mensagem/foto/áudio no chat
+  /// guiado estando offline NO MEIO de uma conversa já em andamento --
+  /// diferente de abrir o app já offline (`_startVistoriaOffline`), aqui a
+  /// sessão já existe e pode ter evidência real gravada, então a escolha é
+  /// do mecânico: abandonar (perde o que já foi feito, mas destrava agora)
+  /// ou esperar a conexão voltar (mantém tudo, só não dá pra continuar
+  /// agora). Pergunta uma vez por "trecho offline" (reseta ao reconectar,
+  /// ver `_handleConnectivityRestored`) -- tentativas seguintes na mesma
+  /// queda só mostram o aviso de sempre, sem insistir com o diálogo de
+  /// novo.
+  Future<void> _handleOfflineDuringGuidedChat() async {
+    final session = currentSession;
+    if (session == null || _offlineGuidedPromptShown) return;
+
+    _offlineGuidedPromptShown = true;
+
+    final wantsAbandon = await _askAbandonGuidedAndStartOfflineBulk(session);
+
+    if (!mounted) return;
+
+    if (!wantsAbandon) return;
+
+    await _abandonGuidedAndSwitchToOfflineBulk(
+      openSession: session,
+      sinistroId: session.sinistroId,
+    );
   }
 
   /// Cria uma vistoria do zero offline (ID provisório, direto em modo em
@@ -1765,10 +1821,14 @@ class _AiChatPageState extends State<AiChatPage> {
     // antes de limpar o campo de texto (senão o mecânico perderia o que
     // escreveu sem nem saber por quê não foi).
     if (!ArgosConnectivityService.instance.isOnline.value) {
-      _showSnack(
-        'Isso precisa de internet -- sua mensagem não foi enviada.',
-        backgroundColor: Colors.orange,
-      );
+      if (_offlineGuidedPromptShown) {
+        _showSnack(
+          'Isso precisa de internet -- sua mensagem não foi enviada.',
+          backgroundColor: Colors.orange,
+        );
+      } else {
+        await _handleOfflineDuringGuidedChat();
+      }
       return;
     }
 
@@ -1887,10 +1947,14 @@ class _AiChatPageState extends State<AiChatPage> {
     // as fotos e só descobria que falhou (sem aviso nenhum, só um log) na
     // hora do upload.
     if (!ArgosConnectivityService.instance.isOnline.value) {
-      _showSnack(
-        'Isso precisa de internet para anexar fotos.',
-        backgroundColor: Colors.orange,
-      );
+      if (_offlineGuidedPromptShown) {
+        _showSnack(
+          'Isso precisa de internet para anexar fotos.',
+          backgroundColor: Colors.orange,
+        );
+      } else {
+        await _handleOfflineDuringGuidedChat();
+      }
       return;
     }
 
@@ -2031,6 +2095,10 @@ class _AiChatPageState extends State<AiChatPage> {
   /// aberto nesse momento).
   void _handleConnectivityRestored() {
     if (!ArgosConnectivityService.instance.isOnline.value) return;
+
+    // Próxima queda de conexão merece o diálogo de novo -- isso aqui não
+    // é um "já perguntei uma vez pra sempre", é por trecho offline.
+    _offlineGuidedPromptShown = false;
 
     // Tela bloqueada (vistoria guiada em aberto, offline) -- assim que a
     // conexão volta, refaz o bootstrap do zero: agora cai no ramo online
@@ -2195,10 +2263,14 @@ class _AiChatPageState extends State<AiChatPage> {
     // Recusa antes de gravar -- transcrição e envio dependem do backend,
     // gravar pra descobrir depois que falhou só desperdiça o áudio.
     if (!ArgosConnectivityService.instance.isOnline.value) {
-      _showSnack(
-        'Isso precisa de internet para gravar áudio.',
-        backgroundColor: Colors.orange,
-      );
+      if (_offlineGuidedPromptShown) {
+        _showSnack(
+          'Isso precisa de internet para gravar áudio.',
+          backgroundColor: Colors.orange,
+        );
+      } else {
+        await _handleOfflineDuringGuidedChat();
+      }
       return;
     }
 
