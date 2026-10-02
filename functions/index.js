@@ -897,14 +897,28 @@ async function buildSinistroNotification({ db, sinistroId, before, after, isCrea
   // dele, que hoje não está modelado aqui.
   const beforeLaudo = before?.laudoTecnico;
   const afterLaudo = after.laudoTecnico;
-  const laudoAcabouDeFicarPronto =
-    beforeLaudo?.status !== "pronto" && afterLaudo?.status === "pronto";
 
-  if (laudoAcabouDeFicarPronto && afterLaudo?.achados?.incongruenciaDetectada === true) {
-    console.log("Laudo com incongruência detectada (sem push — ver comentário acima):", {
-      sinistroId,
-      detalhes: afterLaudo.achados.detalhesIncongruencia,
-    });
+  // QUALQUER mudança em laudoTecnico nunca vira push -- bug real achado
+  // 2026-10-02: o laudo-service escreve nesse campo várias vezes enquanto
+  // processa (não é uma escrita só), e antes só o caso específico de
+  // incongruência retornava null -- qualquer outra mudança (progresso,
+  // ou até o caso comum de "pronto sem problema nenhum") caía no fallback
+  // genérico "Vistoria atualizada", virando uma notificação por escrita
+  // intermediária do pipeline. O mecânico já foi avisado quando enviou pra
+  // análise (ver vistoria_em_analise acima) e será avisado de novo quando
+  // o analista aprovar/rejeitar (checks abaixo, que mexem em status/
+  // vistoriaAtualStatus -- campos diferentes de laudoTecnico) -- nenhuma
+  // mudança só nesse campo merece push próprio.
+  if (stableStringify(beforeLaudo) !== stableStringify(afterLaudo)) {
+    const laudoAcabouDeFicarPronto =
+      beforeLaudo?.status !== "pronto" && afterLaudo?.status === "pronto";
+
+    if (laudoAcabouDeFicarPronto && afterLaudo?.achados?.incongruenciaDetectada === true) {
+      console.log("Laudo com incongruência detectada (sem push — ver comentário acima):", {
+        sinistroId,
+        detalhes: afterLaudo.achados.detalhesIncongruencia,
+      });
+    }
 
     return null;
   }
