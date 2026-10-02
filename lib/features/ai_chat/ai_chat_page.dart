@@ -909,36 +909,84 @@ class _AiChatPageState extends State<AiChatPage> {
     );
   }
 
+  /// Mesmo padrão visual dos outros diálogos desta tela (ícone circular,
+  /// título, subtítulo curto, dois `_VistoriaActionTile`) -- era um
+  /// `AlertDialog` genérico com um parágrafo inteiro no corpo, destoando do
+  /// resto (`_askAbandonGuidedAndStartOfflineBulk`/`_askResumeBulkMode`).
   Future<bool> _confirmStartNewVistoria(VistoriaSession session) async {
     final result = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
-      builder: (context) {
-        return AlertDialog(
+      builder: (dialogContext) {
+        return Dialog(
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(24),
+            borderRadius: BorderRadius.circular(28),
           ),
-          title: const Text('Começar uma nova coleta?'),
-          content: Text(
-            'A vistoria ${session.idvistoria} será marcada como abandonada -- '
-            'isso não cancela o sinistro nem anula nada (só o analista no web '
-            'pode fazer isso). O histórico não é apagado, e uma nova coleta '
-            'começa agora pra este veículo.',
+          insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 60,
+                    height: 60,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFFFF7E6),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.restart_alt_rounded,
+                      color: Color(0xFFB45309),
+                      size: 30,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Começar uma nova coleta?',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.spaceGrotesk(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: const Color(0xFF1F2937),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'A vistoria atual será marcada como abandonada. O '
+                  'histórico não é apagado -- só o analista pode cancelar o '
+                  'sinistro de verdade.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Color(0xFF6B7280),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    height: 1.3,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                _VistoriaActionTile(
+                  icon: Icons.restart_alt_rounded,
+                  title: 'Abandonar e iniciar nova',
+                  subtitle: 'Começa agora. Não cancela o sinistro.',
+                  color: Colors.deepOrange,
+                  filled: true,
+                  onTap: () => Navigator.of(dialogContext).pop(true),
+                ),
+                const SizedBox(height: 10),
+                _VistoriaActionTile(
+                  icon: Icons.close_rounded,
+                  title: 'Cancelar',
+                  subtitle: 'Continua na vistoria atual.',
+                  color: const Color(0xFF6B7280),
+                  onTap: () => Navigator.of(dialogContext).pop(false),
+                ),
+              ],
+            ),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Cancelar'),
-            ),
-            ElevatedButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.deepOrange,
-                foregroundColor: Colors.white,
-              ),
-              child: const Text('Abandonar e iniciar nova'),
-            ),
-          ],
         );
       },
     );
