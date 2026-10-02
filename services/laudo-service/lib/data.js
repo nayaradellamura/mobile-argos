@@ -71,6 +71,45 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
     }))
     .filter((m) => m.texto);
 
+  // Orçamento que o agente ADK já rascunhou ao vivo durante o chat (tool
+  // `salvar_estado_vistoria`) — passado como referência NÃO verificada pro
+  // Gemini cruzar com as fotos, não como severidade/veredito pronto (isso
+  // evitaria o efeito de ancoragem: o laudo só repetindo o que o agente de
+  // campo já concluiu, em vez de reanalisar de fato).
+  //
+  // itensAgente vem do chat guiado (agentParameters, só o ADK escreve).
+  // itensMecanico vem do envio em massa (vistoria.orcamentoRascunho,
+  // origem: 'mecanico', gravado por appendOrcamentoMecanicoItem no app
+  // mobile) -- o ADK nunca participa desse fluxo, então
+  // agentParameters.itens_orcamento sempre ficava vazio pra essas vistorias
+  // e o orçamento do mecânico nunca chegava na IA (bug real, achado
+  // 2026-10-02 verificando o pipeline fim a fim).
+  const itensAgente = Array.isArray(agentParameters.itens_orcamento)
+    ? agentParameters.itens_orcamento
+        .filter((item) => item && typeof item === "object")
+        .map((item) => ({
+          peca: str(item.peca),
+          valor: Number(item.valor_peca) || 0,
+          horasMaoObra: Number(item.horas_mao_obra) || 0,
+        }))
+        .filter((item) => item.peca)
+    : [];
+
+  const orcamentoRascunho = Array.isArray(vistoria.orcamentoRascunho)
+    ? vistoria.orcamentoRascunho
+    : [];
+
+  const itensMecanico = orcamentoRascunho
+    .filter((item) => item && typeof item === "object" && item.origem === "mecanico")
+    .map((item) => ({
+      peca: str(item.peca),
+      valor: Number(item.valorPeca) || 0,
+      horasMaoObra: Number(item.horasMaoObra) || 0,
+    }))
+    .filter((item) => item.peca);
+
+  const valorTotalMecanico = itensMecanico.reduce((sum, item) => sum + item.valor, 0);
+
   return {
     sinistroId,
     vistoriaId,
@@ -117,23 +156,11 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
 
     transcricao,
 
-    // Orçamento que o agente ADK já rascunhou ao vivo durante o chat (tool
-    // `salvar_estado_vistoria`) — passado como referência NÃO verificada
-    // pro Gemini cruzar com as fotos, não como severidade/veredito pronto
-    // (isso evitaria o efeito de ancoragem: o laudo só repetindo o que o
-    // agente de campo já concluiu, em vez de reanalisar de fato).
     orcamentoCampo: {
-      itens: Array.isArray(agentParameters.itens_orcamento)
-        ? agentParameters.itens_orcamento
-            .filter((item) => item && typeof item === "object")
-            .map((item) => ({
-              peca: str(item.peca),
-              valor: Number(item.valor_peca) || 0,
-              horasMaoObra: Number(item.horas_mao_obra) || 0,
-            }))
-            .filter((item) => item.peca)
-        : [],
-      valorTotal: Number(agentParameters.valor_total_final) || 0,
+      itens: [...itensAgente, ...itensMecanico],
+      valorTotal: itensAgente.length > 0
+        ? Number(agentParameters.valor_total_final) || 0
+        : valorTotalMecanico,
     },
   };
 }
