@@ -65,11 +65,22 @@ class BulkSyncCoordinator {
   }
 
   /// Dono único da query "minhas vistorias em massa em aberto" -- usada
-  /// tanto pra retomar envio pendente (`syncAllPending`) quanto pra
-  /// reconciliar ID provisório (`reconcileAllPendingIds`). Antes cada uma
-  /// fazia essa MESMA query sozinha a cada reconexão (2 leituras idênticas
-  /// no Firestore toda vez que a rede voltava); agora busca uma vez só e
-  /// aplica as duas checagens por doc.
+  /// tanto pra retomar envio pendente quanto pra reconciliar ID provisório.
+  /// Antes cada uma fazia essa MESMA query sozinha a cada reconexão (2
+  /// leituras idênticas no Firestore toda vez que a rede voltava); agora
+  /// busca uma vez só.
+  ///
+  /// CRÍTICO: reconciliar só depois que o upload terminar (`.whenComplete`),
+  /// nunca em paralelo -- `reconcilePendingVistoriaId` desiste sozinho se
+  /// o rascunho ainda tiver item pendente (pra não apagar o doc provisório
+  /// NO MEIO do upload), mas isso significa que, se reconciliar fosse
+  /// chamado junto/antes do upload começar, ele SEMPRE ia ver rascunho
+  /// pendente e desistir -- e como `submitForOperationalAnalysis` muda o
+  /// `status` pra EM_ANALISE_OPERACIONAL assim que o upload termina, a
+  /// vistoria sai do filtro `status == EM_ANDAMENTO` desta query pra
+  /// sempre, sem nenhuma outra chance de reconciliar (bug real, achado
+  /// 2026-10-02 -- vistoria offline enviada ficava presa no ID provisório
+  /// `VIS-OFFLINE-...` mesmo com a rede de volta).
   Future<void> _syncAndReconcileAllPending() async {
     final uid = _auth.currentUser?.uid ?? '';
     if (uid.isEmpty) return;
@@ -79,8 +90,18 @@ class BulkSyncCoordinator {
       final snapshot = await _fetchMyOpenBulkVistorias(uid);
 
       for (final doc in snapshot.docs) {
-        _trySubmitIfPending(doc);
-        _tryReconcileIfPending(doc);
+        final submission = _trySubmitIfPending(doc);
+
+        if (submission == null) {
+          _tryReconcileIfPending(doc);
+          continue;
+        }
+
+        unawaited(
+          submission.catchError((e) {
+            debugPrint('Erro ao sincronizar envio em massa pendente: $e');
+          }).whenComplete(() => _tryReconcileIfPending(doc)),
+        );
       }
     } catch (e) {
       // Melhor esforço -- se a varredura falhar (ex: rede caiu nesse
@@ -124,7 +145,13 @@ class BulkSyncCoordinator {
     );
   }
 
-  void _trySubmitIfPending(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
+  /// Retorna `null` quando não há nada pendente pra subir (deixa o chamador
+  /// reconciliar na hora, sem esperar nada). Quando HÁ algo, retorna o
+  /// `Future` do upload sem aguardá-lo aqui -- quem chama decide como/quando
+  /// encadear a reconciliação (ver `_syncAndReconcileAllPending`).
+  Future<void>? _trySubmitIfPending(
+    QueryDocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
     final data = doc.data();
     final rascunho = _asStringKeyedMap(data['envioEmMassaRascunho']);
 
@@ -132,7 +159,7 @@ class BulkSyncCoordinator {
       (item) => item is Map && item['status'] != 'enviado',
     );
 
-    if (!hasPending) return;
+    if (!hasPending) return null;
 
     final result = buildBulkUploadResultFromRascunho(rascunho);
 
@@ -141,15 +168,13 @@ class BulkSyncCoordinator {
         result.text.trim().isNotEmpty ||
         result.orcamentoItems.isNotEmpty;
 
-    if (!hasAnything) return;
+    if (!hasAnything) return null;
 
-    unawaited(
-      submitPackage(
-        vistoriaDocId: doc.id,
-        sinistroId: (data['sinistroId'] ?? '').toString(),
-        idvistoria: (data['idvistoria'] ?? doc.id).toString(),
-        result: result,
-      ),
+    return submitPackage(
+      vistoriaDocId: doc.id,
+      sinistroId: (data['sinistroId'] ?? '').toString(),
+      idvistoria: (data['idvistoria'] ?? doc.id).toString(),
+      result: result,
     );
   }
 
@@ -190,7 +215,8 @@ class BulkSyncCoordinator {
       final snapshot = await _fetchMyOpenBulkVistorias(uid);
 
       for (final doc in snapshot.docs) {
-        _trySubmitIfPending(doc);
+        final submission = _trySubmitIfPending(doc);
+        if (submission != null) unawaited(submission);
       }
     } catch (e) {
       // Melhor esforço -- se a varredura falhar (ex: rede caiu nesse
