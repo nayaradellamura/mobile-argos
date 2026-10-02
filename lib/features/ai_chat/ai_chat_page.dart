@@ -64,6 +64,12 @@ class ChatMessage {
   /// do chat.
   final bool isColetaModoPrompt;
 
+  /// Preenchido só depois que o mecânico toca numa das opções da pergunta
+  /// bifurcada -- registra qual foi escolhida na própria bolha (ver
+  /// _handleColetaModoChosen), em vez dos botões simplesmente sumirem sem
+  /// deixar rastro nenhum de qual resposta foi dada.
+  final ColetaModo? selectedColetaModo;
+
   const ChatMessage({
     required this.type,
     required this.text,
@@ -78,9 +84,10 @@ class ChatMessage {
     this.audioStatus,
     this.createdAt,
     this.isColetaModoPrompt = false,
+    this.selectedColetaModo,
   });
 
-  ChatMessage copyWith({String? text}) {
+  ChatMessage copyWith({String? text, ColetaModo? selectedColetaModo}) {
     return ChatMessage(
       type: type,
       text: text ?? this.text,
@@ -94,6 +101,8 @@ class ChatMessage {
       mp3DownloadUrl: mp3DownloadUrl,
       audioStatus: audioStatus,
       createdAt: createdAt,
+      isColetaModoPrompt: isColetaModoPrompt,
+      selectedColetaModo: selectedColetaModo ?? this.selectedColetaModo,
     );
   }
 }
@@ -522,6 +531,21 @@ class _AiChatPageState extends State<AiChatPage> {
     setState(() {
       coletaModo = escolha;
       awaitingColetaModoChoice = false;
+
+      // Registra a escolha na própria bolha da pergunta -- sem isso os
+      // botões só somem (onChooseColetaModo vira null pro resto da tela
+      // assim que awaitingColetaModoChoice fica false) sem deixar
+      // nenhum rastro visível de qual opção foi tocada (bug real,
+      // reportado pelo usuário).
+      final promptIndex = messages.lastIndexWhere(
+        (m) => m.isColetaModoPrompt && m.selectedColetaModo == null,
+      );
+
+      if (promptIndex != -1) {
+        messages[promptIndex] = messages[promptIndex].copyWith(
+          selectedColetaModo: escolha,
+        );
+      }
     });
 
     unawaited(
@@ -997,6 +1021,27 @@ class _AiChatPageState extends State<AiChatPage> {
           });
 
           _scrollToBottom();
+          return;
+        }
+
+        // Nunca respondeu "Como você quer coletar essa vistoria?" -- não
+        // existe papo nenhum pra "continuar agora"/"mais tarde", só a
+        // pergunta pendente (o mecânico saiu do app antes de tocar num dos
+        // botões). Sem este caso, "continuar agora" carregava um chat
+        // vazio sem nenhum jeito de responder de novo -- a única saída era
+        // abandonar a vistoria pra gerar outra do zero (bug real,
+        // reportado pelo usuário). Reoferece a pergunta direto, igual
+        // acontece na criação.
+        if (!alreadyExpired &&
+            !openSession.isEmMassa &&
+            openSession.coletaModo.trim().isEmpty) {
+          setState(() {
+            _loadSessionIntoChat(openSession);
+            isLoadingSession = false;
+          });
+
+          _scrollToBottom();
+          _offerColetaModoChoice();
           return;
         }
 
@@ -3537,6 +3582,7 @@ class _ChatBubble extends StatelessWidget {
           createdAt: message.createdAt,
           onOpenCamera: onOpenCamera,
           isColetaModoPrompt: message.isColetaModoPrompt,
+          selectedColetaModo: message.selectedColetaModo,
           onChooseColetaModo: onChooseColetaModo,
         );
 
@@ -3571,6 +3617,7 @@ class _AiBubble extends StatelessWidget {
   final DateTime? createdAt;
   final VoidCallback? onOpenCamera;
   final bool isColetaModoPrompt;
+  final ColetaModo? selectedColetaModo;
   final void Function(ColetaModo)? onChooseColetaModo;
 
   const _AiBubble({
@@ -3579,6 +3626,7 @@ class _AiBubble extends StatelessWidget {
     this.createdAt,
     this.onOpenCamera,
     this.isColetaModoPrompt = false,
+    this.selectedColetaModo,
     this.onChooseColetaModo,
   });
 
@@ -3655,18 +3703,32 @@ class _AiBubble extends StatelessWidget {
                     ),
                   ),
                 ],
-                if (isColetaModoPrompt && onChooseColetaModo != null) ...[
+                if (isColetaModoPrompt) ...[
                   const SizedBox(height: 12),
                   _ColetaModoChoiceButton(
                     icon: Icons.chat_bubble_rounded,
                     label: 'Passo a passo',
-                    onTap: () => onChooseColetaModo!(ColetaModo.guiado),
+                    selected: selectedColetaModo == ColetaModo.guiado,
+                    // Enquanto não respondida (selectedColetaModo == null),
+                    // os dois botões ficam tocáveis. Depois de respondida,
+                    // os dois ficam só-leitura -- mostrando qual foi
+                    // escolhida em vez de sumirem sem deixar rastro (bug
+                    // reportado pelo usuário: a resposta não ficava
+                    // registrada na tela).
+                    onTap: selectedColetaModo == null &&
+                            onChooseColetaModo != null
+                        ? () => onChooseColetaModo!(ColetaModo.guiado)
+                        : null,
                   ),
                   const SizedBox(height: 8),
                   _ColetaModoChoiceButton(
                     icon: Icons.upload_file_rounded,
                     label: 'Enviar tudo de uma vez',
-                    onTap: () => onChooseColetaModo!(ColetaModo.emMassa),
+                    selected: selectedColetaModo == ColetaModo.emMassa,
+                    onTap: selectedColetaModo == null &&
+                            onChooseColetaModo != null
+                        ? () => onChooseColetaModo!(ColetaModo.emMassa)
+                        : null,
                   ),
                 ],
                 const SizedBox(height: 6),
@@ -3711,16 +3773,32 @@ class _AiBubble extends StatelessWidget {
 class _ColetaModoChoiceButton extends StatelessWidget {
   final IconData icon;
   final String label;
-  final VoidCallback onTap;
+  final bool selected;
+
+  /// Null enquanto a pergunta já foi respondida (ver _handleColetaModoChosen)
+  /// -- o botão vira só-leitura, sem InkWell nenhum.
+  final VoidCallback? onTap;
 
   const _ColetaModoChoiceButton({
     required this.icon,
     required this.label,
+    this.selected = false,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
+    final answered = onTap == null;
+    final showsAsChosen = selected && answered;
+
+    final background = showsAsChosen
+        ? const Color(0xFF0057C0)
+        : answered
+            ? const Color(0xFFE5F6FF)
+            : const Color(0xFF0057C0);
+    final foreground =
+        showsAsChosen || !answered ? Colors.white : const Color(0xFF8A94A6);
+
     return SizedBox(
       width: double.infinity,
       child: InkWell(
@@ -3729,22 +3807,27 @@ class _ColetaModoChoiceButton extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           decoration: BoxDecoration(
-            color: const Color(0xFF0057C0),
+            color: background,
             borderRadius: BorderRadius.circular(14),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, color: Colors.white, size: 16),
+              Icon(icon, color: foreground, size: 16),
               const SizedBox(width: 8),
               Text(
                 label,
-                style: const TextStyle(
-                  color: Colors.white,
+                style: TextStyle(
+                  color: foreground,
                   fontWeight: FontWeight.w700,
                   fontSize: 13,
                 ),
               ),
+              if (showsAsChosen) ...[
+                const SizedBox(width: 8),
+                const Icon(Icons.check_circle_rounded,
+                    color: Colors.white, size: 16),
+              ],
             ],
           ),
         ),
