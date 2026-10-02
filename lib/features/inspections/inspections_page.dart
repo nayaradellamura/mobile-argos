@@ -3804,9 +3804,6 @@ class _InspectionCardContent extends StatelessWidget {
   Widget build(BuildContext context) {
     final hasCheckIn = inspection.checkInAt != null;
     final isHumanAnalysis = inspection.isAiAnalysisCategory;
-    final linkedStatusColor = linkedVistoria?.statusColor ?? Colors.teal;
-    final linkedStatusIcon =
-        linkedVistoria?.statusIcon ?? Icons.assignment_turned_in_outlined;
     final urgencyColor = _inspectionUrgencyColor(inspection);
     final isCritical = urgencyColor == Colors.redAccent;
 
@@ -3936,36 +3933,6 @@ class _InspectionCardContent extends StatelessWidget {
                     const _StatusChip(
                       label: 'Offline',
                       color: Color(0xFFB45309),
-                    ),
-                  if (hasLinkedVistoria)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 9,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: linkedStatusColor.withOpacity(.10),
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            linkedStatusIcon,
-                            size: 12,
-                            color: linkedStatusColor,
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            linkedVistoria?.statusLabel ?? 'Vinculada',
-                            style: TextStyle(
-                              color: linkedStatusColor,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w900,
-                            ),
-                          ),
-                        ],
-                      ),
                     ),
                 ],
               ),
