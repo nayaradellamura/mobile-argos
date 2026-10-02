@@ -52,15 +52,20 @@ app.post("/gerar-laudo", async (req, res) => {
     );
 
     const context = await loadLaudoContext({ sinistroId, vistoriaId });
+    // Se a vistoria tinha ID provisório (VIS-OFFLINE-...) e já foi
+    // reconciliada pro número real, loadLaudoContext resolveu isso
+    // internamente -- a partir daqui usa o ID resolvido, não o original da
+    // requisição, pra não gravar/armazenar sob um ID que já não existe mais.
+    const resolvedVistoriaId = context.vistoriaId;
     const achados = await gerarAchadosTecnicos(context);
     const pdfBuffer = await renderLaudoPdf({ context, achados });
-    const { storagePath, url } = await uploadLaudoPdf({ vistoriaId, pdfBuffer });
+    const { storagePath, url } = await uploadLaudoPdf({ vistoriaId: resolvedVistoriaId, pdfBuffer });
 
     await sinistroRef.set(
       {
         laudoTecnico: {
           status: "pronto",
-          vistoriaId,
+          vistoriaId: resolvedVistoriaId,
           url,
           storagePath,
           classificacaoContran: achados.classificacaoContran || null,
@@ -72,7 +77,7 @@ app.post("/gerar-laudo", async (req, res) => {
       { merge: true }
     );
 
-    console.log("Laudo pronto:", { sinistroId, vistoriaId, storagePath });
+    console.log("Laudo pronto:", { sinistroId, vistoriaId: resolvedVistoriaId, storagePath });
     res.status(200).json({ status: "pronto", url });
   } catch (err) {
     console.error("Falha ao gerar laudo:", { sinistroId, vistoriaId, error: err?.message, stack: err?.stack });
@@ -137,6 +142,10 @@ app.post("/gerar-orcamento-aprovado", async (req, res) => {
     );
 
     const context = await loadLaudoContext({ sinistroId, vistoriaId });
+    // Mesmo motivo do /gerar-laudo: se a vistoria tinha ID provisório
+    // (VIS-OFFLINE-...) já reconciliado, usa o ID resolvido daqui pra
+    // frente, não o original da requisição.
+    const resolvedVistoriaId = context.vistoriaId;
 
     if (context.orcamentoCampo.itens.length === 0) {
       // Sem orçamento nenhum registrado em campo — não faz sentido gerar
@@ -147,7 +156,7 @@ app.post("/gerar-orcamento-aprovado", async (req, res) => {
         {
           orcamentoAprovado: {
             status: "erro",
-            vistoriaId,
+            vistoriaId: resolvedVistoriaId,
             erro: "Nenhum item de orçamento foi registrado pelo mecânico durante a vistoria.",
             falhouEm: admin.firestore.FieldValue.serverTimestamp(),
           },
@@ -159,13 +168,13 @@ app.post("/gerar-orcamento-aprovado", async (req, res) => {
     }
 
     const pdfBuffer = await renderOrcamentoAprovadoPdf({ context });
-    const { storagePath, url } = await uploadOrcamentoAprovadoPdf({ vistoriaId, pdfBuffer });
+    const { storagePath, url } = await uploadOrcamentoAprovadoPdf({ vistoriaId: resolvedVistoriaId, pdfBuffer });
 
     await sinistroRef.set(
       {
         orcamentoAprovado: {
           status: "pronto",
-          vistoriaId,
+          vistoriaId: resolvedVistoriaId,
           url,
           storagePath,
           valorTotal: context.orcamentoCampo.valorTotal,
@@ -175,7 +184,7 @@ app.post("/gerar-orcamento-aprovado", async (req, res) => {
       { merge: true }
     );
 
-    console.log("Orçamento aprovado pronto:", { sinistroId, vistoriaId, storagePath });
+    console.log("Orçamento aprovado pronto:", { sinistroId, vistoriaId: resolvedVistoriaId, storagePath });
     res.status(200).json({ status: "pronto", url });
   } catch (err) {
     console.error("Falha ao gerar orçamento aprovado:", {

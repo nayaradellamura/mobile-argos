@@ -37,7 +37,7 @@ function formatDate(value) {
 async function loadLaudoContext({ sinistroId, vistoriaId }) {
   const db = admin.firestore();
 
-  const [sinistroSnap, vistoriaSnap] = await Promise.all([
+  const [sinistroSnap, vistoriaSnapInicial] = await Promise.all([
     db.collection("sinistro").doc(sinistroId).get(),
     db.collection("vistorias").doc(vistoriaId).get(),
   ]);
@@ -45,6 +45,29 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
   if (!sinistroSnap.exists) {
     throw new Error(`Sinistro ${sinistroId} não encontrado.`);
   }
+
+  let vistoriaSnap = vistoriaSnapInicial;
+
+  // O gatilho que enfileira a geração do laudo (onVistoriaEnterAnaliseOperacional,
+  // functions/index.js) captura o vistoriaAtualId do sinistro NO INSTANTE em
+  // que o status muda pra EM_ANALISE_OPERACIONAL -- se a vistoria foi criada
+  // offline, esse instante pode ainda ser o ID provisório (VIS-OFFLINE-...),
+  // já que a reconciliação pro número real só roda DEPOIS que o upload
+  // termina de verdade. Até o Cloud Task rodar (retry com backoff, pode levar
+  // minutos/horas), a reconciliação já apagou o doc provisório, e a busca
+  // acima falha com um 404 que o Cloud Tasks fica retentando pra sempre (bug
+  // real, achado 2026-10-02 vendo os logs de produção: VIS-OFFLINE-5801
+  // falhando com retry desde 15h, sem nunca se resolver sozinho). Se isso
+  // acontecer, o sinistro já deve estar apontando pro ID real reconciliado
+  // -- tenta de novo com ele antes de desistir.
+  if (!vistoriaSnap.exists && vistoriaId.startsWith("VIS-OFFLINE-")) {
+    const vistoriaAtualId = String(sinistroSnap.data()?.vistoriaAtualId || "").trim();
+
+    if (vistoriaAtualId && vistoriaAtualId !== vistoriaId) {
+      vistoriaSnap = await db.collection("vistorias").doc(vistoriaAtualId).get();
+    }
+  }
+
   if (!vistoriaSnap.exists) {
     throw new Error(`Vistoria ${vistoriaId} não encontrada.`);
   }
