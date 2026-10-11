@@ -10,6 +10,8 @@ import 'package:flutter/foundation.dart';
 import 'argos_connectivity_service.dart';
 import 'session_context_service.dart';
 
+// Serviço central de vistorias: cria, busca, atualiza e sincroniza sessões
+// de vistoria (e sua contraparte no sinistro), incluindo os fluxos offline.
 class VistoriaChatSessionService {
   VistoriaChatSessionService._();
 
@@ -37,6 +39,7 @@ class VistoriaChatSessionService {
   CollectionReference<Map<String, dynamic>> get _sinistros =>
       _db.collection('sinistro');
 
+  // Observa o status da vistoria e se o laudo analítico já foi preenchido.
   Stream<VistoriaChatCompletionState> watchCompletionState({
     required String vistoriaDocId,
   }) {
@@ -54,6 +57,8 @@ class VistoriaChatSessionService {
     });
   }
 
+  // Busca a vistoria EM_ANDAMENTO mais recente do inspetor atual (opcionalmente
+  // filtrando por sinistro), expirando no caminho as que já passaram do prazo.
   Future<VistoriaSession?> findOpenVistoria({String? sinistroId}) async {
     final ctx = await _currentContext();
 
@@ -90,6 +95,8 @@ class VistoriaChatSessionService {
     return null;
   }
 
+  // Lista os sinistros com check-in atribuídos ao mecânico atual que ainda
+  // podem receber uma vistoria nova (fonte de dados do picker do Argos IA).
   Future<List<SinistroVistoriaOption>>
       listCheckedInSinistrosForCurrentUser() async {
     final ctx = await _currentContext();
@@ -106,28 +113,17 @@ class VistoriaChatSessionService {
           final assignedToUid = _str(data['assignedToUid']);
           final vistoriaStatus = _str(data['vistoriaAtualStatus']).toUpperCase();
 
-          // Só o veículo atribuído ao mecânico logado — sinistros ainda sem
-          // dono (assignedToUid vazio) não aparecem aqui mais, mesmo sendo
-          // da mesma oficina.
           final isMine = assignedToUid == ctx.uid;
 
-          // Em andamento (aguardando vistoria, estado normal após o
-          // check-in), ou abandonada/expirada (o mecânico pode começar uma
-          // vistoria nova do zero pra ela, igual ao botão "Começar nova" já
-          // permite -- sem isso, uma vistoria abandonada simplesmente
-          // sumia desta lista e não dava pra selecionar o veículo de
-          // novo). REJEITADA fica de fora de propósito -- já tem entrada
-          // própria (botão "Iniciar Retificação" na tela de resumo do
-          // sinistro, startRetificação: true), duplicar aqui só confundia.
-          // Exclui também EM_ANALISE_OPERACIONAL (já enviada), FINALIZADA e
-          // CANCELADA de verdade (decisão do analista).
-          final isEmAndamento = vistoriaStatus.contains('ANDAMENTO');
-          final isAbandonadaOuExpirada = vistoriaStatus.contains('ABANDONADA') ||
-              vistoriaStatus.contains('EXPIRADA');
+          final isBlocked = vistoriaStatus.contains('ANALISE') ||
+              vistoriaStatus.contains('FINALIZADA') ||
+              vistoriaStatus.contains('FINALIZADO') ||
+              vistoriaStatus.contains('APROVADA') ||
+              vistoriaStatus.contains('APROVADO') ||
+              vistoriaStatus.contains('CANCELADA') ||
+              vistoriaStatus.contains('REJEITADA');
 
-          return _hasCheckIn(data['checkInAt']) &&
-              isMine &&
-              (isEmAndamento || isAbandonadaOuExpirada);
+          return _hasCheckIn(data['checkInAt']) && isMine && !isBlocked;
         })
         .map(SinistroVistoriaOption.fromFirestore)
         .toList();
@@ -137,6 +133,8 @@ class VistoriaChatSessionService {
     return list;
   }
 
+  // Reaproveita a vistoria em andamento do sinistro, se houver, ou cria uma
+  // nova (modo online) a partir dos dados do sinistro e do contexto do user.
   Future<VistoriaSession> createOrResumeFromSinistro({
     required String sinistroId,
     bool addInitialOiInHistory = true,
@@ -343,56 +341,19 @@ class VistoriaChatSessionService {
     );
   }
 
-  /// Prefixo que marca um docId de vistoria como provisório -- criado
-  /// 100% offline, ainda sem o número sequencial real (esse exige uma
-  /// transação contra `counters/vistorias_{year}`, que não enfileira
-  /// offline como uma escrita comum). É só uma convenção de nome, não um
-  /// campo novo no schema -- ver `reconcilePendingVistoriaId`.
-  ///
-  /// Formato `VIS-OFFLINE-NNNN` (4 dígitos aleatórios) pra seguir o mesmo
-  /// padrão visual de `VIS-YYYY-NNNN` -- risco de colisão aceito de
-  /// propósito (só 10 mil combinações): pedido explícito do usuário por
-  /// um número curto e legível pro mecânico, e o volume real de vistorias
-  /// offline simultâneas neste app é baixo o bastante pra isso não ser um
-  /// problema prático. Se colidir, o segundo a sincronizar sobrescreve o
-  /// primeiro -- mesma categoria de risco já aceita em
-  /// `reconcilePendingVistoriaId` (número sequencial "queimado").
+  // Prefixo que marca um docId de vistoria como provisório/offline, ainda sem
+  // o número sequencial real (ver `reconcilePendingVistoriaId`).
   static const String pendingVistoriaIdPrefix = 'VIS-OFFLINE-';
 
   bool isPendingVistoriaId(String vistoriaDocId) =>
       vistoriaDocId.startsWith(pendingVistoriaIdPrefix);
 
+  // Gera o sufixo numérico de 4 dígitos usado no id provisório offline.
   static String _randomOfflineSuffix() =>
       Random().nextInt(10000).toString().padLeft(4, '0');
 
-  /// Cria uma vistoria do zero 100% offline. Só chamada quando o sinistro
-  /// já tem check-in feito (é assim que ele aparece em "Minhas vistorias" --
-  /// check-in e atribuição são gravados juntos pela mesma transação, então
-  /// nunca existe uma vistoria alcançável por aqui sem check-in já
-  /// confirmado online antes) -- por isso este método NUNCA precisa chamar
-  /// a transação de check-in.
-  ///
-  /// Nasce sempre em modo `em_massa`: o guiado depende do agente (ADK), que
-  /// exige internet, então bifurcar não faz sentido offline.
-  ///
-  /// Usa `_db.batch()`, não `runTransaction` -- batch enfileira no cache
-  /// local igual uma escrita comum; transação exige round-trip com o
-  /// servidor, por isso `_createVistoriaId()` (usado no fluxo online) não
-  /// serve aqui. O docId é um ID aleatório gerado localmente pelo próprio
-  /// Firestore (`_vistorias.doc().id`, sem chamada de rede), prefixado com
-  /// `temp-vist-` -- ver `reconcilePendingVistoriaId` pra trocar pelo
-  /// número sequencial real quando a conexão voltar.
-  ///
-  /// Roda uma escrita (set/update/batch.commit) -- confirmado com o log
-  /// verboso do próprio SDK (`FirebaseFirestore.setLoggingEnabled`) que a
-  /// escrita é aplicada ao cache local em menos de 100ms (o dado já fica
-  /// certo e visível pra qualquer leitura a partir daí), mas o `Future`
-  /// só resolve depois de um round-trip bem-sucedido com o servidor -- e
-  /// o SDK fica tentando de novo sozinho (backoff exponencial)
-  /// indefinidamente enquanto não há rede. Esperar por isso offline só
-  /// trava a UI à toa por um `Future` que não ia resolver tão cedo,
-  /// não importa o timeout. Online, espera normalmente (com um timeout de
-  /// segurança a mais, caso algo genuinamente trave).
+  // Executa uma escrita no Firestore sem esperar o round-trip com o servidor
+  // quando offline (fica rodando em segundo plano); online, espera normal.
   Future<void> _writeNoWaitOffline(
     Future<void> Function() write, {
     required String debugLabel,
@@ -412,13 +373,8 @@ class VistoriaChatSessionService {
     );
   }
 
-  /// Lê um doc tentando o cache primeiro quando offline -- um `.get()`
-  /// padrão (sem `Source.cache`) pode ficar pendurado indefinidamente sem
-  /// conexão quando não há nada em cache ainda pra essa doc específica
-  /// (bug real, achado testando `createVistoriaOffline`/`abandonVistoria`
-  /// offline -- travava a tela em "Preparando sessão..." pra sempre).
-  /// Online, comporta-se como um `.get()` normal, só com um timeout de
-  /// segurança a mais.
+  // Lê um doc do cache local quando offline (evita ficar pendurado esperando
+  // rede); online, é um `.get()` normal com timeout de segurança.
   Future<DocumentSnapshot<Map<String, dynamic>>> _getCacheAware(
     DocumentReference<Map<String, dynamic>> ref,
   ) async {
@@ -431,6 +387,8 @@ class VistoriaChatSessionService {
     return ref.get().timeout(const Duration(seconds: 8));
   }
 
+  // Cria uma vistoria 100% offline (modo em_massa, com id provisório) a
+  // partir dos dados do sinistro já em cache local.
   Future<VistoriaSession> createVistoriaOffline({
     required String sinistroId,
   }) async {
@@ -508,11 +466,6 @@ class VistoriaChatSessionService {
       'tipo_vistoria': tipoOriginal,
     };
 
-    // `Timestamp.fromDate`, não `FieldValue.serverTimestamp()`, em
-    // createdAt/updatedAt/agentLastTurnAt -- esse último fica `null` no
-    // cache local até sincronizar, e `findOpenVistoria` ordena sessões por
-    // `updatedAt` pra escolher a mais recente. Precisa de um valor de
-    // verdade já, enquanto ainda offline.
     final data = {
       'idvistoria': tempId,
       'sinistroId': cleanSinistroId,
@@ -601,21 +554,8 @@ class VistoriaChatSessionService {
     );
   }
 
-  /// Troca o docId provisório (`temp-vist-...`, criado por
-  /// `createVistoriaOffline`) pelo número sequencial real, assim que a
-  /// conexão volta. Como todos os dados de uma vistoria são campos simples
-  /// no próprio doc (sem subcoleção nenhuma -- `chatmessages`/`images`/
-  /// `audios`/`orcamentoRascunho`/`envioEmMassaRascunho` são tudo campo), a
-  /// "migração" é só copiar o doc inteiro pra um doc novo com o ID real e
-  /// apagar o provisório, atomicamente com o ponteiro do sinistro.
-  ///
-  /// Só deve ser chamado já confirmadamente online (é aqui que
-  /// `_createVistoriaId()` -- a transação real -- roda pela primeira vez
-  /// nesse fluxo). Se o app morrer entre o `_createVistoriaId()` e o resto
-  /// do batch, aquele número sequencial fica "queimado" (nunca associado a
-  /// nenhuma vistoria) -- risco já aceito hoje no caminho online
-  /// (`createOrResumeFromSinistro`/`createRetificacaoFromVistoria`), não é
-  /// uma fragilidade nova.
+  // Troca o docId provisório de uma vistoria offline pelo número sequencial
+  // real, copiando o doc inteiro e apagando o provisório atomicamente.
   Future<String> reconcilePendingVistoriaId({
     required String tempDocId,
     required String sinistroId,
@@ -628,13 +568,6 @@ class VistoriaChatSessionService {
 
     final data = Map<String, dynamic>.from(doc.data() ?? {});
 
-    // Não reconcilia enquanto o BulkSyncCoordinator ainda não terminou de
-    // subir o pacote pra este docId provisório -- se a migração copiasse o
-    // doc pro ID real e apagasse o antigo NO MEIO do upload, as escritas
-    // seguintes do coordenador (que ainda apontam pro ID antigo) cairiam
-    // num doc já apagado, perdendo dado. Só reconcilia depois que o
-    // rascunho estiver vazio/sem pendência -- a próxima varredura de
-    // conectividade tenta de novo.
     final rascunhoAindaPendente = _asMap(data['envioEmMassaRascunho'])
         .values
         .any((item) => item is Map && item['status'] != 'enviado');
@@ -666,6 +599,8 @@ class VistoriaChatSessionService {
     return realId;
   }
 
+  // Cria uma nova vistoria de retificação a partir de uma vistoria rejeitada,
+  // marcando a original como REJEITADA e apontando o sinistro pra nova.
   Future<VistoriaSession> createRetificacaoFromVistoria({
     required VistoriaSession original,
     required String ajustesNecessarios,
@@ -800,19 +735,14 @@ class VistoriaChatSessionService {
     );
   }
 
-  /// Busca uma vistoria específica pelo id do documento — usado pra
-  /// recuperar a vistoria REJEITADA original quando o mecânico descarta uma
-  /// retificação já em andamento e pede pra começar outra do zero (nesse
-  /// caso sinistro.vistoriaAtualId já não aponta mais pra ela).
+  // Busca uma vistoria específica pelo id do documento.
   Future<VistoriaSession?> getVistoriaById(String vistoriaDocId) async {
     final doc = await _vistorias.doc(vistoriaDocId).get();
     if (!doc.exists) return null;
     return VistoriaSession.fromFirestore(doc);
   }
 
-  /// Busca a vistoria que o sinistro aponta como atual (sinistro.vistoriaAtualId)
-  /// — usado pra pegar a vistoria REJEITADA como base de uma retificação, já
-  /// que ela não está mais em EM_ANDAMENTO (findOpenVistoria não a acha).
+  // Busca a vistoria que o sinistro aponta como atual (vistoriaAtualId).
   Future<VistoriaSession?> getVistoriaAtualDoSinistro({
     required String sinistroId,
   }) async {
@@ -827,10 +757,8 @@ class VistoriaChatSessionService {
     return VistoriaSession.fromFirestore(vistoriaDoc);
   }
 
-  /// Ponto de entrada da retificação: acha a vistoria rejeitada do sinistro e
-  /// cria a nova vistoria de correção a partir dela. Separado de
-  /// createOrResumeFromSinistro de propósito — não deve ser possível cair
-  /// aqui sem ter uma vistoria rejeitada de verdade por trás.
+  // Ponto de entrada da retificação: acha a vistoria rejeitada do sinistro e
+  // cria a nova vistoria de correção a partir dela.
   Future<VistoriaSession> startRetificacaoFromSinistro({
     required String sinistroId,
   }) async {
@@ -849,6 +777,8 @@ class VistoriaChatSessionService {
     );
   }
 
+  // Cancela e opcionalmente apaga de vez uma vistoria (e sua subcoleção de
+  // áudios), sincronizando o status de volta no sinistro.
   Future<void> discardVistoria({
     required String vistoriaDocId,
     bool hardDelete = true,
@@ -856,18 +786,11 @@ class VistoriaChatSessionService {
     final ref = _vistorias.doc(vistoriaDocId);
 
     if (hardDelete) {
-      // Sincroniza o sinistro (marcando a vistoria como cancelada) ANTES de
-      // apagar o documento: _syncSinistroVistoriaStatus precisa ler o
-      // próprio documento da vistoria para saber a qual sinistro ele
-      // pertence, então isso tem que acontecer antes do delete.
       await _syncSinistroVistoriaStatus(
         vistoriaDocId: vistoriaDocId,
         status: statusCancelada,
       );
 
-      // Firestore não apaga subcoleções ao deletar o documento pai — a
-      // subcoleção "audios" (gravada pela Cloud Function de transcrição)
-      // ficaria órfã se não for limpa explicitamente aqui.
       await _deleteSubcollection(ref.collection('audios'));
 
       await ref.delete();
@@ -886,13 +809,8 @@ class VistoriaChatSessionService {
     );
   }
 
-  /// "Começar nova" (botão do mecânico, sem sinistro nenhum sendo anulado --
-  /// isso é decisão do analista no web, não dele). Diferente de
-  /// `discardVistoria(hardDelete: false)`, que grava CANCELADA -- um status
-  /// que o resto do sistema trata como decisão do analista (encerramento
-  /// definitivo). ABANDONADA é o mesmo status que o job de expiração já usa
-  /// pra "essa tentativa parou, mas o mecânico pode simplesmente começar de
-  /// novo pelo botão comum" (ver `isExpiredOrAbandonedCategory` no app).
+  // Marca a vistoria como ABANDONADA ("Começar nova" do mecânico), liberando
+  // o sinistro pra uma nova tentativa sem envolver decisão do analista.
   Future<void> abandonVistoria({required String vistoriaDocId}) async {
     await _writeNoWaitOffline(
       () => _vistorias.doc(vistoriaDocId).set({
@@ -909,6 +827,7 @@ class VistoriaChatSessionService {
     );
   }
 
+  // Apaga todos os documentos de uma subcoleção em lotes.
   Future<void> _deleteSubcollection(
     CollectionReference<Map<String, dynamic>> collection, {
     int batchSize = 450,
@@ -930,6 +849,7 @@ class VistoriaChatSessionService {
     }
   }
 
+  // Marca a vistoria como EXPIRADA e sincroniza o status no sinistro.
   Future<void> _expireVistoria({
     required String vistoriaDocId,
   }) async {
@@ -945,6 +865,7 @@ class VistoriaChatSessionService {
     );
   }
 
+  // Envia a vistoria pra análise operacional e sincroniza o sinistro.
   Future<void> submitForOperationalAnalysis({
     required String vistoriaDocId,
   }) async {
@@ -960,6 +881,7 @@ class VistoriaChatSessionService {
     );
   }
 
+  // Marca a vistoria como FINALIZADA e sincroniza o sinistro.
   Future<void> markAsFinalizada({
     required String vistoriaDocId,
     String? operadorUid,
@@ -977,6 +899,8 @@ class VistoriaChatSessionService {
     );
   }
 
+  // Rejeita a vistoria, registrando motivo e ajustes necessários, e marca o
+  // sinistro como precisando de retificação.
   Future<void> rejectVistoria({
     required String vistoriaDocId,
     required String motivoRejeicao,
@@ -1003,6 +927,7 @@ class VistoriaChatSessionService {
     );
   }
 
+  // Cancela a vistoria e sincroniza o sinistro.
   Future<void> cancelVistoria({
     required String vistoriaDocId,
     String? motivoCancelamento,
@@ -1027,6 +952,7 @@ class VistoriaChatSessionService {
     );
   }
 
+  // Adiciona uma mensagem do usuário ao histórico de chat da vistoria.
   Future<void> appendUserMessage({
     required String vistoriaDocId,
     required String text,
@@ -1038,6 +964,7 @@ class VistoriaChatSessionService {
     );
   }
 
+  // Adiciona uma mensagem da IA ao histórico de chat da vistoria.
   Future<void> appendAiMessage({
     required String vistoriaDocId,
     required String text,
@@ -1049,6 +976,7 @@ class VistoriaChatSessionService {
     );
   }
 
+  // Adiciona uma mensagem genérica ao histórico de chat da vistoria.
   Future<void> appendChatMessage({
     required String vistoriaDocId,
     required String role,
@@ -1073,9 +1001,7 @@ class VistoriaChatSessionService {
     }, SetOptions(merge: true));
   }
 
-  /// Persiste a escolha guiado/em_massa assim que o mecânico decide -- sem
-  /// isso, sair do app antes de confirmar o envio em massa faz a vistoria
-  /// esquecer o modo escolhido ao reabrir (ver ColetaModo em ai_chat_page).
+  // Persiste o modo de coleta (guiado/em_massa) escolhido pelo mecânico.
   Future<void> setColetaModo({
     required String vistoriaDocId,
     required String coletaModo,
@@ -1086,10 +1012,7 @@ class VistoriaChatSessionService {
     }, SetOptions(merge: true));
   }
 
-  /// Item de orçamento digitado pelo próprio mecânico (fluxo de envio em
-  /// massa) -- mesma lista que o ADK já preenche durante o fluxo guiado
-  /// (`orcamentoRascunho`), só com `origem: 'mecanico'` em vez de
-  /// `'vistoria'`. Não é um campo/modelo paralelo de propósito.
+  // Adiciona um item de orçamento digitado pelo mecânico (envio em massa).
   Future<void> appendOrcamentoMecanicoItem({
     required String vistoriaDocId,
     required String peca,
@@ -1111,14 +1034,7 @@ class VistoriaChatSessionService {
     }, SetOptions(merge: true));
   }
 
-  /// Rascunho persistido do modo em massa -- gravado a cada item
-  /// adicionado/removido no `BulkUploadSheet`, não só quando "Enviar" é
-  /// tocado. É o que sobrevive o app fechar/morrer no meio da montagem do
-  /// pacote (a persistência offline do Firestore já cobre isso sozinha,
-  /// tanto pra sem-internet quanto pra "app matou o processo") ou no meio
-  /// do envio em si (cada item sabe se já foi 'enviado', pra não duplicar
-  /// ao retomar). Mapa por `localId` em vez de array pra dar pra
-  /// atualizar/remover um item só sem reescrever a lista inteira.
+  // Grava/atualiza um item do rascunho de envio em massa, por localId.
   Future<void> upsertEnvioEmMassaRascunhoItem({
     required String vistoriaDocId,
     required String localId,
@@ -1130,6 +1046,7 @@ class VistoriaChatSessionService {
     }, SetOptions(merge: true));
   }
 
+  // Remove um item do rascunho de envio em massa.
   Future<void> removeEnvioEmMassaRascunhoItem({
     required String vistoriaDocId,
     required String localId,
@@ -1140,6 +1057,7 @@ class VistoriaChatSessionService {
     });
   }
 
+  // Marca um item do rascunho de envio em massa como já enviado.
   Future<void> markEnvioEmMassaRascunhoItemEnviado({
     required String vistoriaDocId,
     required String localId,
@@ -1150,11 +1068,7 @@ class VistoriaChatSessionService {
     });
   }
 
-  /// Lê o estado mais recente do rascunho direto do servidor -- usado no
-  /// início do envio pra saber, com certeza, o que já foi confirmado
-  /// enviado numa tentativa anterior interrompida (o `VistoriaSession` em
-  /// memória pode estar desatualizado se o rascunho mudou depois que a
-  /// sessão foi carregada).
+  // Lê o estado mais recente do rascunho de envio em massa direto do servidor.
   Future<Map<String, dynamic>> fetchEnvioEmMassaRascunho(
     String vistoriaDocId,
   ) async {
@@ -1166,27 +1080,18 @@ class VistoriaChatSessionService {
     return raw.map((key, value) => MapEntry(key.toString(), value));
   }
 
+  // Limpa o rascunho de envio em massa e a marca de confirmado offline.
   Future<void> clearEnvioEmMassaRascunho({
     required String vistoriaDocId,
   }) async {
     await _vistorias.doc(vistoriaDocId).update({
       'envioEmMassaRascunho': FieldValue.delete(),
-      // Some junto -- a marca de "já confirmado, só esperando rede" não
-      // tem mais sentido depois que o rascunho de verdade já foi
-      // enviado/limpo.
       'envioEmMassaConfirmadoOffline': FieldValue.delete(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
   }
 
-  /// Marca que o mecânico já tocou "Enviar" pra este pacote enquanto
-  /// offline -- o pacote não é mais um rascunho em edição, é um envio
-  /// confirmado esperando só a rede voltar. Persistido (não só em memória
-  /// na tela) pra qualquer instância do `AiChatPage` que reabrir essa
-  /// vistoria saber mostrar a tela travada de "aguardando sincronização"
-  /// em vez do botão de montar o pacote de novo -- sem isso, sair e voltar
-  /// antes de reconectar deixava reabrir/editar um pacote que já tinha
-  /// sido confirmado.
+  // Marca que o mecânico confirmou o envio em massa enquanto offline.
   Future<void> markEnvioEmMassaConfirmadoOffline({
     required String vistoriaDocId,
   }) async {
@@ -1196,6 +1101,7 @@ class VistoriaChatSessionService {
     }, SetOptions(merge: true));
   }
 
+  // Sobe uma foto pro Storage e retorna seus metadados de evidência.
   Future<UploadedImageEvidence> uploadImageFile({
     required String vistoriaDocId,
     required String imagePath,
@@ -1230,6 +1136,7 @@ class VistoriaChatSessionService {
     );
   }
 
+  // Adiciona os metadados de uma foto já enviada à lista de imagens da vistoria.
   Future<void> appendImageEvidence({
     required String vistoriaDocId,
     required String imageUrl,
@@ -1257,6 +1164,7 @@ class VistoriaChatSessionService {
     }, SetOptions(merge: true));
   }
 
+  // Finaliza a vistoria com o laudo/observações informados.
   Future<void> finishVistoria({
     required String vistoriaDocId,
     String? laudo,
@@ -1276,12 +1184,11 @@ class VistoriaChatSessionService {
     );
   }
 
+  // Remove campos legados de transcrição de todos os docs de vistoria,
+  // paginando a coleção inteira.
   Future<void> cleanupRootTranscriptionFields({
     int batchSize = 450,
   }) async {
-    // Pagina por toda a coleção usando um cursor estável (id do documento);
-    // sem isso, chamadas repetidas sempre reprocessavam o mesmo primeiro
-    // lote e nunca alcançavam o restante da coleção.
     Query<Map<String, dynamic>> query = _vistorias
         .orderBy(FieldPath.documentId)
         .limit(batchSize);
@@ -1312,6 +1219,7 @@ class VistoriaChatSessionService {
     }
   }
 
+  // Espelha o status/tipo atual da vistoria de volta nos campos do sinistro.
   Future<void> _syncSinistroVistoriaStatus({
     required String vistoriaDocId,
     required String status,
@@ -1340,6 +1248,8 @@ class VistoriaChatSessionService {
     );
   }
 
+  // Resolve uid/email/nome/credenciado do usuário logado, via
+  // SessionContextService, tratando o caso de usuário sem credenciado vinculado.
   Future<_CurrentContext> _currentContext() async {
     final user = _auth.currentUser;
 
@@ -1348,9 +1258,6 @@ class VistoriaChatSessionService {
     }
 
     try {
-      // Resolvido (e cacheado em memória para a sessão) pelo
-      // SessionContextService — evita refazer estas leituras toda vez que
-      // um método deste service precisa do contexto do usuário.
       final session = await SessionContextService.instance.resolve();
 
       return _CurrentContext(
@@ -1361,10 +1268,6 @@ class VistoriaChatSessionService {
         credenciadoNome: session.credenciadoNome,
       );
     } on NoCredenciadoLinkedException {
-      // Diferente de InspectionsPage, este service historicamente não trata
-      // "sem credenciado vinculado" como erro — quem chama (ex.:
-      // listCheckedInSinistrosForCurrentUser) já sabe lidar com
-      // credenciadoId vazio. Mantém esse comportamento.
       final email = (user.email ?? '').trim().toLowerCase();
 
       return _CurrentContext(
@@ -1377,17 +1280,12 @@ class VistoriaChatSessionService {
     }
   }
 
+  // Gera o próximo id sequencial `VIS-YYYY-NNNN` via transação no contador
+  // do ano corrente.
   Future<String> _createVistoriaId() async {
     final year = DateTime.now().year;
     final counterRef = _db.collection('counters').doc('vistorias_$year');
 
-    // Timeout de segurança -- uma transação exige round-trip com o
-    // servidor e, diferente de `.get()`/`.set()`, não tem fallback local
-    // nenhum. Se a conexão cair bem no meio (ex: `reconcilePendingVistoriaId`
-    // começou com `isOnline==true` e a rede sumiu um instante depois), ela
-    // fica esperando pra sempre -- e pode travar a fila de escrita do
-    // Firestore pro resto do processo, impedindo até escritas SIMPLES em
-    // outros documentos de completarem (bug real, achado testando).
     final nextNumber = await _db.runTransaction<int>((transaction) async {
       final snapshot = await transaction.get(counterRef);
       final data = snapshot.data();
@@ -1414,12 +1312,14 @@ class VistoriaChatSessionService {
     return 'VIS-$year-${nextNumber.toString().padLeft(4, '0')}';
   }
 
+  // Verifica se um valor de checkInAt representa um check-in válido.
   static bool _hasCheckIn(dynamic value) {
     final text = _str(value).toLowerCase();
 
     return text.isNotEmpty && text != 'null' && text != 'false';
   }
 
+  // Converte qualquer Map dinâmico num Map<String, dynamic>.
   static Map<String, dynamic> _asMap(dynamic value) {
     if (value is Map<String, dynamic>) return value;
 
@@ -1430,6 +1330,7 @@ class VistoriaChatSessionService {
     return <String, dynamic>{};
   }
 
+  // Converte um valor dinâmico pra String, usando fallback se vazio/nulo.
   static String _str(dynamic value, {String fallback = ''}) {
     if (value == null) return fallback;
 
@@ -1438,6 +1339,7 @@ class VistoriaChatSessionService {
     return text.isEmpty ? fallback : text;
   }
 
+  // Verifica se o doc já tem algum campo de laudo analítico preenchido.
   static bool _hasFilledAnalyticalReport(Map<String, dynamic> data) {
     const candidateFields = [
       'laudo_analitico',
@@ -1447,6 +1349,7 @@ class VistoriaChatSessionService {
     return candidateFields.any((field) => _hasAnyFilledValue(data[field]));
   }
 
+  // Verifica recursivamente se um valor (String/Iterable/Map) tem conteúdo.
   static bool _hasAnyFilledValue(dynamic value) {
     if (value == null) return false;
 
@@ -1463,6 +1366,7 @@ class VistoriaChatSessionService {
     return true;
   }
 
+  // Converte Timestamp/DateTime pra DateTime, com fallback pra epoch.
   static DateTime _dateValue(dynamic value) {
     if (value is Timestamp) return value.toDate();
     if (value is DateTime) return value;
@@ -1470,6 +1374,7 @@ class VistoriaChatSessionService {
     return DateTime.fromMillisecondsSinceEpoch(0);
   }
 
+  // Converte Timestamp/DateTime/String pra DateTime, ou null se inválido.
   static DateTime? _dateValueOrNull(dynamic value) {
     if (value is Timestamp) return value.toDate();
     if (value is DateTime) return value;
@@ -1481,6 +1386,7 @@ class VistoriaChatSessionService {
     return null;
   }
 
+  // Soma N horas úteis (dias de semana) a uma data, pulando fins de semana.
   static DateTime _addBusinessHours(DateTime startDate, int hours) {
     if (hours <= 0) return startDate;
 
@@ -1488,10 +1394,6 @@ class VistoriaChatSessionService {
     var remaining = hours;
 
     while (remaining > 0) {
-      // Conta a hora que está prestes a decorrer (a que começa em `current`),
-      // não a hora seguinte — checar a hora seguinte descartava a última
-      // hora de sexta (23h-24h), porque o timestamp final cai bem na virada
-      // pra sábado, mesmo essa hora inteira pertencendo à sexta.
       if (_isBusinessDay(current)) {
         remaining -= 1;
       }
@@ -1502,6 +1404,7 @@ class VistoriaChatSessionService {
     return current;
   }
 
+  // Avança a data até cair num dia útil, se já não estiver em um.
   static DateTime _normalizeBusinessStart(DateTime date) {
     var current = date;
 
@@ -1512,10 +1415,12 @@ class VistoriaChatSessionService {
     return current;
   }
 
+  // Verifica se a data cai de segunda a sexta.
   static bool _isBusinessDay(DateTime date) {
     return date.weekday >= DateTime.monday && date.weekday <= DateTime.friday;
   }
 
+  // Monta o nome de exibição do veículo a partir de marca e modelo.
   static String _vehicleName({
     required String marca,
     required String modelo,
@@ -1531,6 +1436,7 @@ class VistoriaChatSessionService {
     return '$marca $modelo';
   }
 
+  // Formata a data como dd/mm/yyyy.
   static String _formatDate(DateTime date) {
     final d = date.day.toString().padLeft(2, '0');
     final m = date.month.toString().padLeft(2, '0');
@@ -1539,6 +1445,7 @@ class VistoriaChatSessionService {
     return '$d/$m/$y';
   }
 
+  // Formata a hora como hh:mm.
   static String _formatTime(DateTime date) {
     final h = date.hour.toString().padLeft(2, '0');
     final m = date.minute.toString().padLeft(2, '0');
@@ -1547,6 +1454,7 @@ class VistoriaChatSessionService {
   }
 }
 
+// Status atual da vistoria e se o laudo analítico já foi concluído.
 class VistoriaChatCompletionState {
   final String status;
   final bool isCompleted;
@@ -1557,6 +1465,8 @@ class VistoriaChatCompletionState {
   });
 }
 
+// Representa uma sessão de vistoria (dados do veículo/sinistro, status,
+// histórico de chat e estado do envio em massa).
 class VistoriaSession {
   final String docId;
   final String idvistoria;
@@ -1575,23 +1485,13 @@ class VistoriaSession {
   final DateTime? agentLastTurnAt;
   final DateTime? agentBusinessExpiresAt;
 
-  /// 'guiado' | 'em_massa' | '' (vistorias antigas, de antes desse campo
-  /// existir -- tratadas como guiado por compatibilidade). Persistido assim
-  /// que o mecânico escolhe, pra retomar corretamente se ele sair antes de
-  /// confirmar o envio em massa.
+  // Modo de coleta: 'guiado' | 'em_massa' | '' (vistorias antigas).
   final String coletaModo;
 
-  /// Rascunho persistido do modo em massa (ver
-  /// `upsertEnvioEmMassaRascunhoItem`) -- snapshot de quando a sessão foi
-  /// carregada; pra ter certeza absoluta no início do envio, usar
-  /// `fetchEnvioEmMassaRascunho` direto.
+  // Rascunho do envio em massa no momento em que a sessão foi carregada.
   final Map<String, dynamic> envioEmMassaRascunho;
 
-  /// true depois que o mecânico toca "Enviar" offline -- o pacote já foi
-  /// confirmado, só falta a rede. Persistido (ver
-  /// `markEnvioEmMassaConfirmadoOffline`) pra qualquer tela que reabrir
-  /// esta vistoria saber mostrar o estado travado, não o botão de montar
-  /// de novo.
+  // true se o mecânico já confirmou o envio em massa enquanto offline.
   final bool envioEmMassaConfirmadoOffline;
 
   const VistoriaSession({
@@ -1616,11 +1516,14 @@ class VistoriaSession {
     this.envioEmMassaConfirmadoOffline = false,
   });
 
+  // Se a vistoria está no modo de envio em massa.
   bool get isEmMassa => coletaModo == 'em_massa';
 
+  // Se a vistoria é uma retificação (correção de uma vistoria rejeitada).
   bool get isRetificacao =>
       tipoVistoria.toUpperCase() == VistoriaChatSessionService.tipoRetificacao;
 
+  // Se a sessão do agente (ADK) já passou do prazo de expiração.
   bool get isAgentSessionExpired {
     final expiresAt = agentBusinessExpiresAt ??
         (agentLastTurnAt == null
@@ -1699,6 +1602,7 @@ class VistoriaSession {
   }
 }
 
+// Opção de sinistro com check-in elegível a receber uma vistoria, exibida no picker do Argos IA.
 class SinistroVistoriaOption {
   final String sinistroId;
   final String placa;
@@ -1780,6 +1684,7 @@ class SinistroVistoriaOption {
   }
 }
 
+// Metadados de uma foto de evidência já enviada ao Storage.
 class UploadedImageEvidence {
   final String imageId;
   final String storagePath;
@@ -1798,6 +1703,7 @@ class UploadedImageEvidence {
   });
 }
 
+// Dados do usuário logado resolvidos (uid, email, nome e oficina vinculada).
 class _CurrentContext {
   final String uid;
   final String email;
