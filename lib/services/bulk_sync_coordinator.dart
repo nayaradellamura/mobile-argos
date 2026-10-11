@@ -10,19 +10,8 @@ import 'argos_connectivity_service.dart';
 import 'user_audio_storage_service.dart';
 import 'vistoria_chat_session_service.dart';
 
-/// Dono único do upload de verdade de um pacote em massa (Storage + ADK pra
-/// transcrição de áudio) -- extraído de `_AiChatPageState._submitBulkPackage`
-/// pra ter UM lugar só que sabe fazer isso, chamado tanto pelo toque manual
-/// em "Enviar" (tela aberta, online) quanto pela varredura automática ao
-/// reconectar (`syncAllPending`, que roda sozinha, sem nenhuma tela aberta).
-///
-/// Isso resolve uma limitação real: antes, a retomada automática
-/// (`_handleConnectivityRestored` dentro do `AiChatPage`) só funcionava
-/// enquanto a MESMA instância daquela vistoria continuasse montada -- sair e
-/// voltar a entrar criava um widget novo (via `ValueKey`) e perdia o
-/// listener. Como `ArgosConnectivityService` já é um singleton que sobrevive
-/// a troca de tela, um coordenador no mesmo molde cobre TODAS as vistorias
-/// pendentes do mecânico, não só a que porventura estiver na tela.
+// Coordenador único (singleton) do upload e reconciliação de vistorias em
+// massa pendentes, disparado tanto por toque manual quanto por reconexão.
 class BulkSyncCoordinator {
   BulkSyncCoordinator._() {
     ArgosConnectivityService.instance.isOnline.addListener(
@@ -35,52 +24,49 @@ class BulkSyncCoordinator {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
 
-  /// Reentrância-safe: se os dois caminhos (toque manual e varredura
-  /// automática) tentarem processar a mesma vistoria quase juntos, só o
-  /// primeiro vence -- o segundo encontra o id já aqui e não faz nada.
+  // IDs de vistoria sendo processadas agora, pra evitar duas chamadas
+  // concorrentes processarem a mesma vistoria.
   final Set<String> _processingVistoriaIds = <String>{};
 
-  /// Mesma proteção que `_processingVistoriaIds`, só que pra reconciliação
-  /// de ID provisório -- evita duas chamadas de `reconcilePendingVistoriaId`
-  /// em paralelo pro mesmo docId se `isOnline` piscar antes do doc
-  /// provisório sumir do cache local.
+  // Espelho observável de _processingVistoriaIds, pras telas mostrarem
+  // "Sincronizando..." enquanto o upload está rolando.
+  final ValueNotifier<Set<String>> syncingVistoriaIds =
+      ValueNotifier<Set<String>>(const <String>{});
+
+  // Marca a vistoria como em processamento; retorna false se já estava.
+  bool _tryMarkProcessing(String vistoriaDocId) {
+    final added = _processingVistoriaIds.add(vistoriaDocId);
+
+    if (added) {
+      syncingVistoriaIds.value = Set<String>.from(_processingVistoriaIds);
+    }
+
+    return added;
+  }
+
+  // Remove a vistoria da lista de processamento.
+  void _unmarkProcessing(String vistoriaDocId) {
+    _processingVistoriaIds.remove(vistoriaDocId);
+    syncingVistoriaIds.value = Set<String>.from(_processingVistoriaIds);
+  }
+
+  // Guarda de reentrância pra reconcilePendingVistoriaId, por docId.
   final Set<String> _reconcilingVistoriaIds = <String>{};
 
   final StreamController<String> _submittedController =
       StreamController<String>.broadcast();
 
-  /// Emite o docId toda vez que um pacote termina de ser enviado com
-  /// sucesso -- não importa se foi um toque manual ou a varredura
-  /// automática. `AiChatPage` escuta isso pra virar a própria tela de
-  /// "concluído" quando a vistoria que ela mostra é a que acabou de
-  /// sincronizar sozinha em segundo plano. Necessário porque
-  /// `watchCompletionState` não serve pro modo em massa -- ele exige
-  /// `laudo_analitico` preenchido, campo que só o agente guiado preenche
-  /// numa conversa de verdade.
+  // Emite o docId sempre que um pacote em massa termina de ser enviado.
   Stream<String> get onPackageSubmitted => _submittedController.stream;
 
+  // Dispara a varredura de envio/reconciliação pendente ao reconectar.
   void _handleConnectivityChanged() {
     if (!ArgosConnectivityService.instance.isOnline.value) return;
     unawaited(_syncAndReconcileAllPending());
   }
 
-  /// Dono único da query "minhas vistorias em massa em aberto" -- usada
-  /// tanto pra retomar envio pendente quanto pra reconciliar ID provisório.
-  /// Antes cada uma fazia essa MESMA query sozinha a cada reconexão (2
-  /// leituras idênticas no Firestore toda vez que a rede voltava); agora
-  /// busca uma vez só.
-  ///
-  /// CRÍTICO: reconciliar só depois que o upload terminar (`.whenComplete`),
-  /// nunca em paralelo -- `reconcilePendingVistoriaId` desiste sozinho se
-  /// o rascunho ainda tiver item pendente (pra não apagar o doc provisório
-  /// NO MEIO do upload), mas isso significa que, se reconciliar fosse
-  /// chamado junto/antes do upload começar, ele SEMPRE ia ver rascunho
-  /// pendente e desistir -- e como `submitForOperationalAnalysis` muda o
-  /// `status` pra EM_ANALISE_OPERACIONAL assim que o upload termina, a
-  /// vistoria sai do filtro `status == EM_ANDAMENTO` desta query pra
-  /// sempre, sem nenhuma outra chance de reconciliar (bug real, achado
-  /// 2026-10-02 -- vistoria offline enviada ficava presa no ID provisório
-  /// `VIS-OFFLINE-...` mesmo com a rede de volta).
+  // Busca minhas vistorias em massa em aberto e, pra cada uma, envia o
+  // rascunho pendente e só então reconcilia o ID provisório.
   Future<void> _syncAndReconcileAllPending() async {
     final uid = _auth.currentUser?.uid ?? '';
     if (uid.isEmpty) return;
@@ -104,12 +90,11 @@ class BulkSyncCoordinator {
         );
       }
     } catch (e) {
-      // Melhor esforço -- se a varredura falhar (ex: rede caiu nesse
-      // meio-tempo de novo), a próxima reconexão tenta de novo sozinha.
       debugPrint('Erro ao varrer vistorias em massa pendentes: $e');
     }
   }
 
+  // Busca as vistorias em massa em aberto do mecânico logado.
   Future<QuerySnapshot<Map<String, dynamic>>> _fetchMyOpenBulkVistorias(
     String uid,
   ) {
@@ -121,6 +106,7 @@ class BulkSyncCoordinator {
         .get();
   }
 
+  // Reconcilia o ID provisório do doc, se aplicável, evitando chamadas concorrentes.
   void _tryReconcileIfPending(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
     final tempId = doc.id;
 
@@ -145,10 +131,7 @@ class BulkSyncCoordinator {
     );
   }
 
-  /// Retorna `null` quando não há nada pendente pra subir (deixa o chamador
-  /// reconciliar na hora, sem esperar nada). Quando HÁ algo, retorna o
-  /// `Future` do upload sem aguardá-lo aqui -- quem chama decide como/quando
-  /// encadear a reconciliação (ver `_syncAndReconcileAllPending`).
+  // Retorna o Future do upload se houver rascunho pendente pra subir, senão null.
   Future<void>? _trySubmitIfPending(
     QueryDocumentSnapshot<Map<String, dynamic>> doc,
   ) {
@@ -178,12 +161,7 @@ class BulkSyncCoordinator {
     );
   }
 
-  /// Troca o ID provisório (`VIS-OFFLINE-...`) de qualquer vistoria MINHA
-  /// criada offline pelo número sequencial real -- em QUALQUER tela, não só
-  /// quando `InspectionsPage` está montada. Versão standalone (própria
-  /// query) pra quem quiser chamar isso isoladamente; o gatilho real de
-  /// reconexão usa `_syncAndReconcileAllPending`, que faz UMA query só pra
-  /// isto e pra `syncAllPending` juntos.
+  // Varre e reconcilia o ID provisório de todas as minhas vistorias em massa em aberto.
   Future<void> reconcileAllPendingIds() async {
     final uid = _auth.currentUser?.uid ?? '';
     if (uid.isEmpty) return;
@@ -200,12 +178,7 @@ class BulkSyncCoordinator {
     }
   }
 
-  /// Varre TODAS as vistorias em massa em aberto do mecânico logado atrás
-  /// de rascunho ainda não enviado -- não depende de nenhuma tela estar
-  /// montada. Versão standalone (própria query); o gatilho real de
-  /// reconexão usa `_syncAndReconcileAllPending`, que faz UMA query só pra
-  /// isto e pra `reconcileAllPendingIds` juntos. Seguro de chamar de novo
-  /// manualmente (ex: ao abrir a lista de vistorias).
+  // Varre e reenvia o rascunho pendente de todas as minhas vistorias em massa em aberto.
   Future<void> syncAllPending() async {
     final uid = _auth.currentUser?.uid ?? '';
     if (uid.isEmpty) return;
@@ -219,12 +192,11 @@ class BulkSyncCoordinator {
         if (submission != null) unawaited(submission);
       }
     } catch (e) {
-      // Melhor esforço -- se a varredura falhar (ex: rede caiu nesse
-      // meio-tempo de novo), a próxima reconexão tenta de novo sozinha.
       debugPrint('Erro ao varrer envios em massa pendentes: $e');
     }
   }
 
+  // Normaliza um valor dinâmico pra Map<String, dynamic>.
   static Map<String, dynamic> _asStringKeyedMap(dynamic value) {
     if (value is Map<String, dynamic>) return value;
     if (value is Map) {
@@ -233,11 +205,8 @@ class BulkSyncCoordinator {
     return <String, dynamic>{};
   }
 
-  /// Faz o upload de verdade (fotos, áudios, texto, orçamento) e finaliza a
-  /// vistoria (`submitForOperationalAnalysis`). `onStatus`, se passado, é
-  /// chamado a cada etapa -- usado pela tela pra alimentar a animação do
-  /// olho quando quem chamou é o toque manual (a varredura automática em
-  /// segundo plano não passa `onStatus`, não tem UI nenhuma olhando).
+  // Sobe fotos, áudios, texto e orçamento do pacote e finaliza a vistoria
+  // pra análise operacional; `onStatus` reporta o progresso de cada etapa.
   Future<void> submitPackage({
     required String vistoriaDocId,
     required String sinistroId,
@@ -245,7 +214,7 @@ class BulkSyncCoordinator {
     required BulkUploadResult result,
     void Function(String status)? onStatus,
   }) async {
-    if (!_processingVistoriaIds.add(vistoriaDocId)) return;
+    if (!_tryMarkProcessing(vistoriaDocId)) return;
 
     try {
       onStatus?.call('Enviando fotos...');
@@ -272,7 +241,7 @@ class BulkSyncCoordinator {
           await VistoriaChatSessionService.instance.appendChatMessage(
             vistoriaDocId: vistoriaDocId,
             role: 'photo',
-            text: 'Foto anexada à vistoria (envio em massa)',
+            text: 'Foto anexada à vistoria (tudo de uma vez)',
             extraData: {
               'imageId': uploadedImage.imageId,
               'url': uploadedImage.downloadUrl,
@@ -304,9 +273,6 @@ class BulkSyncCoordinator {
               duration: Duration(seconds: audio.durationSeconds),
             );
 
-            // Transcreve de verdade (o backend grava em chatmessages) --
-            // descartamos a resposta conversacional do agente de propósito:
-            // o modo em massa não mostra ida-e-volta com o ADK.
             await ArgosAiService.instance.sendAudioMessage(
               idvistoria: idvistoria,
               sinistroId: sinistroId,
@@ -374,7 +340,7 @@ class BulkSyncCoordinator {
 
       _submittedController.add(vistoriaDocId);
     } finally {
-      _processingVistoriaIds.remove(vistoriaDocId);
+      _unmarkProcessing(vistoriaDocId);
     }
   }
 }

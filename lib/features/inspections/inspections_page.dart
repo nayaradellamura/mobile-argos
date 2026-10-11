@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shimmer/shimmer.dart';
 import '../../services/argos_connectivity_service.dart';
+import '../../services/bulk_sync_coordinator.dart';
 import '../../services/session_context_service.dart';
 import '../../services/sinistro_presence_service.dart';
 import '../../services/vistoria_chat_session_service.dart';
@@ -21,20 +22,16 @@ import 'data/inspection_parsing_utils.dart';
 import 'data/linked_vistoria_info.dart';
 import 'pdf_viewer_page.dart';
 
+/// Tela principal de vistorias: lista os sinistros da oficina, com busca,
+/// filtro por categoria e escopo "minhas/da oficina".
 class InspectionsPage extends StatefulWidget {
   final VoidCallback onOpenInspection;
   final String? notificationSinistroIdToOpen;
 
-  /// Preparação para o fluxo novo do Chat IA por sinistro.
-  ///
-  /// Se o MainShell ainda usa apenas [onOpenInspection], nada quebra.
-  /// Quando o chat for adaptado para receber sinistroId, basta passar:
-  /// onOpenInspectionById: (sinistroId) => ...
+  /// Abre o chat de um sinistro específico.
   final ValueChanged<String>? onOpenInspectionById;
 
-  /// Abre o chat já em modo retificação (startRetificacaoFromSinistro), em
-  /// vez do fluxo normal de retomar/criar vistoria — usado pelo botão
-  /// "Iniciar Retificação" que só aparece pra vistorias rejeitadas.
+  /// Abre o chat em modo retificação pra um sinistro específico.
   final ValueChanged<String>? onStartRetificacaoById;
 
   const InspectionsPage({
@@ -64,10 +61,6 @@ class _InspectionsPageState extends State<InspectionsPage> {
   final Set<String> _precachedAvatarUrls = <String>{};
   String? _lastOpenedNotificationSinistroId;
 
-  // Snapshot mais recente da lista (antes do filtro de escopo), guardado só
-  // pra ter o que varrer quando o listener de conectividade dispara -- o
-  // stream não necessariamente reemite na hora exata em que a rede volta.
-
   @override
   void didUpdateWidget(covariant InspectionsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -78,6 +71,7 @@ class _InspectionsPageState extends State<InspectionsPage> {
     }
   }
 
+  /// Liga/desliga o modo de busca, limpando o texto ao desligar.
   void _toggleSearch() {
     setState(() {
       _isSearching = !_isSearching;
@@ -89,6 +83,7 @@ class _InspectionsPageState extends State<InspectionsPage> {
     });
   }
 
+  /// Fecha a busca e limpa o texto digitado.
   void _closeSearch() {
     setState(() {
       _isSearching = false;
@@ -97,16 +92,19 @@ class _InspectionsPageState extends State<InspectionsPage> {
     });
   }
 
+  /// Atualiza o texto de busca.
   void _onSearchChanged(String value) {
     setState(() {
       _searchQuery = value;
     });
   }
 
+  /// Normaliza texto pra comparação de busca (minúsculo, só alfanumérico).
   String _normalizeSearchText(String value) {
     return value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
   }
 
+  /// Verifica se a vistoria casa com o texto de busca (placa, modelo ou protocolo).
   bool _matchesSearch(InspectionCase inspection) {
     final query = _normalizeSearchText(_searchQuery);
 
@@ -121,6 +119,7 @@ class _InspectionsPageState extends State<InspectionsPage> {
         protocol.contains(query);
   }
 
+  /// Coleta as fotos de perfil (responsável + visualizadores ativos) de uma lista de vistorias.
   Set<String> _collectPeoplePhotoUrls(List<InspectionCase> inspections) {
     final urls = <String>{};
 
@@ -143,6 +142,7 @@ class _InspectionsPageState extends State<InspectionsPage> {
     return urls;
   }
 
+  /// Pré-carrega no ImageCache as fotos de perfil ainda não carregadas.
   Future<void> _precachePeoplePhotosNow(List<InspectionCase> inspections) async {
     if (!mounted) return;
 
@@ -167,6 +167,7 @@ class _InspectionsPageState extends State<InspectionsPage> {
     await Future.wait(futures);
   }
 
+  /// Agenda o pré-carregamento de fotos de perfil pro próximo frame.
   Future<void> _precachePeoplePhotosAfterFrame(
     List<InspectionCase> inspections,
   ) async {
@@ -186,6 +187,7 @@ class _InspectionsPageState extends State<InspectionsPage> {
     _searchController.dispose();
     super.dispose();
   }
+  /// Retorna o stream de vistorias cacheado, recriando se o credenciadoId mudou.
   Stream<List<InspectionCase>> _getInspectionStream(String credenciadoId) {
   if (_cachedInspectionStream == null ||
       _cachedInspectionCredenciadoId != credenciadoId) {
@@ -196,6 +198,7 @@ class _InspectionsPageState extends State<InspectionsPage> {
   return _cachedInspectionStream!;
 }
 
+/// Troca o filtro de categoria selecionado e rola o carrossel até ele.
 void _changeFilter(InspectionFilter filter) {
   if (_selectedFilter == filter) {
     _scrollFilterCarouselTo(filter);
@@ -209,6 +212,7 @@ void _changeFilter(InspectionFilter filter) {
   _scrollFilterCarouselTo(filter);
 }
 
+/// Centraliza o chip do filtro selecionado no carrossel horizontal.
 void _scrollFilterCarouselTo(InspectionFilter filter) {
   WidgetsBinding.instance.addPostFrameCallback((_) {
     if (!_filterScrollController.hasClients) return;
@@ -245,16 +249,7 @@ void _scrollFilterCarouselTo(InspectionFilter filter) {
     );
   }
 
-  /// "Pendentes" e "Análise" exigem ação que não funciona offline
-  /// (check-in é transação, análise não tem ação nenhuma pro mecânico) --
-  /// somem do carrossel quando fica offline. Se o filtro selecionado for
-  /// um desses, volta pra "Total" pra não deixar a lista filtrada por um
-  /// chip que sumiu da tela.
-  ///
-  /// A reconciliação de ID provisório (`VIS-OFFLINE-...`) saiu daqui -- o
-  /// `BulkSyncCoordinator` (singleton instanciado cedo em `main.dart`) já
-  /// escuta conectividade sozinho e cobre isso em qualquer tela, não só
-  /// com `InspectionsPage` montada. Ver `BulkSyncCoordinator.reconcileAllPendingIds`.
+  /// Volta o filtro pra "Total" se ficar offline com "Pendentes" ou "Análise" selecionado.
   void _handleConnectivityChangedForFilter() {
     if (ArgosConnectivityService.instance.isOnline.value) return;
 
@@ -266,6 +261,7 @@ void _scrollFilterCarouselTo(InspectionFilter filter) {
     setState(() => _selectedFilter = InspectionFilter.all);
   }
 
+  /// Carrega uid, credenciadoId e nome da oficina do usuário logado.
   Future<_CredenciadoContext> _loadCredenciadoContext() async {
     if (FirebaseAuth.instance.currentUser == null) {
       throw const _InspectionAccessException(
@@ -275,9 +271,6 @@ void _scrollFilterCarouselTo(InspectionFilter filter) {
     }
 
     try {
-      // Resolvido (e cacheado em memória para a sessão) pelo
-      // SessionContextService — evita refazer essas leituras toda vez que
-      // esta tela é reaberta.
       final session = await SessionContextService.instance.resolve();
 
       return _CredenciadoContext(
@@ -294,6 +287,7 @@ void _scrollFilterCarouselTo(InspectionFilter filter) {
     }
   }
 
+/// Combina os streams de sinistros e vistorias num único stream de vistorias já enriquecido, com debounce.
 Stream<List<InspectionCase>> _inspectionStream(String credenciadoId) {
   late final StreamController<List<InspectionCase>> controller;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? sinistroSubscription;
@@ -365,6 +359,7 @@ Stream<List<InspectionCase>> _inspectionStream(String credenciadoId) {
   return controller.stream;
 }
 
+/// Anexa a cada vistoria da lista os dados da vistoria vinculada mais recente, se houver.
 List<InspectionCase> _enrichInspectionsWithLinkedVistorias(
   List<InspectionCase> inspections,
   List<LinkedVistoriaInfo> vistorias,
@@ -401,6 +396,7 @@ List<InspectionCase> _enrichInspectionsWithLinkedVistorias(
   }).toList();
 }
 
+/// Converte um snapshot do Firestore numa lista de vistorias ordenada por data agendada.
 List<InspectionCase> _buildInspectionListFromSnapshot(
   QuerySnapshot<Map<String, dynamic>> snapshot,
 ) {
@@ -415,6 +411,7 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
   return inspections;
 }
 
+  /// Abre a tela de resumo de uma vistoria.
   void _openInspectionSummary(InspectionCase inspection) {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -434,20 +431,17 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
     );
   }
 
+  /// Constrói o corpo da tela e dispara o pré-carregamento de avatares em segundo plano.
   Widget _buildInspectionsWithAvatarPreload(
     List<InspectionCase> inspections,
     String credenciadoId,
   ) {
-    // Os avatares são pré-carregados em segundo plano (não bloqueiam o
-    // primeiro render): esperar o download de todas as fotos antes de
-    // mostrar os cards deixava a tela de vistorias visivelmente lenta para
-    // abrir. Cada CircleAvatar/Image já lida com seu próprio placeholder
-    // enquanto a foto chega.
     unawaited(_precachePeoplePhotosAfterFrame(inspections));
 
     return _buildBodyForInspections(inspections, credenciadoId);
   }
 
+  /// Abre a tela de ranking da equipe.
   void _openTeamRanking(String credenciadoId) {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -456,6 +450,7 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
     );
   }
 
+  /// Monta a tela: header com filtros e busca, mais a lista (ou mensagem de estado vazio).
   Widget _buildBodyForInspections(
     List<InspectionCase> inspections,
     String credenciadoId,
@@ -483,10 +478,6 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
       child: Column(
         children: [
           ValueListenableBuilder<bool>(
-            // Ranking da equipe abre uma agregação fresca (MetricsPage),
-            // diferente do placar acima (calculado no cliente a partir do
-            // que já está em cache) -- some sozinho quando fica offline,
-            // sem precisar que o stream de vistorias reemita nada.
             valueListenable: ArgosConnectivityService.instance.isOnline,
             builder: (context, online, _) {
               return _InspectionsHeader(
@@ -500,12 +491,6 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
                   setState(() {
                     _onlyMine = value;
 
-                    // "Pendente" não faz sentido em "Minhas vistorias" --
-                    // atribuição e check-in acontecem juntos na mesma
-                    // transação (claimSinistroForCurrentUser), então nunca
-                    // existe um sinistro meu sem check-in. Se o filtro
-                    // selecionado era esse, volta pra "Todas" pra não ficar
-                    // preso numa categoria que acabou de sumir da tela.
                     if (value && _selectedFilter == InspectionFilter.pending) {
                       _selectedFilter = InspectionFilter.all;
                     }
@@ -584,6 +569,7 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
     );
   }
 
+  /// Abre automaticamente a vistoria indicada pela notificação, se houver uma nova.
   void _maybeOpenNotificationInspection(List<InspectionCase> inspections) {
     final targetId = widget.notificationSinistroIdToOpen?.trim() ?? '';
 
@@ -720,13 +706,13 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
   }
 }
 
+/// Tela de resumo de uma vistoria: dados do veículo, status, presença de outros
+/// visualizadores e ações (check-in, abrir chat, retificação).
 class InspectionSummaryPage extends StatefulWidget {
   final InspectionCase inspection;
   final VoidCallback onOpenChat;
 
-  /// null quando o MainShell ainda não sabe abrir retificação (idem
-  /// onOpenInspectionById) — nesse caso o botão de retificação some, em vez
-  /// de quebrar.
+  /// null quando o botão de retificação deve ficar oculto.
   final VoidCallback? onStartRetificacao;
 
   const InspectionSummaryPage({
@@ -747,8 +733,6 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
   bool _hasShownAssignmentChangeNotice = false;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _inspectionSubscription;
 
-  // Motivo/ajustes da rejeição — vivem no documento da vistoria, não no
-  // sinistro (que é de onde InspectionCase vem), por isso busca separada.
   bool _isLoadingRejeicao = false;
   String? _motivoRejeicao;
   String? _ajustesNecessariosRejeicao;
@@ -764,6 +748,7 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     _loadRejeicaoDetailsIfNeeded();
   }
 
+  /// Busca motivo e ajustes necessários da rejeição, se a vistoria estiver em revisão.
   Future<void> _loadRejeicaoDetailsIfNeeded() async {
     if (!inspection.isRevisionCategory) return;
 
@@ -800,6 +785,7 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     }
   }
 
+  /// Registra presença do usuário como visualizador ativo desta vistoria.
   void _startPresence() {
     SinistroPresenceService.instance
         .startViewing(inspection.id)
@@ -823,6 +809,7 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     super.dispose();
   }
 
+  /// Escuta mudanças em tempo real no sinistro (status, responsável, etc).
   void _watchInspectionRealtime() {
     _inspectionSubscription?.cancel();
 
@@ -859,6 +846,7 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     });
   }
 
+  /// Mostra um snackbar avisando que a vistoria foi vinculada a alguém.
   void _showRealtimeAssignmentNotice(InspectionCase updatedInspection) {
     if (!mounted || _hasShownAssignmentChangeNotice) return;
 
@@ -901,6 +889,7 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     );
   }
 
+  /// Vincula a vistoria ao usuário atual (check-in); exige conexão online.
   Future<void> _registerCheckIn() async {
     if (inspection.checkInAt != null || isCheckingIn) return;
 
@@ -909,10 +898,6 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
       return;
     }
 
-    // Check-in é uma transação que precisa checar conflito de responsável
-    // em tempo real -- diferente de uma escrita comum, não enfileira
-    // sozinha offline (travaria/erraria sem feedback claro). Falha rápido
-    // com uma mensagem clara em vez de deixar tentar.
     if (!ArgosConnectivityService.instance.isOnline.value) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -965,6 +950,7 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     }
   }
 
+  /// Mostra um snackbar avisando que a vistoria está vinculada a outro profissional.
   void _showBlockedByResponsibleSnack() {
     final name = inspection.assignedToName.trim().isEmpty
         ? 'outro profissional'
@@ -980,6 +966,7 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     );
   }
 
+  /// Fecha o resumo e abre o chat da vistoria.
   void _goToChat() {
     if (!inspection.isAssignedToCurrentUser) {
       _showBlockedByResponsibleSnack();
@@ -990,6 +977,7 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     widget.onOpenChat();
   }
 
+  /// Fecha o resumo e abre o chat em modo retificação.
   void _goToRetificacao() {
     if (!inspection.isAssignedToCurrentUser) {
       _showBlockedByResponsibleSnack();
@@ -1011,26 +999,12 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     final canCheckIn =
         !isAssignedToAnother && (!hasCheckIn || !inspection.hasAssignedUser);
     final isHumanAnalysis = inspection.isAiAnalysisCategory;
-    // Vistoria rejeitada não usa o botão de chat comum — ele criaria uma
-    // vistoria nova do zero (findOpenVistoria não acha REJEITADA, cai no
-    // fluxo de vistoria original). O caminho certo é o botão de
-    // retificação abaixo.
-    // Expirada/abandonada não bloqueia o botão comum — o mecânico deve
-    // conseguir começar uma vistoria nova direto por aqui (createOrResume
-    // já cria uma do zero quando não acha nenhuma EM_ANDAMENTO). Isso já
-    // vem de graça agora: expirada/abandonada não conta mais como
-    // isCancelledCategory (ver InspectionCase.primaryCategory), só
-    // cancelamento de verdade (decisão do analista) bloqueia.
     final canOpenChat = hasCheckIn &&
         isAssignedToMe &&
         !isHumanAnalysis &&
         !inspection.isCompletedCategory &&
         !inspection.isCancelledCategory &&
         !inspection.isRevisionCategory &&
-        // Enquanto o ID ainda for provisório (temp-vist-...), a vistoria
-        // ainda não reconciliou pro número sequencial real -- esconde o
-        // botão até isso terminar, em vez de deixar reabrir no meio da
-        // sincronização.
         !inspection.isPendingOfflineSync;
     final canStartRetificacao = isAssignedToMe &&
         inspection.isRevisionCategory &&
@@ -1172,13 +1146,6 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                               const SizedBox(height: 14),
                               const _ChecklistCard(),
                               const SizedBox(height: 20),
-                              // Rejeitada/retificação em andamento: check-in
-                              // já foi feito na vistoria original e o chat
-                              // comum está bloqueado de propósito (ver
-                              // canOpenChat) — mostrar os dois botões aqui só
-                              // criava um 3º botão redundante e sempre
-                              // desabilitado. "Iniciar Retificação" ocupa o
-                              // lugar deles como ação principal.
                               if (canStartRetificacao) ...[
                                 SizedBox(
                                   height: 54,
@@ -1200,12 +1167,6 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                   valueListenable:
                                       ArgosConnectivityService.instance.isOnline,
                                   builder: (context, online, _) {
-                                    // Check-in é transação (não enfileira
-                                    // offline) -- some/desabilita em vez de
-                                    // deixar tocar e falhar sem explicação.
-                                    // Se já tem check-in feito, o botão só
-                                    // mostra o estado passado, não precisa
-                                    // de rede pra isso.
                                     final blockedByOffline =
                                         !online && !hasCheckIn;
 
@@ -1331,6 +1292,7 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
 
 
 
+/// Barra de abas "Resumo" / "Vistorias" da tela de resumo.
 class _SummaryTabHeader extends StatelessWidget {
   const _SummaryTabHeader();
 
@@ -1380,6 +1342,7 @@ class _SummaryTabHeader extends StatelessWidget {
   }
 }
 
+/// Aba "Vistorias": lista o histórico de vistorias vinculadas a um sinistro, com preview.
 class _InspectionHistoryTab extends StatefulWidget {
   final InspectionCase inspection;
 
@@ -1392,6 +1355,7 @@ class _InspectionHistoryTab extends StatefulWidget {
 class _InspectionHistoryTabState extends State<_InspectionHistoryTab> {
   String? _selectedDocId;
 
+  /// Stream das vistorias vinculadas ao sinistro.
   Stream<QuerySnapshot<Map<String, dynamic>>> _historyStream() {
     return FirebaseFirestore.instance
         .collection('vistorias')
@@ -1492,6 +1456,7 @@ class _InspectionHistoryTabState extends State<_InspectionHistoryTab> {
   }
 }
 
+/// Retorna o primeiro item do iterável, ou null se vazio.
 extension _FirstOrNullExtension<T> on Iterable<T> {
   T? get firstOrNull {
     final iterator = this.iterator;
@@ -1500,6 +1465,7 @@ extension _FirstOrNullExtension<T> on Iterable<T> {
   }
 }
 
+/// Card de cabeçalho da aba de histórico: total de vistorias e qual está selecionada.
 class _HistoryHeaderCard extends StatelessWidget {
   final int total;
   final LinkedVistoriaInfo? selected;
@@ -1578,6 +1544,7 @@ class _HistoryHeaderCard extends StatelessWidget {
   }
 }
 
+/// Card de uma vistoria no histórico; expande um preview ao ser selecionado.
 class _HistoryVistoriaCard extends StatelessWidget {
   final LinkedVistoriaInfo vistoria;
   final bool isSelected;
@@ -1652,7 +1619,7 @@ class _HistoryVistoriaCard extends StatelessWidget {
                       [
                         vistoria.statusLabel,
                         vistoria.tipoLabel,
-                        if (vistoria.isEmMassa) 'Envio em massa',
+                        if (vistoria.isEmMassa) 'Tudo de uma vez',
                         if (date != null) _formatDateTime(date),
                       ].join(' • '),
                       style: const TextStyle(
@@ -1711,6 +1678,7 @@ class _HistoryVistoriaCard extends StatelessWidget {
   }
 }
 
+/// Pílula pequena com ícone + valor (contagem de chat, fotos, áudios, laudo).
 class _TinyMetric extends StatelessWidget {
   final IconData icon;
   final String value;
@@ -1753,6 +1721,7 @@ class _TinyMetric extends StatelessWidget {
 
 enum _HistoryPreviewSection { chat, photos, audios, orcamento }
 
+/// Preview expandido de uma vistoria do histórico: chat/orçamento, fotos, áudios e laudo.
 class _HistoryVistoriaPreview extends StatefulWidget {
   final LinkedVistoriaInfo vistoria;
 
@@ -1890,6 +1859,7 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
     );
   }
 
+  /// Retorna o bloco de preview correspondente à seção selecionada.
   Widget _selectedPreviewBlock() {
     switch (_selectedSection) {
       case _HistoryPreviewSection.chat:
@@ -1924,6 +1894,7 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
   }
 }
 
+/// Botão seletor de seção do preview (Chat/Orçamento, Fotos, Áudios).
 class _PreviewSelectorTile extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -2017,6 +1988,7 @@ class _PreviewSelectorTile extends StatelessWidget {
 
 }
 
+/// Preview compacto do chat de uma vistoria; toque expande em um diálogo maior.
 class _MiniChatPreview extends StatelessWidget {
   final LinkedVistoriaInfo vistoria;
 
@@ -2046,6 +2018,7 @@ class _MiniChatPreview extends StatelessWidget {
     );
   }
 
+  /// Abre o preview do chat em um diálogo expandido.
   void _showExpandedChatPreview(
     BuildContext context,
     LinkedVistoriaInfo vistoria,
@@ -2182,6 +2155,7 @@ class _MiniChatPreview extends StatelessWidget {
   }
 }
 
+/// Superfície visual (fundo em gradiente + blur) que lista as bolhas de mensagem.
 class _MiniChatSurface extends StatelessWidget {
   final List<ChatPreviewInfo> messages;
   final String emptyText;
@@ -2247,6 +2221,7 @@ class _MiniChatSurface extends StatelessWidget {
   }
 }
 
+/// Bolha de uma mensagem do chat (texto, foto ou áudio) no preview compacto.
 class _MiniChatBubble extends StatelessWidget {
   final ChatPreviewInfo message;
 
@@ -2334,6 +2309,7 @@ class _MiniChatBubble extends StatelessWidget {
   }
 }
 
+/// Grade de miniaturas das fotos de uma vistoria.
 class _HistoryPhotoPreviewGrid extends StatelessWidget {
   final LinkedVistoriaInfo vistoria;
 
@@ -2363,6 +2339,7 @@ class _HistoryPhotoPreviewGrid extends StatelessWidget {
   }
 }
 
+/// Miniatura de uma foto; toque abre a galeria em tela cheia.
 class _HistoryPhotoThumb extends StatelessWidget {
   final String imageValue;
   final List<String> allPhotos;
@@ -2427,6 +2404,7 @@ class _HistoryPhotoThumb extends StatelessWidget {
   }
 }
 
+/// Galeria em tela cheia para navegar entre as fotos de uma vistoria.
 class _PhotoGalleryDialog extends StatefulWidget {
   final List<String> photos;
   final int initialIndex;
@@ -2514,6 +2492,7 @@ class _PhotoGalleryDialogState extends State<_PhotoGalleryDialog> {
   }
 }
 
+/// Renderiza uma foto de vistoria a partir de URL remota ou base64, com fallback de erro.
 class _HistoryPhotoImage extends StatelessWidget {
   final String value;
   final double? width;
@@ -2563,6 +2542,7 @@ class _HistoryPhotoImage extends StatelessWidget {
   }
 }
 
+/// Decodifica uma string base64 (com ou sem prefixo data URI) em bytes de imagem.
 List<int> _decodeBase64Image(String base64Value) {
   final cleanValue = base64Value.contains(',')
       ? base64Value.split(',').last
@@ -2571,6 +2551,7 @@ List<int> _decodeBase64Image(String base64Value) {
   return base64Decode(cleanValue);
 }
 
+/// Lista os áudios de uma vistoria, ouvindo a subcoleção em tempo real.
 class _HistoryAudioPreviewList extends StatefulWidget {
   final LinkedVistoriaInfo vistoria;
 
@@ -2657,6 +2638,7 @@ class _HistoryAudioPreviewListState extends State<_HistoryAudioPreviewList> {
   }
 }
 
+/// Lista os itens de orçamento de uma vistoria em massa, marcando origem (IA/mecânico).
 class _HistoryOrcamentoPreviewList extends StatelessWidget {
   final LinkedVistoriaInfo vistoria;
 
@@ -2747,6 +2729,7 @@ class _HistoryOrcamentoPreviewList extends StatelessWidget {
   }
 }
 
+/// Tile de áudio reproduzível com play/pause, resolvendo a URL sob demanda.
 class _HistoryAudioTile extends StatefulWidget {
   final String label;
   final String subtitle;
@@ -2942,6 +2925,7 @@ class _HistoryAudioTileState extends State<_HistoryAudioTile> {
   }
 }
 
+/// Placeholder exibido quando uma foto do histórico falha ao carregar/decodificar.
 class _HistoryBrokenPreview extends StatelessWidget {
   final IconData icon;
 
@@ -2962,6 +2946,7 @@ class _HistoryBrokenPreview extends StatelessWidget {
   }
 }
 
+/// Texto simples para seções de preview vazias (sem fotos/áudios/chat).
 class _EmptyPreviewText extends StatelessWidget {
   final String text;
 
@@ -2980,6 +2965,7 @@ class _EmptyPreviewText extends StatelessWidget {
   }
 }
 
+/// Card com título + ícone envolvendo um conteúdo de preview qualquer.
 class _PreviewBlock extends StatelessWidget {
   final String title;
   final IconData icon;
@@ -3028,6 +3014,7 @@ class _PreviewBlock extends StatelessWidget {
   }
 }
 
+/// Bolha de mensagem do chat usada no preview expandido do histórico.
 class _ChatPreviewMessage extends StatelessWidget {
   final ChatPreviewInfo message;
 
@@ -3110,6 +3097,7 @@ class _ChatPreviewMessage extends StatelessWidget {
   }
 }
 
+/// Esqueleto de carregamento da aba de histórico de vistorias.
 class _HistorySkeleton extends StatelessWidget {
   const _HistorySkeleton();
 
@@ -3137,6 +3125,7 @@ class _HistorySkeleton extends StatelessWidget {
 }
 
 
+/// Cabeçalho da tela de Vistorias: título, busca, ranking, seletor de escopo e carrossel de filtros.
 class _InspectionsHeader extends StatelessWidget {
   final int total;
   final Map<InspectionFilter, int> counts;
@@ -3152,10 +3141,7 @@ class _InspectionsHeader extends StatelessWidget {
   final TextEditingController? searchController;
   final ValueChanged<String>? onSearchChanged;
 
-  /// Offline, "Pendentes" e "Análise" somem sozinhos -- pendente exige
-  /// check-in (que exige conexão) pra virar qualquer coisa, e análise não
-  /// tem ação nenhuma pro mecânico fazer offline. Default é a lista
-  /// inteira (online).
+  /// Filtros exibidos no carrossel (default: todos).
   final List<InspectionFilter> availableFilters;
 
   const _InspectionsHeader({
@@ -3263,10 +3249,6 @@ class _InspectionsHeader extends StatelessWidget {
           ),
           const SizedBox(height: 10),
           if (isSearching && searchController != null)
-            // Com o teclado aberto, sobra pouco espaço na tela — esconde o
-            // seletor Oficina/Minhas e o carrossel de categorias enquanto
-            // busca (eles continuam aplicados, só somem da tela) para
-            // deixar o máximo de espaço para os resultados.
             _SearchField(
               controller: searchController!,
               onChanged: onSearchChanged,
@@ -3290,11 +3272,6 @@ class _InspectionsHeader extends StatelessWidget {
                   final filter = filters[index];
                   final isLast = index == filters.length - 1;
 
-                  // "Pendente" não faz sentido em "Minhas vistorias" --
-                  // atribuição e check-in acontecem juntos na mesma
-                  // transação, então nunca existe um sinistro meu sem
-                  // check-in. Em vez de só sumir, encolhe suavemente (e
-                  // volta do mesmo jeito ao trocar pra "Oficina").
                   final hidden = filter == InspectionFilter.pending && onlyMine;
 
                   final card = Padding(
@@ -3330,6 +3307,7 @@ class _InspectionsHeader extends StatelessWidget {
   }
 }
 
+/// Campo de busca por placa, modelo ou protocolo.
 class _SearchField extends StatelessWidget {
   final TextEditingController controller;
   final ValueChanged<String>? onChanged;
@@ -3396,6 +3374,7 @@ class _SearchField extends StatelessWidget {
   }
 }
 
+/// Alternância entre "Minhas vistorias" e "Oficina" (todos os sinistros).
 class _OwnerScopeToggle extends StatelessWidget {
   final bool onlyMine;
   final ValueChanged<bool> onChanged;
@@ -3434,6 +3413,7 @@ class _OwnerScopeToggle extends StatelessWidget {
   }
 }
 
+/// Um dos dois segmentos (lado a lado) do `_OwnerScopeToggle`.
 class _ScopeSegment extends StatelessWidget {
   final String label;
   final IconData icon;
@@ -3484,6 +3464,7 @@ class _ScopeSegment extends StatelessWidget {
   }
 }
 
+/// Card de um filtro de categoria no carrossel, com contagem e estado selecionado.
 class _InspectionFilterCard extends StatelessWidget {
   final InspectionFilter filter;
   final int count;
@@ -3720,6 +3701,7 @@ Color _inspectionUrgencyColor(InspectionCase inspection) {
   return Colors.redAccent;
 }
 
+/// Card de uma vistoria na lista principal da tela de Vistorias.
 class _InspectionCard extends StatefulWidget {
   final InspectionCase inspection;
   final VoidCallback onTap;
@@ -3734,9 +3716,8 @@ class _InspectionCard extends StatefulWidget {
   State<_InspectionCard> createState() => _InspectionCardState();
 }
 
+/// Estado do `_InspectionCard`: escuta a vistoria vinculada mais recente do sinistro.
 class _InspectionCardState extends State<_InspectionCard> {
-  // Criado uma única vez por card (não a cada build), evitando reabrir um
-  // novo listener do Firestore a cada rebuild da lista de vistorias.
   late final Stream<QuerySnapshot<Map<String, dynamic>>> _linkedVistoriaStream =
       FirebaseFirestore.instance
           .collection('vistorias')
@@ -3767,6 +3748,7 @@ class _InspectionCardState extends State<_InspectionCard> {
   }
 }
 
+/// Retorna a vistoria mais recente (por data) dentre os docs do snapshot.
 LinkedVistoriaInfo? _latestLinkedVistoriaFromSnapshot(
   QuerySnapshot<Map<String, dynamic>> snapshot,
 ) {
@@ -3787,6 +3769,7 @@ LinkedVistoriaInfo? _latestLinkedVistoriaFromSnapshot(
   return latest;
 }
 
+/// Conteúdo visual do card de vistoria: avatar, status, chips e badges de presença/sync.
 class _InspectionCardContent extends StatelessWidget {
   final InspectionCase inspection;
   final LinkedVistoriaInfo? linkedVistoria;
@@ -3864,25 +3847,37 @@ class _InspectionCardContent extends StatelessWidget {
                             ),
                           ),
                         ),
-                      // Some sozinho quando a vistoria termina de
-                      // sincronizar (ver `isPendingOfflineSync`).
                       if (inspection.isPendingOfflineSync)
                         Positioned(
                           left: -2,
                           top: -2,
-                          child: Container(
-                            width: 16,
-                            height: 16,
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFB45309),
-                              shape: BoxShape.circle,
-                              border: Border.all(color: Colors.white, width: 2),
-                            ),
-                            child: const Icon(
-                              Icons.cloud_off_rounded,
-                              color: Colors.white,
-                              size: 9,
-                            ),
+                          child: ValueListenableBuilder<Set<String>>(
+                            valueListenable:
+                                BulkSyncCoordinator.instance.syncingVistoriaIds,
+                            builder: (context, syncingIds, _) {
+                              final isSyncingNow = syncingIds
+                                  .contains(inspection.vistoriaAtualId.trim());
+
+                              return Container(
+                                width: 16,
+                                height: 16,
+                                decoration: BoxDecoration(
+                                  color: isSyncingNow
+                                      ? const Color(0xFF0057C0)
+                                      : const Color(0xFFB45309),
+                                  shape: BoxShape.circle,
+                                  border:
+                                      Border.all(color: Colors.white, width: 2),
+                                ),
+                                child: Icon(
+                                  isSyncingNow
+                                      ? Icons.sync_rounded
+                                      : Icons.cloud_off_rounded,
+                                  color: Colors.white,
+                                  size: 9,
+                                ),
+                              );
+                            },
                           ),
                         ),
                     ],
@@ -3930,9 +3925,22 @@ class _InspectionCardContent extends StatelessWidget {
                     color: inspection.priority.color,
                   ),
                   if (inspection.isPendingOfflineSync)
-                    const _StatusChip(
-                      label: 'Offline',
-                      color: Color(0xFFB45309),
+                    ValueListenableBuilder<Set<String>>(
+                      valueListenable:
+                          BulkSyncCoordinator.instance.syncingVistoriaIds,
+                      builder: (context, syncingIds, _) {
+                        final isSyncingNow = syncingIds
+                            .contains(inspection.vistoriaAtualId.trim());
+
+                        return _StatusChip(
+                          label: isSyncingNow
+                              ? 'Sincronizando...'
+                              : 'Offline',
+                          color: isSyncingNow
+                              ? const Color(0xFF0057C0)
+                              : const Color(0xFFB45309),
+                        );
+                      },
                     ),
                 ],
               ),
@@ -3998,6 +4006,7 @@ class _InspectionCardContent extends StatelessWidget {
   }
 }
 
+/// Card com o valor e o PDF do orçamento aprovado da vistoria.
 class _OrcamentoAprovadoCard extends StatelessWidget {
   final InspectionCase inspection;
 
@@ -4081,6 +4090,7 @@ class _OrcamentoAprovadoCard extends StatelessWidget {
   }
 }
 
+/// Aviso de que a vistoria está em análise humana.
 class _HumanAnalysisNotice extends StatelessWidget {
   const _HumanAnalysisNotice();
 
@@ -4119,6 +4129,7 @@ class _HumanAnalysisNotice extends StatelessWidget {
   }
 }
 
+/// Barra mostrando quem mais está visualizando o sinistro agora.
 class SinistroViewersBar extends StatelessWidget {
   final String sinistroId;
 
@@ -4172,6 +4183,7 @@ class SinistroViewersBar extends StatelessWidget {
   }
 }
 
+/// Banner indicando a quem a vistoria está vinculada (você ou outro profissional).
 class _SummaryAssignmentBanner extends StatelessWidget {
   final InspectionCase inspection;
 
@@ -4237,6 +4249,7 @@ class _SummaryAssignmentBanner extends StatelessWidget {
   }
 }
 
+/// Banner com motivo e ajustes necessários de uma vistoria rejeitada.
 class _RejeicaoBanner extends StatelessWidget {
   final bool isLoading;
   final String? motivo;
@@ -4324,6 +4337,7 @@ class _RejeicaoBanner extends StatelessWidget {
   }
 }
 
+/// Selo compacto indicando a quem a vistoria está vinculada.
 class _AssignedToBadge extends StatelessWidget {
   final InspectionCase inspection;
 
@@ -4371,6 +4385,7 @@ class _AssignedToBadge extends StatelessWidget {
   }
 }
 
+/// Selo mostrando quem mais está visualizando a vistoria agora.
 class _ActiveViewersBadge extends StatelessWidget {
   final List<SinistroViewer> viewers;
 
@@ -4412,6 +4427,7 @@ class _ActiveViewersBadge extends StatelessWidget {
   }
 }
 
+/// Pilha de avatares sobrepostos dos visualizadores ativos.
 class _ViewerAvatarStack extends StatelessWidget {
   final List<SinistroViewer> viewers;
   final bool small;
@@ -4449,6 +4465,7 @@ class _ViewerAvatarStack extends StatelessWidget {
   }
 }
 
+/// Busca a vistoria vinculada a um sinistro e renderiza seu card-resumo.
 class _LinkedVistoriaSummaryForInspection extends StatefulWidget {
   final String sinistroId;
 
@@ -4487,6 +4504,7 @@ class _LinkedVistoriaSummaryForInspectionState
   }
 }
 
+/// Card-resumo de uma vistoria vinculada: status, métricas e preview de evidência.
 class _LinkedVistoriaSummaryCard extends StatelessWidget {
   final LinkedVistoriaInfo vistoria;
 
@@ -4619,6 +4637,7 @@ class _LinkedVistoriaSummaryCard extends StatelessWidget {
   }
 }
 
+/// Seção com os dados da vistoria vinculada e atalho para abrir o resumo completo.
 class _LinkedVistoriaPage extends StatelessWidget {
   final LinkedVistoriaInfo vistoria;
   final VoidCallback onOpenSummary;
@@ -4748,6 +4767,7 @@ class _LinkedVistoriaPage extends StatelessWidget {
   }
 }
 
+/// Mostra as tiras de preview de fotos e áudios lado a lado (ou um aviso se vazio).
 class _EvidencePreviewBlock extends StatelessWidget {
   final LinkedVistoriaInfo vistoria;
 
@@ -4806,6 +4826,7 @@ class _EvidencePreviewBlock extends StatelessWidget {
   }
 }
 
+/// Tira horizontal de miniaturas de fotos (base64) de uma vistoria.
 class _PhotoPreviewStrip extends StatelessWidget {
   final int total;
   final List<String> previews;
@@ -4857,6 +4878,7 @@ class _PhotoPreviewStrip extends StatelessWidget {
   }
 }
 
+/// Decodifica e renderiza uma miniatura a partir de uma string base64.
 class _Base64PhotoPreview extends StatelessWidget {
   final String base64Value;
 
@@ -4889,6 +4911,7 @@ class _Base64PhotoPreview extends StatelessWidget {
   }
 }
 
+/// Lista compacta (até 2) dos áudios de preview de uma vistoria.
 class _AudioPreviewStrip extends StatelessWidget {
   final int total;
   final List<AudioPreviewInfo> previews;
@@ -4940,6 +4963,7 @@ class _AudioPreviewStrip extends StatelessWidget {
   }
 }
 
+/// Pílula com o nome de um áudio de preview.
 class _AudioPreviewPill extends StatelessWidget {
   final AudioPreviewInfo preview;
 
@@ -4974,6 +4998,7 @@ class _AudioPreviewPill extends StatelessWidget {
   }
 }
 
+/// Texto pequeno de "sem prévia" dentro de uma tira de evidência.
 class _EvidenceEmptyHint extends StatelessWidget {
   final String text;
 
@@ -4994,6 +5019,7 @@ class _EvidenceEmptyHint extends StatelessWidget {
   }
 }
 
+/// Placeholder para uma miniatura de evidência que falhou ao carregar.
 class _BrokenEvidencePreview extends StatelessWidget {
   final IconData icon;
 
@@ -5013,6 +5039,7 @@ class _BrokenEvidencePreview extends StatelessWidget {
   }
 }
 
+/// Tile com ícone + valor para uma métrica da vistoria (chat/fotos/áudios).
 class _VistoriaMetric extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -5082,6 +5109,7 @@ class _VistoriaMetric extends StatelessWidget {
 }
 
 
+/// Barra superior da tela de resumo: voltar, título e chip de status.
 class _SummaryTopBar extends StatelessWidget {
   final InspectionCase inspection;
   final VoidCallback onBack;
@@ -5127,6 +5155,7 @@ class _SummaryTopBar extends StatelessWidget {
   }
 }
 
+/// Card de destaque no topo do resumo: veículo, placa e tags rápidas.
 class _SummaryHeroCard extends StatelessWidget {
   final InspectionCase inspection;
 
@@ -5209,6 +5238,7 @@ class _SummaryHeroCard extends StatelessWidget {
   }
 }
 
+/// Tag pequena "rótulo: valor" usada no `_SummaryHeroCard`.
 class _MiniHeroTag extends StatelessWidget {
   final String label;
   final String value;
@@ -5249,6 +5279,7 @@ class _MiniHeroTag extends StatelessWidget {
   }
 }
 
+/// Card genérico com título, ícone e lista de widgets filhos.
 class _SectionCard extends StatelessWidget {
   final String title;
   final IconData icon;
@@ -5280,6 +5311,7 @@ class _SectionCard extends StatelessWidget {
   }
 }
 
+/// Card genérico com título, ícone e um bloco de texto.
 class _TextSectionCard extends StatelessWidget {
   final String title;
   final IconData icon;
@@ -5320,6 +5352,7 @@ class _TextSectionCard extends StatelessWidget {
   }
 }
 
+/// Card com o checklist sugerido de passos da vistoria.
 class _ChecklistCard extends StatelessWidget {
   const _ChecklistCard();
 
@@ -5380,6 +5413,7 @@ class _ChecklistCard extends StatelessWidget {
   }
 }
 
+/// Título com ícone usado no cabeçalho de cada seção/card.
 class _SectionTitle extends StatelessWidget {
   final String title;
   final IconData icon;
@@ -5407,6 +5441,7 @@ class _SectionTitle extends StatelessWidget {
   }
 }
 
+/// Linha "rótulo: valor" usada nos cards de dados do resumo.
 class _InfoRow extends StatelessWidget {
   final String label;
   final String value;
@@ -5451,6 +5486,7 @@ class _InfoRow extends StatelessWidget {
   }
 }
 
+/// Chip de status/prioridade colorido, usado em vários lugares da tela.
 class _StatusChip extends StatelessWidget {
   final String label;
   final Color color;
@@ -5477,6 +5513,7 @@ class _StatusChip extends StatelessWidget {
   }
 }
 
+/// Mensagem de estado (vazio, erro) com ícone, título e ação opcional.
 class _StateMessage extends StatefulWidget {
   final IconData icon;
   final String title;
@@ -5503,8 +5540,6 @@ class _StateMessageState extends State<_StateMessage> {
   void initState() {
     super.initState();
 
-    // Um frame de respiro antes de entrar, para não competir com a troca
-    // de tela que trouxe esse estado vazio até aqui.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) setState(() => _visible = true);
     });
@@ -5624,14 +5659,10 @@ class _IllustratedBadge extends StatelessWidget {
   }
 }
 
+/// Esqueleto de carregamento da tela de Vistorias (cabeçalho + cards fake).
 class _InspectionsSkeleton extends StatelessWidget {
   const _InspectionsSkeleton();
 
-  // Callbacks vazios de propósito: nesta fase de carregamento o
-  // credenciadoId ainda não foi resolvido, então os toques não fazem
-  // nada — mas o cabeçalho continua com exatamente a mesma estrutura do
-  // cabeçalho real (busca, ranking, seletor Oficina/Minhas), evitando o
-  // "pulo" visual quando os dados terminam de carregar.
   static void _noop() {}
   static void _noopBool(bool _) {}
 
@@ -5663,6 +5694,7 @@ class _InspectionsSkeleton extends StatelessWidget {
   }
 }
 
+/// Card fake (shimmer) usado enquanto a lista de vistorias ainda carrega.
 class _InspectionSkeletonCard extends StatelessWidget {
   const _InspectionSkeletonCard();
 
@@ -5733,6 +5765,7 @@ class _InspectionSkeletonCard extends StatelessWidget {
   }
 }
 
+/// Retângulo cinza genérico usado para compor skeletons de carregamento.
 class _SkeletonBox extends StatelessWidget {
   final double width;
   final double height;
@@ -5757,6 +5790,7 @@ class _SkeletonBox extends StatelessWidget {
   }
 }
 
+/// Verifica se o valor de imagem é uma URL remota (http/https) em vez de base64.
 bool _isRemoteImageValue(String value) {
   final normalized = value.trim().toLowerCase();
 
@@ -5764,6 +5798,7 @@ bool _isRemoteImageValue(String value) {
       normalized.startsWith('https://');
 }
 
+/// Dados do usuário/oficina logados, resolvidos uma vez ao abrir a tela.
 class _CredenciadoContext {
   final String uid;
   final String credenciadoId;
@@ -5776,6 +5811,7 @@ class _CredenciadoContext {
   });
 }
 
+/// Erro de acesso (sem login ou sem oficina vinculada) ao carregar vistorias.
 class _InspectionAccessException implements Exception {
   final String title;
   final String message;
@@ -5786,6 +5822,7 @@ class _InspectionAccessException implements Exception {
   });
 }
 
+/// Formata data e hora como "dd/mm/aaaa às hh:mm".
 String _formatDateTime(DateTime dateTime) {
   final day = dateTime.day.toString().padLeft(2, '0');
   final month = dateTime.month.toString().padLeft(2, '0');
@@ -5796,6 +5833,7 @@ String _formatDateTime(DateTime dateTime) {
   return '$day/$month/$year às $hour:$minute';
 }
 
+/// Formata apenas o horário como "hh:mm".
 String _formatTime(DateTime dateTime) {
   final hour = dateTime.hour.toString().padLeft(2, '0');
   final minute = dateTime.minute.toString().padLeft(2, '0');
@@ -5803,6 +5841,7 @@ String _formatTime(DateTime dateTime) {
   return '$hour:$minute';
 }
 
+/// Avatar circular com foto de rede e fallback de ícone, com fade de entrada.
 class _FastPersonAvatar extends StatelessWidget {
   final String photoURL;
   final double radius;
@@ -5845,9 +5884,6 @@ class _FastPersonAvatar extends StatelessWidget {
 
                 return Icon(icon, size: radius, color: iconColor);
               },
-              // Se a foto já estava no ImageCache (pré-carregada na
-              // splash), pinta na hora. Senão, entra com um fade em vez de
-              // "estourar" de repente por cima do círculo vazio.
               frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
                 if (wasSynchronouslyLoaded) return child;
 
