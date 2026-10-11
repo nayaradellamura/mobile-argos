@@ -22,8 +22,9 @@ O TCC é dividido em três partes; este repositório é só o app mobile.
 | Parte | Onde vive | O que faz |
 |---|---|---|
 | Painel web | repo separado (Next.js) | seguradora simula o FNOL, despacha vistorias, acompanha o Kanban de sinistros, revisa/aprova laudos |
-| **App mobile (este repo)** | Flutter, Android | check-in da vistoria, chat com IA guiando a coleta de fotos/áudio, acompanhamento dos sinistros atribuídos |
-| Backend serverless | Cloud Functions + Vertex AI | processamento de áudio/imagem, geração do laudo, notificações push |
+| **App mobile (este repo)** | Flutter, Android | check-in da vistoria, coleta de evidências (guiada por IA ou tudo de uma vez), acompanhamento dos sinistros atribuídos |
+| Backend serverless | Cloud Functions | processamento de áudio/imagem, notificações push, orquestração de status |
+| Geração de laudo | Cloud Run (`services/laudo-service`) | gera o laudo técnico e o orçamento aprovado (PDF) a partir das evidências, usando Gemini |
 
 ### Fluxo principal no app
 
@@ -31,9 +32,9 @@ O TCC é dividido em três partes; este repositório é só o app mobile.
 2. Conclusão do perfil e vinculação com a oficina credenciada.
 3. Listagem dos sinistros atribuídos ao mecânico.
 4. Check-in da vistoria.
-5. Chat guiado por IA vinculado ao sinistro.
-6. Registro de fotos, áudios e mensagens de texto.
-7. Processamento do áudio com IA e envio do laudo pro backend.
+5. Coleta das evidências em dois modos: **passo a passo** (chat guiado por IA, foto a foto) ou **enviar tudo de uma vez** (fotos, áudios, texto e orçamento soltos, sem conversa). Funciona offline — o que for coletado sem rede sincroniza sozinho quando ela voltar.
+6. Processamento das evidências e geração do laudo técnico pelo `services/laudo-service`.
+7. Se a seguradora rejeitar o laudo, o mecânico recebe uma **retificação** (correção pontual, sempre pelo modo passo a passo).
 
 ## Baixe o app para testar
 
@@ -67,6 +68,7 @@ A configuração do Firebase (`google-services.json`, `firebase_options.dart`) j
 - `android/`: projeto Android nativo
 - `assets/`: imagens e ícones do app
 - `functions/`: Firebase Cloud Functions (backend serverless)
+- `services/laudo-service/`: serviço Cloud Run que gera o laudo técnico e o orçamento em PDF
 - `.github/workflows/`: pipelines de build/release/patch (CI)
 - `firebase.json`: configuração do projeto Firebase
 - `pubspec.yaml`: dependências Flutter
