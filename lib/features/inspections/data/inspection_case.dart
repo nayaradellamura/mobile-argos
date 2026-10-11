@@ -6,6 +6,7 @@ import '../../../services/sinistro_presence_service.dart';
 import '../../../services/vistoria_chat_session_service.dart';
 import 'inspection_parsing_utils.dart';
 
+// Status cru do sinistro, como vem do Firestore.
 enum InspectionStatus {
   pending,
   inProgress,
@@ -16,7 +17,9 @@ enum InspectionStatus {
   cancelled,
 }
 
+// Parsing, labels e cores de exibição para InspectionStatus.
 extension InspectionStatusX on InspectionStatus {
+  // Mapeia o texto cru do Firestore pro enum, tolerando variações de escrita.
   static InspectionStatus fromFirestore(dynamic value) {
     final normalized = normalizeStatusText(value);
 
@@ -111,10 +114,9 @@ extension InspectionStatusX on InspectionStatus {
   }
 }
 
-// Ordem de RESOLUÇÃO (não é a ordem de exibição dos chips -- ver
-// InspectionFilter, que define a ordem que aparece na tela): do estado
-// mais definitivo pro mais preliminar. Usada por InspectionCase.primaryCategory
-// pra decidir qual categoria vence quando mais de uma condição bate.
+// Categoria resolvida do sinistro, da mais definitiva pra mais preliminar;
+// usada por InspectionCase.primaryCategory (ordem de exibição fica em
+// InspectionFilter).
 enum InspectionLifecycleCategory {
   completed,
   cancelled,
@@ -124,8 +126,10 @@ enum InspectionLifecycleCategory {
   pending,
 }
 
+// Prioridade do sinistro (baixa/média/alta).
 enum InspectionPriority { low, medium, high }
 
+// Parsing, labels e cores de exibição para InspectionPriority.
 extension InspectionPriorityX on InspectionPriority {
   static InspectionPriority fromFirestore(dynamic value) {
     final normalized = normalizeStatusText(value);
@@ -166,6 +170,7 @@ extension InspectionPriorityX on InspectionPriority {
   }
 }
 
+// Dados do veículo vinculado ao sinistro.
 class VehicleInfo {
   final String plate;
   final String model;
@@ -218,6 +223,7 @@ class VehicleInfo {
   }
 }
 
+// Dados do proprietário/cliente do sinistro.
 class OwnerInfo {
   final String name;
   final String document;
@@ -247,6 +253,7 @@ class OwnerInfo {
   }
 }
 
+// Dados do credenciado/oficina responsável pelo sinistro.
 class WorkshopInfo {
   final String name;
   final String address;
@@ -278,6 +285,8 @@ class WorkshopInfo {
   }
 }
 
+// Modelo principal de um sinistro/vistoria, com todos os dados carregados
+// do Firestore.
 class InspectionCase {
   final String id;
   final String protocol;
@@ -337,6 +346,7 @@ class InspectionCase {
     this.orcamentoAprovadoValorTotal = 0,
   });
 
+  // Constrói a partir de um documento do Firestore.
   factory InspectionCase.fromFirestore(
     DocumentSnapshot<Map<String, dynamic>> doc,
   ) {
@@ -406,15 +416,8 @@ class InspectionCase {
     return assignedUid.isNotEmpty && assignedUid != currentUid;
   }
 
-  // Única fonte da verdade pra categoria de um sinistro -- antes, cada
-  // isXCategory calculava sua própria condição de forma independente, o que
-  // deixava sobrepor categorias (ex: isRevisionCategory e isCancelledCategory
-  // podiam vir `true` juntas se `status` e `vistoriaAtualStatus`, dois campos
-  // escritos por caminhos diferentes, ficassem dessincronizados por um
-  // instante) -- o card contava em dois filtros ao mesmo tempo e podia
-  // mostrar um selo diferente do filtro em que estava. Agora é uma escada só,
-  // do estado mais definitivo pro mais preliminar: a primeira condição que
-  // bater vence, ninguém mais é checado (ver conversa de redesign 2026-10-02).
+  // Única fonte da verdade pra categoria do sinistro: percorre as condições
+  // da mais definitiva pra mais preliminar, a primeira que bater vence.
   InspectionLifecycleCategory get primaryCategory {
     if (_isApproved) return InspectionLifecycleCategory.completed;
     if (_isCancelledOnly) return InspectionLifecycleCategory.cancelled;
@@ -424,8 +427,7 @@ class InspectionCase {
     return InspectionLifecycleCategory.pending;
   }
 
-  // "finalizada" no STATUS da vistoria é o valor real gravado quando a
-  // aprovação acontece — não é um estágio intermediário de análise.
+  // Vistoria aprovada/finalizada.
   bool get _isApproved {
     final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
 
@@ -439,11 +441,8 @@ class InspectionCase {
         vistoriaStatus.contains('finalized');
   }
 
-  // Só cancelamento de verdade (decisão do analista) -- expirada/abandonada
-  // migraram pra "Andamento" (ver _isExpiredOrAbandoned/isInProgressCategory):
-  // não são uma decisão de ninguém, são só "essa tentativa parou e o
-  // mecânico pode simplesmente começar de novo", o que é conceitualmente
-  // muito mais perto de "ainda em aberto" do que de "encerrado".
+  // Cancelamento de verdade (decisão do analista) -- expirada/abandonada
+  // contam como Andamento, não como cancelado.
   bool get _isCancelledOnly {
     final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
 
@@ -453,11 +452,8 @@ class InspectionCase {
         vistoriaStatus.contains('cancelled');
   }
 
-  // Só rejeitada AGORA -- uma retificação que o mecânico já começou a
-  // trabalhar (EM_ANDAMENTO) não conta mais como "em revisão", conta como
-  // "em andamento" (é literalmente o mesmo status de qualquer vistoria
-  // sendo feita). "Revisão" passa a significar só "precisa agir", não
-  // "história passou por uma rejeição algum dia".
+  // Rejeitada agora -- uma retificação já retomada (EM_ANDAMENTO) conta como
+  // Andamento, não como Revisão.
   bool get _isRejectedNow {
     final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
 
@@ -467,12 +463,8 @@ class InspectionCase {
         vistoriaStatus.contains('rejected');
   }
 
-  // Lista FECHADA de valores que significam análise -- antes tinha um
-  // coringa ("qualquer vistoriaAtualStatus não vazio que não contém
-  // 'andamento'") que jogava qualquer status não mapeado (typo, valor novo
-  // do backend) pra "Análise" por acidente. Agora um status desconhecido cai
-  // em Andamento/Pendente (conforme checkInAt), nunca mais finge ser análise
-  // sem ser.
+  // Em análise de IA/operacional -- lista fechada de status conhecidos
+  // (status desconhecido cai em Andamento/Pendente, nunca em Análise).
   bool get _isInAnalysis {
     final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
 
@@ -502,11 +494,7 @@ class InspectionCase {
   bool get isPendingCategory =>
       primaryCategory == InspectionLifecycleCategory.pending;
 
-  // Badge de status mostrado nos cards/resumo do sinistro. Não pode usar só
-  // `status.label` (o status CRU do sinistro): cancelamento/revisão só
-  // ficam gravados em vistoriaAtualStatus (denormalizado pela vistoria), o
-  // sinistro em si segue "EM_ANDAMENTO" — sem isso o card mostra "Em
-  // andamento" pra uma vistoria já cancelada.
+  // Texto do selo de status mostrado nos cards/resumo do sinistro.
   String get displayStatusLabel {
     switch (primaryCategory) {
       case InspectionLifecycleCategory.cancelled:
@@ -526,6 +514,7 @@ class InspectionCase {
     }
   }
 
+  // Cor do selo de status mostrado nos cards/resumo do sinistro.
   Color get displayStatusColor {
     switch (primaryCategory) {
       case InspectionLifecycleCategory.cancelled:
@@ -545,6 +534,7 @@ class InspectionCase {
     }
   }
 
+  // Vistoria expirou por inatividade.
   bool get _isExpired {
     final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
 
@@ -553,6 +543,7 @@ class InspectionCase {
         vistoriaStatus.contains('expired');
   }
 
+  // Vistoria foi abandonada.
   bool get _isAbandoned {
     final vistoriaStatus = normalizeStatusText(vistoriaAtualStatus);
 
@@ -560,22 +551,17 @@ class InspectionCase {
         vistoriaStatus.contains('abandonado');
   }
 
-  // Expirou por inatividade (24h úteis) ou foi abandonada -- continua
-  // existindo como sinalizador à parte (não é mais uma categoria de filtro
-  // própria, ver primaryCategory) porque ainda é útil pra decisão de
-  // negócio em outros lugares (ex: VistoriaChatSessionService) e pro selo
-  // "Expirada"/"Abandonada" dentro da categoria Andamento.
+  // Expirada por inatividade ou abandonada -- usado fora da categorização
+  // principal (ex: VistoriaChatSessionService) e pro selo dentro de Andamento.
   bool get isExpiredOrAbandonedCategory => _isExpired || _isAbandoned;
 
-  /// A vistoria atual foi criada/está sendo processada 100% offline (ID
-  /// provisório, ver `VistoriaChatSessionService.createVistoriaOffline`) --
-  /// ainda não tem o número sequencial real nem terminou de subir pro
-  /// Storage. Some sozinho quando a vistoria termina de sincronizar
-  /// (reconciliação troca `vistoriaAtualId` pelo ID real).
+  // True enquanto a vistoria atual tem ID provisório (criada offline, ainda
+  // não reconciliada com o ID sequencial real).
   bool get isPendingOfflineSync => vistoriaAtualId
       .trim()
       .startsWith(VistoriaChatSessionService.pendingVistoriaIdPrefix);
 
+  // Clona o case trocando os campos informados.
   InspectionCase copyWith({
     InspectionStatus? status,
     DateTime? checkInAt,
@@ -623,6 +609,7 @@ class InspectionCase {
   }
 }
 
+// Monta o texto de modelo do veículo, evitando duplicar a marca.
 String _buildVehicleModel(String brand, String model) {
   final cleanBrand = brand.trim();
   final cleanModel = model.trim();
@@ -642,6 +629,7 @@ String _buildVehicleModel(String brand, String model) {
   return '$cleanBrand $cleanModel';
 }
 
+// Monta o endereço formatado do credenciado.
 String _formatWorkshopAddress(Map<String, dynamic> snapshot) {
   final address = stringValue(snapshot['address']);
   final city = stringValue(snapshot['city']);
@@ -659,6 +647,7 @@ String _formatWorkshopAddress(Map<String, dynamic> snapshot) {
   return '$address - $cityUf';
 }
 
+// Converte a lista crua do Firestore em SinistroViewer.
 List<SinistroViewer> _parseSinistroViewers(dynamic value) {
   if (value is! List) return const [];
 

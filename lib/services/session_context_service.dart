@@ -29,17 +29,8 @@ class NoCredenciadoLinkedException implements Exception {
   const NoCredenciadoLinkedException();
 }
 
-/// Resolve e mantém em cache — em memória, pela duração do processo do
-/// app — o contexto de sessão do usuário (uid, nome, e a oficina/
-/// credenciado a que pertence).
-///
-/// Antes deste serviço existir, a mesma descoberta ("a qual oficina esse
-/// usuário pertence") era refeita do zero, com até 3 leituras sequenciais
-/// no Firestore, toda vez que uma tela precisava dela — em
-/// `InspectionsPage` e de novo, de forma independente, em
-/// `VistoriaChatSessionService`. Como esse dado quase nunca muda durante
-/// uma sessão de uso, resolver uma vez e reaproveitar entre telas corta
-/// esse tempo de carregamento sem risco de mostrar dado desatualizado.
+/// Resolve e mantém em cache em memória o contexto de sessão do usuário
+/// logado (uid, nome, e a oficina/credenciado a que pertence).
 class SessionContextService {
   SessionContextService._();
 
@@ -50,15 +41,8 @@ class SessionContextService {
   String? _cachedForUid;
 
   /// Retorna o contexto do usuário logado, reaproveitando o cache em
-  /// memória quando possível.
-  ///
-  /// - Se o uid autenticado mudar (troca de conta/login de outro usuário
-  ///   no mesmo aparelho), o cache é descartado automaticamente.
-  /// - Chamadas concorrentes enquanto a primeira resolução ainda está em
-  ///   andamento reaproveitam a mesma requisição em vez de disparar
-  ///   leituras duplicadas no Firestore.
-  /// - Passe [forceRefresh] depois de uma edição de perfil que possa ter
-  ///   mudado o credenciado vinculado.
+  /// memória (descartado se o uid autenticado mudar) e deduplicando
+  /// chamadas concorrentes. Passe [forceRefresh] para forçar nova leitura.
   Future<UserSessionContext> resolve({bool forceRefresh = false}) {
     final currentUid = FirebaseAuth.instance.currentUser?.uid;
 
@@ -129,15 +113,9 @@ class SessionContextService {
 
     final usersCollection = FirebaseFirestore.instance.collection('users');
 
-    // Documentos de "users" são gravados com o e-mail normalizado como id
-    // (ver login_page.dart), então checar por e-mail primeiro evita uma
-    // leitura desperdiçada na maioria dos casos.
     Map<String, dynamic> userData = {};
 
     if (email.isNotEmpty) {
-      // Tenta o cache local do Firestore antes do servidor: se o app já
-      // resolveu esse usuário numa sessão anterior, isso volta quase
-      // instantâneo, sem depender da rede.
       userData = await _getDataCacheFirst(usersCollection.doc(email));
     }
 
@@ -153,10 +131,6 @@ class SessionContextService {
     );
 
     if (credenciadoId.isEmpty) {
-      // Mesma trava de "não tenta rede com certeza nenhuma offline" do
-      // `_getDataCacheFirst` -- sem conexão e sem nada em cache pra essa
-      // consulta específica, insistir só pendura a tela esperando um
-      // servidor que não dá pra alcançar.
       if (!ArgosConnectivityService.instance.isOnline.value) {
         throw const NoCredenciadoLinkedException();
       }
@@ -204,15 +178,8 @@ class SessionContextService {
       if (cached.exists) {
         return cached.data() ?? {};
       }
-    } catch (_) {
-      // Sem cache local ainda — segue para a leitura normal (servidor).
-    }
+    } catch (_) {}
 
-    // Bug real, achado testando offline: sem conexão E sem nada em cache
-    // pra essa doc específica, um `.get()` padrão pode ficar pendurado
-    // (não desiste rápido) -- travava a tela inteira em "Preparando
-    // sessão..." pra sempre. Falha rápido em vez de insistir com um
-    // servidor inalcançável.
     if (!ArgosConnectivityService.instance.isOnline.value) {
       return {};
     }

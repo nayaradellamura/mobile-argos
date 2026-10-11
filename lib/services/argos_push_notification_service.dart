@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 
 import '../firebase_options.dart';
 
+/// Handler de mensagem FCM recebida com o app em background/fechado.
 @pragma('vm:entry-point')
 Future<void> argosFirebaseMessagingBackgroundHandler(
   RemoteMessage message,
@@ -22,17 +23,9 @@ Future<void> argosFirebaseMessagingBackgroundHandler(
   debugPrint('FCM background message: ${message.messageId}');
 }
 
-/// Serviço de notificações push do Argos.
-///
-/// Esta versão usa somente firebase_messaging para evitar conflitos de API
-/// com flutter_local_notifications.
-///
-/// O que ela faz:
-/// - pede permissão de notificação;
-/// - salva o token FCM em userDevices/{uid}/tokens/{tokenId};
-/// - atualiza o token quando ele muda;
-/// - escuta mensagens em foreground/background;
-/// - prepara o sinistroId recebido na notificação para navegação futura.
+/// Serviço de notificações push: pede permissão, salva/atualiza o token FCM
+/// em `userDevices/{uid}/tokens/{tokenId}`, escuta mensagens em
+/// foreground/background e expõe o sinistroId recebido para navegação.
 class ArgosPushNotificationService {
   ArgosPushNotificationService._();
 
@@ -49,6 +42,7 @@ class ArgosPushNotificationService {
   bool _initialized = false;
   bool _listeningTokenRefresh = false;
 
+  /// Configura o handler de background e inicia permissão + listeners.
   Future<void> initialize() async {
     if (_initialized) return;
 
@@ -65,6 +59,7 @@ class ArgosPushNotificationService {
     _initialized = true;
   }
 
+  /// Solicita permissão de notificação ao sistema.
   Future<void> _requestPermission() async {
     final settings = await _messaging.requestPermission(
       alert: true,
@@ -79,6 +74,7 @@ class ArgosPushNotificationService {
     debugPrint('Permissão FCM: ${settings.authorizationStatus}');
   }
 
+  /// Habilita alerta/badge/som para notificação recebida com app aberto.
   Future<void> _configureForegroundPresentation() async {
     await _messaging.setForegroundNotificationPresentationOptions(
       alert: true,
@@ -87,6 +83,8 @@ class ArgosPushNotificationService {
     );
   }
 
+  /// Escuta mensagens recebidas com o app em foreground e expõe a
+  /// notificação em [foregroundNotification] por alguns segundos.
   void _listenForegroundMessages() {
     FirebaseMessaging.onMessage.listen((message) {
       final notification = ArgosAppNotification.fromRemoteMessage(message);
@@ -106,6 +104,7 @@ class ArgosPushNotificationService {
     });
   }
 
+  /// Escuta o app sendo aberto a partir do toque numa notificação.
   void _listenNotificationOpenedApp() {
     FirebaseMessaging.onMessageOpenedApp.listen((message) {
       final sinistroId = _sinistroIdFromMessage(message);
@@ -118,6 +117,7 @@ class ArgosPushNotificationService {
     });
   }
 
+  /// Checa se o app foi iniciado do zero a partir de uma notificação.
   Future<void> _handleInitialMessage() async {
     final initialMessage = await _messaging.getInitialMessage();
 
@@ -132,10 +132,12 @@ class ArgosPushNotificationService {
     }
   }
 
+  /// Limpa a notificação em exibição no foreground.
   void clearForegroundNotification() {
     foregroundNotification.value = null;
   }
 
+  /// Limpa o sinistroId pendente de navegação.
   void clearOpenedSinistroId() {
     openedSinistroId.value = null;
   }
@@ -144,6 +146,7 @@ class ArgosPushNotificationService {
     return message.data['sinistroId']?.toString().trim();
   }
 
+  /// Registra (ou renova) o token FCM do usuário logado no Firestore.
   Future<void> registerDeviceTokenForCurrentUser() async {
     final user = _auth.currentUser;
 
@@ -181,6 +184,7 @@ class ArgosPushNotificationService {
     }
   }
 
+  /// Remove o token FCM do usuário logado (chamado no logout).
   Future<void> unregisterCurrentDeviceToken() async {
     final user = _auth.currentUser;
 
@@ -201,6 +205,7 @@ class ArgosPushNotificationService {
         .catchError((_) {});
   }
 
+  /// Grava/atualiza o token FCM em `userDevices/{uid}/tokens/{tokenId}`.
   Future<void> _saveToken({
     required String uid,
     required String email,
@@ -231,6 +236,7 @@ class ArgosPushNotificationService {
   }
 }
 
+/// Dados exibidos de uma notificação push recebida.
 class ArgosAppNotification {
   final String title;
   final String body;

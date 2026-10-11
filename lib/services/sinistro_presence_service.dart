@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
+// Controla presença (quem está vendo/trabalhando) e check-in de sinistros.
 class SinistroPresenceService {
   SinistroPresenceService._();
 
@@ -23,6 +24,8 @@ class SinistroPresenceService {
   CollectionReference<Map<String, dynamic>> get _sinistros =>
       _db.collection('sinistro');
 
+  // Marca o usuário atual como visualizando o sinistro e inicia o heartbeat
+  // periódico que renova essa presença.
   Future<void> startViewing(String sinistroId) async {
     final user = _auth.currentUser;
 
@@ -55,6 +58,7 @@ class SinistroPresenceService {
     });
   }
 
+  // Para o heartbeat e remove a presença do usuário atual do sinistro.
   Future<void> stopViewing() async {
     final user = _auth.currentUser;
     final sinistroId = _currentSinistroId;
@@ -65,7 +69,6 @@ class SinistroPresenceService {
     _currentSinistroId = null;
     _currentSessionId = null;
 
-    // Invalida qualquer escrita em background que tenha começado antes do stop.
     _viewingGeneration++;
 
     if (user == null ||
@@ -82,33 +85,32 @@ class SinistroPresenceService {
       presenceSessionId: sessionId,
     ).catchError((_) {});
 
-    // Se a mesma tela voltou muito rápido, não remova o novo viewer do resumo.
     if (_currentSinistroId == sinistroId &&
         _currentSessionId != null &&
         _currentSessionId != sessionId) {
       return;
     }
 
-    // Remove imediatamente do resumo do documento principal.
-    // Isso evita o "rastro fantasma" no card/lista de outros usuários.
     await _removeViewerFromSummary(
       sinistroId: sinistroId,
       uid: user.uid,
       presenceSessionId: sessionId,
     ).catchError((_) {});
 
-    // Recalcula o resumo pela subcoleção, excluindo o usuário atual por segurança.
     await _refreshActiveViewersSummary(
       sinistroId,
       excludeUid: user.uid,
     ).catchError((_) {});
   }
 
+  // Confere se a sessão de viewing (sinistro + generation) ainda é a atual.
   bool _isViewingActive(String sinistroId, int generation) {
     return _currentSinistroId == sinistroId &&
         _viewingGeneration == generation;
   }
 
+  // Grava a presença com um perfil de fallback imediato e depois atualiza
+  // em background com o perfil completo carregado do Firestore.
   Future<void> _writeViewer(
     String sinistroId,
     int generation,
@@ -135,8 +137,6 @@ class SinistroPresenceService {
       presenceSessionId: sessionId,
     );
 
-    // Atualiza com dados completos do Firestore em background.
-    // O generation impede que essa escrita recrie o viewer depois que a tela fechou.
     unawaited(() async {
       try {
         final fullProfile = await _loadUserProfile(user);
@@ -155,12 +155,12 @@ class SinistroPresenceService {
         if (!_isViewingActive(sinistroId, generation)) return;
 
         await _refreshActiveViewersSummary(sinistroId);
-      } catch (_) {
-        // Não deixa presença quebrar a tela.
-      }
+      } catch (_) {}
     }());
   }
 
+  // Grava o viewer na subcoleção e atualiza o resumo denormalizado
+  // (activeViewers) no documento do sinistro, numa transação.
   Future<void> _writeViewerData({
     required String sinistroId,
     required _UserPresenceProfile profile,
@@ -283,6 +283,7 @@ class SinistroPresenceService {
     });
   }
 
+  // Apaga o viewer, mas só se a sessão gravada bater com a atual.
   Future<void> _deleteViewerIfSameSession({
     required String sinistroId,
     required String uid,
@@ -301,14 +302,13 @@ class SinistroPresenceService {
       final data = snap.data() ?? {};
       final storedSessionId = data['presenceSessionId']?.toString() ?? '';
 
-      // Não apaga um viewer novo caso o app tenha voltado para foreground
-      // antes da escrita de stop terminar.
       if (storedSessionId == presenceSessionId) {
         transaction.delete(viewerRef);
       }
     });
   }
 
+  // Remove um viewer específico do resumo denormalizado no sinistro.
   Future<void> _removeViewerFromSummary({
     required String sinistroId,
     required String uid,
@@ -357,6 +357,7 @@ class SinistroPresenceService {
     });
   }
 
+  // Recalcula o resumo denormalizado de viewers lendo a subcoleção inteira.
   Future<void> _refreshActiveViewersSummary(
     String sinistroId, {
     String? excludeUid,
@@ -412,6 +413,7 @@ class SinistroPresenceService {
     }, SetOptions(merge: true));
   }
 
+  // Stream dos viewers ativos (dentro do TTL) de um sinistro.
   Stream<List<SinistroViewer>> watchViewers(String sinistroId) {
     return _sinistros
         .doc(sinistroId)
@@ -434,16 +436,9 @@ class SinistroPresenceService {
     });
   }
 
-  /// Compatível com os dois jeitos de chamar:
-  ///
-  /// Novo:
-  /// await claimSinistroForCurrentUser(sinistroId: inspection.id)
-  ///
-  /// Jeito que seu inspections_page atual usa:
-  /// final updatedInspection = await claimSinistroForCurrentUser(inspection: inspection)
-  ///
-  /// Como o service não importa a tela/modelo para evitar dependência circular,
-  /// o parâmetro inspection é dynamic e é devolvido no final.
+  // Faz o check-in do sinistro pro usuário atual (atribui, marca EM_ANDAMENTO
+  // e abre o chat). Aceita sinistroId ou um objeto inspection (dynamic, pra
+  // não criar dependência circular com a tela), devolvendo o mesmo objeto.
   Future<dynamic> claimSinistroForCurrentUser({
     String? sinistroId,
     dynamic inspection,
@@ -520,6 +515,7 @@ class SinistroPresenceService {
     return inspection;
   }
 
+  // True se o sinistro não tem responsável ou se é o usuário atual.
   bool canCurrentUserEdit(Map<String, dynamic> sinistro) {
     final user = _auth.currentUser;
 
@@ -530,6 +526,7 @@ class SinistroPresenceService {
     return assignedToUid.isEmpty || assignedToUid == user.uid;
   }
 
+  // True se o sinistro está atribuído ao usuário atual.
   bool isAssignedToCurrentUser(Map<String, dynamic> sinistro) {
     final user = _auth.currentUser;
 
@@ -540,6 +537,8 @@ class SinistroPresenceService {
     return assignedToUid == user.uid;
   }
 
+  // Carrega o perfil do usuário na coleção users (por email, uid ou query),
+  // com fallback pros dados do FirebaseAuth.
   Future<_UserPresenceProfile> _loadUserProfile(User user) async {
     final email = user.email?.trim().toLowerCase() ?? '';
 
@@ -589,6 +588,7 @@ class SinistroPresenceService {
     );
   }
 
+  // Extrai o id de um objeto inspection dynamic, sem acoplar ao tipo real.
   String _extractInspectionId(dynamic inspection) {
     if (inspection == null) return '';
 
@@ -601,6 +601,7 @@ class SinistroPresenceService {
   }
 }
 
+// Alguém visualizando/trabalhando num sinistro no momento.
 class SinistroViewer {
   final String uid;
   final String name;
@@ -653,6 +654,7 @@ class SinistroViewer {
   }
 }
 
+// Dados mínimos de perfil usados pra gravar presença/check-in.
 class _UserPresenceProfile {
   final String uid;
   final String name;

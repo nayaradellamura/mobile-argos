@@ -4,13 +4,8 @@ import 'package:flutter/painting.dart';
 import 'inspection_case.dart';
 
 /// Aquece a query de vistorias e as fotos de perfil da equipe durante a
-/// splash de abertura do app — tempo que, de outra forma, ficaria ocioso
-/// esperando a animação da splash terminar.
-///
-/// Quando o usuário chega na tela de Vistorias, o Firestore já tem essa
-/// mesma query no cache local (então o primeiro snapshot chega quase
-/// instantâneo) e as fotos de perfil já estão no ImageCache do Flutter —
-/// os cards aparecem prontos, sem esperar o carregamento das fotos.
+/// splash de abertura do app, pra tela de Vistorias abrir com tudo já em
+/// cache.
 class InspectionsPrefetchService {
   InspectionsPrefetchService._();
 
@@ -19,6 +14,8 @@ class InspectionsPrefetchService {
 
   final Set<String> _precachedUrls = <String>{};
 
+  /// Busca os sinistros do credenciado e precacheia as fotos de perfil
+  /// envolvidas.
   Future<void> warmUp(String credenciadoId) async {
     if (credenciadoId.trim().isEmpty) return;
 
@@ -32,12 +29,10 @@ class InspectionsPrefetchService {
           snapshot.docs.map(InspectionCase.fromFirestore).toList();
 
       _precacheAvatarUrls(inspections);
-    } catch (_) {
-      // Melhor esforço: se falhar (sem rede, etc.), a tela de Vistorias
-      // carrega tudo normalmente quando for aberta.
-    }
+    } catch (_) {}
   }
 
+  /// Coleta as URLs de foto de perfil únicas e dispara o precache de cada uma.
   void _precacheAvatarUrls(List<InspectionCase> inspections) {
     final urls = <String>{};
 
@@ -63,9 +58,8 @@ class InspectionsPrefetchService {
     }
   }
 
-  // Equivalente ao precacheImage() do Flutter, mas sem depender de um
-  // BuildContext montado — a splash roda antes de qualquer tela real
-  // existir na árvore de widgets.
+  /// Equivalente ao `precacheImage()` do Flutter, mas sem depender de um
+  /// `BuildContext` montado.
   void _precacheNetworkImage(String url) {
     final stream = NetworkImage(url).resolve(ImageConfiguration.empty);
 

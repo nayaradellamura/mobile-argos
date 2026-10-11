@@ -7,10 +7,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 
-/// Tela genérica de leitura de PDF (orçamento aprovado, laudo técnico, etc.)
-/// — mesma ideia do visualizador que já existe no web-argos
-/// (components/orquestracao/pdf-viewer.tsx), só que nativo, com baixar e
-/// compartilhar direto no leitor.
+/// Tela genérica de leitura de PDF (orçamento aprovado, laudo técnico, etc.),
+/// com zoom, baixar e compartilhar direto no leitor.
 class PdfViewerPage extends StatefulWidget {
   final String url;
   final String title;
@@ -57,6 +55,7 @@ class _PdfViewerPageState extends State<PdfViewerPage> {
     return arquivo;
   }
 
+  /// Baixa o PDF e mostra uma confirmação com o caminho salvo.
   Future<void> _baixar() async {
     if (_baixando) return;
     setState(() => _baixando = true);
@@ -76,6 +75,7 @@ class _PdfViewerPageState extends State<PdfViewerPage> {
     }
   }
 
+  /// Baixa o PDF e abre o menu de compartilhamento do sistema.
   Future<void> _compartilhar() async {
     if (_baixando) return;
     setState(() => _baixando = true);

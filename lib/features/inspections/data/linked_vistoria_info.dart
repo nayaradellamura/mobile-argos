@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import 'inspection_parsing_utils.dart';
 
+// Preview de um áudio anexado à vistoria (rótulo + referência pra tocar).
 class AudioPreviewInfo {
   final String label;
   final String storagePath;
@@ -17,8 +18,10 @@ class AudioPreviewInfo {
   bool get canPlay => storagePath.trim().isNotEmpty || downloadUrl.trim().isNotEmpty;
 }
 
+// Tipo de conteúdo de uma mensagem de chat no preview do histórico.
 enum ChatPreviewKind { text, image, audio }
 
+// Preview resumido de uma mensagem do chat da vistoria.
 class ChatPreviewInfo {
   final String role;
   final String text;
@@ -31,14 +34,14 @@ class ChatPreviewInfo {
   });
 }
 
+// Item de orçamento rascunhado pela vistoria (peça + intervenção + valores).
 class OrcamentoRascunhoItem {
   final String peca;
   final String tipoIntervencao;
   final double valorPeca;
   final double horasMaoObra;
 
-  /// 'vistoria' (o ADK montou durante o fluxo guiado) ou 'mecanico' (o
-  /// próprio mecânico digitou no modo de envio em massa).
+  // 'vistoria' (montado pelo ADK) ou 'mecanico' (digitado manualmente).
   final String origem;
 
   const OrcamentoRascunhoItem({
@@ -52,6 +55,8 @@ class OrcamentoRascunhoItem {
   bool get isDoMecanico => origem == 'mecanico';
 }
 
+// Modelo de uma vistoria vinculada a um sinistro, com dados e previews pro
+// histórico/resumo.
 class LinkedVistoriaInfo {
   final String docId;
   final String idvistoria;
@@ -77,7 +82,7 @@ class LinkedVistoriaInfo {
   final DateTime? createdAt;
   final DateTime? updatedAt;
 
-  /// 'em_massa' | 'guiado' | '' (vistorias de antes desse campo existir).
+  // 'em_massa' | 'guiado' | '' (vistorias de antes desse campo existir).
   final String coletaModo;
   final List<OrcamentoRascunhoItem> orcamentoItems;
 
@@ -109,6 +114,7 @@ class LinkedVistoriaInfo {
     this.orcamentoItems = const [],
   });
 
+  // Constrói a partir de um documento de vistoria do Firestore.
   factory LinkedVistoriaInfo.fromFirestore(
     DocumentSnapshot<Map<String, dynamic>> doc,
   ) {
@@ -174,6 +180,7 @@ class LinkedVistoriaInfo {
 
   bool get isEmMassa => coletaModo == 'em_massa';
 
+  // True se o tipoVistoria indica uma retificação/revisão.
   bool get isRetificacao {
     final normalized = normalizeStatusText(tipoVistoria);
 
@@ -194,6 +201,7 @@ class LinkedVistoriaInfo {
     return 'Mecânico não informado';
   }
 
+  // Texto do status da vistoria pro histórico/resumo.
   String get statusLabel {
     final normalized = normalizeStatusText(status);
 
@@ -220,6 +228,7 @@ class LinkedVistoriaInfo {
     return 'Em andamento';
   }
 
+  // Cor correspondente ao status da vistoria (espelha statusLabel).
   Color get statusColor {
     final normalized = normalizeStatusText(status);
 
@@ -242,6 +251,7 @@ class LinkedVistoriaInfo {
     return const Color(0xFF0057C0);
   }
 
+  // Ícone correspondente ao status da vistoria (espelha statusLabel).
   IconData get statusIcon {
     final normalized = normalizeStatusText(status);
 
@@ -267,6 +277,7 @@ class LinkedVistoriaInfo {
   }
 }
 
+// Extrai URLs/base64 de preview das imagens da vistoria.
 List<String> _extractImageBase64Previews(List<dynamic> images) {
   final previews = <String>[];
 
@@ -310,6 +321,7 @@ List<String> _extractImageBase64Previews(List<dynamic> images) {
   return previews;
 }
 
+// Converte a lista crua de orçamento rascunhado em OrcamentoRascunhoItem.
 List<OrcamentoRascunhoItem> _extractOrcamentoItems(dynamic raw) {
   if (raw is! List) return const [];
 
@@ -328,6 +340,7 @@ List<OrcamentoRascunhoItem> _extractOrcamentoItems(dynamic raw) {
   }).toList();
 }
 
+// Monta os previews de áudio, escolhendo o melhor rótulo disponível por item.
 List<AudioPreviewInfo> _extractAudioPreviews(List<dynamic> audios) {
   final previews = <AudioPreviewInfo>[];
 
@@ -376,6 +389,7 @@ List<AudioPreviewInfo> _extractAudioPreviews(List<dynamic> audios) {
   return previews;
 }
 
+// Monta os previews do chat, classificando cada mensagem em texto/imagem/áudio.
 List<ChatPreviewInfo> _extractChatPreviews(List<dynamic> messages) {
   final previews = <ChatPreviewInfo>[];
   final source = messages.length > 1 ? messages.skip(1) : messages;

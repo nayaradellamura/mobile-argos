@@ -1,9 +1,9 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
-/// Helpers de parsing de dados vindos do Firestore, usados por todos os
-/// modelos da feature de vistorias (e por alguns widgets que ainda leem
-/// campos de forma pontual, como o preview de histórico de áudios).
+// Helpers de parsing de dados vindos do Firestore, usados pelos modelos da
+// feature de vistorias.
 
+/// Converte um `Map` dinâmico num `Map<String, dynamic>` seguro.
 Map<String, dynamic> asStringMap(dynamic value) {
   if (value is Map<String, dynamic>) {
     return value;
@@ -16,6 +16,7 @@ Map<String, dynamic> asStringMap(dynamic value) {
   return <String, dynamic>{};
 }
 
+/// Converte para `String` trimada, usando [fallback] se vazio/nulo.
 String stringValue(dynamic value, {String fallback = ''}) {
   if (value == null) return fallback;
 
@@ -26,6 +27,8 @@ String stringValue(dynamic value, {String fallback = ''}) {
   return text;
 }
 
+/// Converte `Timestamp`/`DateTime`/string ISO vindos do Firestore para
+/// `DateTime`.
 DateTime? parseFirestoreDateTime(dynamic value) {
   if (value == null) return null;
 
@@ -69,6 +72,7 @@ String normalizeStatusText(dynamic value) {
       .trim();
 }
 
+/// Formata um tamanho em bytes como "B"/"KB"/"MB" legível.
 String formatFileSize(int bytes) {
   if (bytes < 1024) return '$bytes B';
 

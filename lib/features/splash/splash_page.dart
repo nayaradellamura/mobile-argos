@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shorebird_code_push/shorebird_code_push.dart';
 
+// Tela de splash: anima a barra de progresso e checa update do Shorebird.
 class SplashPage extends StatefulWidget {
   final VoidCallback onComplete;
 
@@ -18,7 +19,6 @@ class _SplashPageState extends State<SplashPage> {
   Timer? timer;
   bool completed = false;
 
-  // 1. Usando a classe nova do Shorebird: ShorebirdUpdater
   final shorebirdUpdater = ShorebirdUpdater();
   int? _patchNumber;
   String? _updateStatusText;
@@ -27,13 +27,7 @@ class _SplashPageState extends State<SplashPage> {
   void initState() {
     super.initState();
 
-    // 2. Busca o número do patch ao abrir a tela
     _fetchPatchNumber();
-
-    // Dispara a checagem de update do Shorebird sem esperar (a doc do pacote
-    // avisa explicitamente pra não dar await nisso no startup — a chamada de
-    // rede pode demorar e travaria a splash indefinidamente). O progresso
-    // visual da tela continua no timer normal, independente do resultado.
     _checkForShorebirdUpdate();
 
     timer = Timer.periodic(const Duration(milliseconds: 30), (timer) {
@@ -61,7 +55,7 @@ class _SplashPageState extends State<SplashPage> {
     });
   }
 
-  // 3. Método atualizado para ler o patch
+  // Lê o número do patch Shorebird atual, se houver.
   Future<void> _fetchPatchNumber() async {
     try {
       final currentPatch = await shorebirdUpdater.readCurrentPatch();
@@ -71,15 +65,13 @@ class _SplashPageState extends State<SplashPage> {
         });
       }
     } catch (e) {
-      // Se der erro (ex: rodando no modo debug), ignora em silêncio
       debugPrint('Erro ao buscar patch do Shorebird: $e');
     }
   }
 
+  // Dispara a checagem/download de atualização do Shorebird em background,
+  // sem bloquear a splash.
   void _checkForShorebirdUpdate() {
-    // Fora de um build gerado via `shorebird release`/`shorebird preview`
-    // (ex: debug local, flutter run) o updater não existe — não tem update
-    // pra checar.
     if (!shorebirdUpdater.isAvailable) return;
 
     if (mounted) {
@@ -312,7 +304,6 @@ class _SplashPageState extends State<SplashPage> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // 4. Lógica de exibição da versão
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
@@ -372,6 +363,7 @@ class _SplashPageState extends State<SplashPage> {
   }
 }
 
+// Círculo desfocado decorativo do fundo da splash.
 class _BlurCircle extends StatelessWidget {
   final double size;
   final Color color;
@@ -391,6 +383,7 @@ class _BlurCircle extends StatelessWidget {
   }
 }
 
+// Textura de grão decorativa desenhada por cima do fundo da splash.
 class _GrainPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {

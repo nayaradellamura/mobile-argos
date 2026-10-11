@@ -14,14 +14,14 @@ import '../camera/camera_page.dart';
 const int kBulkMaxPhotos = 10;
 const int kBulkMaxAudios = 10;
 
-/// Chave fixa do item de texto livre no rascunho -- só existe um por vez,
-/// diferente de foto/áudio/orçamento (que são listas), então não precisa de
-/// um `localId` gerado a cada mudança.
+// Chave fixa do item de texto livre no rascunho (só existe um por vez).
 const String kBulkTextRascunhoKey = '__texto__';
 
+/// Gera um ID local único pra um item do pacote (foto, áudio ou orçamento).
 String _newLocalId() =>
     'bulk_${DateTime.now().microsecondsSinceEpoch}';
 
+/// Item de orçamento (peça + mão de obra) dentro do pacote de envio em massa.
 class BulkOrcamentoItem {
   final String localId;
   final String peca;
@@ -61,10 +61,7 @@ class BulkOrcamentoItem {
   }
 }
 
-/// Foto já copiada pro documents dir (persistente) -- diferente do path que
-/// a `CameraPage`/`camera` devolve, que vive no diretório TEMPORÁRIO do
-/// plugin e pode ser limpo pelo SO a qualquer momento. Sem essa cópia, uma
-/// foto sobrevivia ao Firestore lembrar dela mas não ao arquivo em si.
+/// Foto do pacote de envio em massa, já copiada pro diretório persistente do app.
 class BulkPhotoItem {
   final String localId;
   final String path;
@@ -78,6 +75,7 @@ class BulkPhotoItem {
       };
 }
 
+/// Áudio gravado do pacote de envio em massa.
 class BulkAudioItem {
   final String localId;
   final String path;
@@ -97,6 +95,7 @@ class BulkAudioItem {
       };
 }
 
+/// Resultado final do modal de envio em massa: tudo que o mecânico montou, pronto pra upload.
 class BulkUploadResult {
   final List<BulkPhotoItem> photos;
   final List<BulkAudioItem> audios;
@@ -111,14 +110,7 @@ class BulkUploadResult {
   });
 }
 
-/// Converte um rascunho persistido (`envioEmMassaRascunho`) num
-/// `BulkUploadResult` pronto pra (re)enviar -- usado tanto pra pré-popular o
-/// `BulkUploadSheet` quanto pela retomada automática quando a conexão volta
-/// (`ai_chat_page.dart:_handleConnectivityRestored`), sem duplicar o parsing
-/// nos dois lugares. Itens já `status: 'enviado'` são ignorados (já
-/// confirmados, não reenvia). `onMissingFile`, se passado, é chamado uma vez
-/// por item cujo arquivo local não existe mais (ex: usuário limpou dados do
-/// app entre uma tentativa e outra).
+/// Converte um rascunho persistido (`envioEmMassaRascunho`) num `BulkUploadResult` pronto pra (re)enviar.
 BulkUploadResult buildBulkUploadResultFromRascunho(
   Map<String, dynamic> rascunho, {
   void Function(String tipo)? onMissingFile,
@@ -174,23 +166,11 @@ BulkUploadResult buildBulkUploadResultFromRascunho(
   );
 }
 
-/// Modal de composição do modo "enviar tudo de uma vez" -- reaproveita a
-/// mesma `CameraPage` do fluxo guiado pra capturar fotos e o mesmo
-/// `RecordConfig` (aacLc/128kbps/44.1kHz mono) pra áudio, só que sem
-/// notificar o agente a cada item. Devolve tudo junto pro AiChatPage
-/// orquestrar o upload quando o mecânico tocar "Enviar".
-///
-/// Cada item é espelhado no rascunho persistido do Firestore
-/// (`envioEmMassaRascunho`) assim que entra/sai da lista -- é o que
-/// sobrevive o app fechar/morrer no meio da montagem (ver
-/// `VistoriaChatSessionService.upsertEnvioEmMassaRascunhoItem`).
+/// Modal de composição do modo "enviar tudo de uma vez": fotos, áudios, texto e orçamento.
 class BulkUploadSheet extends StatefulWidget {
   final String vistoriaDocId;
 
-  /// Itens que sobreviveram de uma tentativa anterior interrompida (lidos
-  /// de `envioEmMassaRascunho` antes de abrir o modal). Itens já
-  /// `status: 'enviado'` não aparecem aqui de propósito -- já foram
-  /// confirmados, reabrir o modal não deve deixar reenviar/duplicar.
+  // Itens que sobreviveram de uma tentativa anterior interrompida.
   final Map<String, dynamic> initialDraft;
 
   const BulkUploadSheet({
@@ -219,6 +199,7 @@ class BulkUploadSheet extends StatefulWidget {
   State<BulkUploadSheet> createState() => _BulkUploadSheetState();
 }
 
+/// Estado do modal: mantém as listas de itens e sincroniza cada mudança com o rascunho no Firestore.
 class _BulkUploadSheetState extends State<BulkUploadSheet> {
   final List<BulkPhotoItem> _photos = [];
   final List<BulkAudioItem> _audios = [];
@@ -239,6 +220,7 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
     _loadInitialDraft();
   }
 
+  /// Pré-popula as listas a partir do rascunho recebido e avisa sobre arquivos perdidos.
   void _loadInitialDraft() {
     final result = buildBulkUploadResultFromRascunho(
       widget.initialDraft,
@@ -266,6 +248,7 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
     }
   }
 
+  /// Grava/atualiza um item no rascunho persistido do Firestore.
   void _syncItem(String localId, Map<String, dynamic> item) {
     unawaited(
       VistoriaChatSessionService.instance.upsertEnvioEmMassaRascunhoItem(
@@ -276,6 +259,7 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
     );
   }
 
+  /// Remove um item do rascunho persistido do Firestore.
   void _removeSyncedItem(String localId) {
     unawaited(
       VistoriaChatSessionService.instance.removeEnvioEmMassaRascunhoItem(
@@ -297,6 +281,7 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
     super.dispose();
   }
 
+  /// Abre a câmera, copia as fotos tiradas pro diretório persistente e as adiciona à lista.
   Future<void> _addPhotos() async {
     if (_photos.length >= kBulkMaxPhotos) return;
 
@@ -316,10 +301,6 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
     final remaining = kBulkMaxPhotos - _photos.length;
     final newItems = <BulkPhotoItem>[];
 
-    // Copia pro documents dir (persistente) -- o path que a CameraPage
-    // devolve é do diretório temporário do plugin `camera`, que o SO pode
-    // limpar a qualquer momento, inclusive antes do mecânico voltar pra
-    // terminar o envio.
     for (final photo in result.take(remaining)) {
       final localId = _newLocalId();
       final persistedPath = '${bulkDirectory.path}/$localId.jpg';
@@ -340,6 +321,7 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
     setState(() => _photos.addAll(newItems));
   }
 
+  /// Inicia ou para a gravação de um áudio pro pacote.
   Future<void> _toggleRecording() async {
     if (_isRecording) {
       await _stopRecording();
@@ -394,6 +376,7 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
     });
   }
 
+  /// Finaliza a gravação atual e adiciona o áudio resultante à lista.
   Future<void> _stopRecording() async {
     _recordingTimer?.cancel();
 
@@ -428,6 +411,7 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
     setState(() => _audios.add(item));
   }
 
+  /// Sincroniza o texto livre no rascunho com debounce, removendo-o se ficar vazio.
   void _onTextChanged(String value) {
     setState(() {});
 
@@ -448,6 +432,7 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
     });
   }
 
+  /// Abre o diálogo de novo item de orçamento e adiciona o resultado à lista.
   Future<void> _addOrcamentoItem() async {
     final item = await _showOrcamentoItemDialog();
 
@@ -458,6 +443,7 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
     setState(() => _orcamentoItems.add(item));
   }
 
+  /// Diálogo de formulário pra cadastrar um item de orçamento (peça, tipo, valor, horas).
   Future<BulkOrcamentoItem?> _showOrcamentoItemDialog() {
     final pecaController = TextEditingController();
     final tipoController = TextEditingController();
@@ -573,6 +559,7 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
       _textController.text.trim().isNotEmpty ||
       _orcamentoItems.isNotEmpty;
 
+  /// Fecha o modal devolvendo o pacote montado (fotos, áudios, texto e orçamento).
   void _submit() {
     Navigator.of(context).pop(
       BulkUploadResult(
@@ -737,6 +724,7 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
   }
 }
 
+/// Rótulo de seção (ex.: "Fotos", "Áudios") dentro do modal.
 class _SectionLabel extends StatelessWidget {
   final String text;
 
@@ -755,6 +743,7 @@ class _SectionLabel extends StatelessWidget {
   }
 }
 
+/// Grade com as fotos já tiradas e um botão pra adicionar mais.
 class _PhotoGrid extends StatelessWidget {
   final List<BulkPhotoItem> photos;
   final bool canAddMore;
@@ -823,6 +812,7 @@ class _PhotoGrid extends StatelessWidget {
   }
 }
 
+/// Lista dos áudios já gravados, com botão de gravar mais um.
 class _AudioList extends StatelessWidget {
   final List<BulkAudioItem> audios;
   final bool isRecording;
@@ -885,11 +875,7 @@ class _AudioList extends StatelessWidget {
   }
 }
 
-/// Player de verdade (play/pause + progresso) pra cada áudio já gravado no
-/// pacote -- antes disso era só um rótulo estático com a duração, sem jeito
-/// de ouvir de volta antes de mandar. Mesmo padrão de `AudioPlayer` já usado
-/// em `ai_chat_page.dart` (`_AudioBubbleState`), tocando direto do arquivo
-/// local (`DeviceFileSource`) já que nada aqui foi upado ainda.
+/// Tile com player (play/pause + barra de progresso) de um áudio já gravado no pacote.
 class _BulkAudioPlayerTile extends StatefulWidget {
   final BulkAudioItem audio;
   final VoidCallback onRemove;
@@ -904,6 +890,7 @@ class _BulkAudioPlayerTile extends StatefulWidget {
   State<_BulkAudioPlayerTile> createState() => _BulkAudioPlayerTileState();
 }
 
+/// Estado do player: controla playback, posição e duração do áudio local.
 class _BulkAudioPlayerTileState extends State<_BulkAudioPlayerTile> {
   final AudioPlayer _player = AudioPlayer();
 
@@ -940,6 +927,7 @@ class _BulkAudioPlayerTileState extends State<_BulkAudioPlayerTile> {
     super.dispose();
   }
 
+  /// Alterna entre tocar e pausar o áudio local.
   Future<void> _togglePlay() async {
     try {
       if (_isPlaying) {
@@ -1025,6 +1013,7 @@ class _BulkAudioPlayerTileState extends State<_BulkAudioPlayerTile> {
   }
 }
 
+/// Lista dos itens de orçamento adicionados, com botão de adicionar mais um.
 class _OrcamentoList extends StatelessWidget {
   final List<BulkOrcamentoItem> items;
   final VoidCallback onAdd;

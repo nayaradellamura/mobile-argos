@@ -7,6 +7,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart' as image_picker;
 import 'package:permission_handler/permission_handler.dart';
 
+/// Tela de captura de fotos com a câmera do dispositivo, devolvendo a lista de `XFile` capturados.
 class CameraPage extends StatefulWidget {
   const CameraPage({super.key});
 
@@ -14,6 +15,7 @@ class CameraPage extends StatefulWidget {
   State<CameraPage> createState() => _CameraPageState();
 }
 
+/// Controla o ciclo de vida da câmera (inicialização, zoom, flash, lente) e a lista de fotos capturadas.
 class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
   static const int maxPhotos = 10;
 
@@ -135,12 +137,14 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     }
   }
 
+  /// Limita um valor de zoom entre o mínimo e o máximo suportado pela câmera atual.
   double _clampZoom(double value) {
     if (value < _minZoom) return _minZoom;
     if (value > _maxZoom) return _maxZoom;
     return value;
   }
 
+  /// Agenda o dispose do controller da câmera com um pequeno atraso, ao fechar a tela.
   void _scheduleDisposeCameraAfterClose() {
     if (_disposeScheduled) return;
 
@@ -151,6 +155,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     );
   }
 
+  /// Desliga o flash e libera o controller atual da câmera.
   Future<void> _disposeCamera({Duration delay = Duration.zero}) async {
     final controller = _controller;
     _controller = null;
@@ -172,6 +177,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
+  /// Garante a permissão de câmera, solicitando-a se necessário, ou lança exceção se negada.
   Future<void> _ensureCameraPermission() async {
     final currentStatus = await Permission.camera.status;
 
@@ -190,6 +196,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     throw Exception('Permissão de câmera necessária para capturar evidências.');
   }
 
+  /// Inicializa (ou reinicializa) o controller da câmera no índice indicado, com retry em caso de falha.
   Future<void> _initializeCamera([int? cameraIndex]) async {
     if (!mounted || _isClosing || _isPickingFromGallery) return;
 
@@ -204,8 +211,6 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     try {
       await _ensureCameraPermission();
 
-      // Pequena folga evita falha comum na primeira abertura logo após a
-      // permissão ser concedida no Android.
       await Future<void>.delayed(const Duration(milliseconds: 180));
 
       if (!mounted || _isClosing || token != _initializeToken) return;
@@ -232,9 +237,6 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
 
       final controller = CameraController(
         _cameras[_selectedCameraIndex],
-        // "medium" já é suficiente para evidência de vistoria e mantém o
-        // tamanho do arquivo compatível com o restante do pipeline (chat,
-        // Storage e limite de 1 MiB de documento no Firestore).
         ResolutionPreset.medium,
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.jpeg,
@@ -243,7 +245,6 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
       try {
         await controller.initialize();
       } catch (_) {
-        // Segunda tentativa curta para corrigir erro da primeira abertura.
         try {
           await controller.dispose();
         } catch (_) {}
@@ -316,6 +317,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     }
   }
 
+  /// Alterna o flash entre ligado (torch) e desligado.
   Future<void> _toggleFlash() async {
     final controller = _controller;
 
@@ -347,6 +349,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     }
   }
 
+  /// Aplica um novo nível de zoom na câmera, dentro dos limites suportados.
   Future<void> _setZoom(double value) async {
     final controller = _controller;
 
@@ -374,10 +377,12 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     }
   }
 
+  /// Volta o zoom para 1x.
   Future<void> _resetZoom() async {
     await _setZoom(1.0);
   }
 
+  /// Captura uma foto e adiciona à lista, respeitando o limite máximo.
   Future<void> _takePicture() async {
     final controller = _controller;
 
@@ -436,6 +441,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     }
   }
 
+  /// Alterna entre as câmeras traseiras disponíveis (ex: normal/ultra wide), quando há mais de uma.
   Future<void> _switchBackLens() async {
     if (!_hasMultipleBackCameras || _isInitializing || _isClosing) return;
 
@@ -453,6 +459,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     await _initializeCamera(nextCameraIndex);
   }
 
+  /// Fecha a tela sem devolver nenhuma foto.
   Future<void> _closePage() async {
     if (_isClosing) return;
 
@@ -466,6 +473,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     _scheduleDisposeCameraAfterClose();
   }
 
+  /// Fecha a tela devolvendo as fotos capturadas.
   Future<void> _finishCapture() async {
     if (_photos.isEmpty) {
       await _handleFinishButtonPressed();
@@ -484,6 +492,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     _scheduleDisposeCameraAfterClose();
   }
 
+  /// Trata o toque no botão de concluir: finaliza se há fotos, senão conta toques pra abrir a galeria oculta.
   Future<void> _handleFinishButtonPressed() async {
     if (_photos.isNotEmpty) {
       await _finishCapture();
@@ -514,6 +523,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     );
   }
 
+  /// Abre o seletor de galeria (acesso oculto via 5 toques) e importa as fotos escolhidas.
   Future<void> _openHiddenGalleryPicker() async {
     if (_isPickingFromGallery || _photos.length >= maxPhotos) return;
 
@@ -584,6 +594,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     }
   }
 
+  /// Abre o bottom sheet de revisão das fotos capturadas, com opção de ver/remover cada uma.
   void _openPhotosManager() {
     showModalBottomSheet<void>(
       context: context,
@@ -717,6 +728,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     );
   }
 
+  /// Abre a visualização em tela cheia de uma foto, com opção de remover.
   void _openPhotoPreview(int index, {StateSetter? sheetSetState}) {
     if (index < 0 || index >= _photos.length) return;
 
@@ -808,6 +820,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     );
   }
 
+  /// Monta o preview da câmera (ou um estado de carregamento/erro) preenchendo a tela.
   Widget _buildCameraPreview() {
     final controller = _controller;
 
@@ -1054,6 +1067,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
   }
 }
 
+/// Barra de controle de zoom com slider e botão de reset.
 class _ZoomControl extends StatelessWidget {
   final bool enabled;
   final double minZoom;
@@ -1130,6 +1144,7 @@ class _ZoomControl extends StatelessWidget {
   }
 }
 
+/// Estado vazio exibido no gerenciador de fotos quando nenhuma foi capturada.
 class _EmptyPhotosState extends StatelessWidget {
   const _EmptyPhotosState();
 
@@ -1173,6 +1188,7 @@ class _EmptyPhotosState extends StatelessWidget {
   }
 }
 
+/// Miniatura de uma foto na grade de revisão, com número de ordem e botão de remover.
 class _PhotoGridItem extends StatelessWidget {
   final XFile photo;
   final int index;
@@ -1247,6 +1263,7 @@ class _PhotoGridItem extends StatelessWidget {
   }
 }
 
+/// Botão circular de opção na barra inferior (ex: ver fotos, trocar lente), com selo opcional.
 class _CameraOptionButton extends StatelessWidget {
   final IconData icon;
   final String label;

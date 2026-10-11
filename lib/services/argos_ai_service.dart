@@ -1,6 +1,8 @@
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_core/firebase_core.dart';
 
+/// Chama as Cloud Functions do agente de IA (ADK) que conduz o chat de
+/// vistoria: mensagens de texto/áudio e checagem de expiração.
 class ArgosAiService {
   ArgosAiService._();
 
@@ -10,19 +12,12 @@ class ArgosAiService {
     region: 'us-central1',
   );
 
-  /// O default do plugin e 60s, e um turno do agente com analise de fotos
-  /// (download das imagens + AnalistaDanosVisao multimodal +
-  /// VerificadorConsistencia) passa disso com facilidade. Alinhado com o
-  /// timeoutSeconds das Cloud Functions.
   static const Duration _agentTimeout = Duration(seconds: 540);
 
+  /// Envia uma mensagem de texto do mecânico e retorna a resposta do agente.
   Future<String> sendMessage({
     required String text,
     required String inspectionId,
-    // Preenchidos quando a vistoria é uma retificação (VistoriaSession.isRetificacao)
-    // — o backend (sendArgosMessage, functions/index.js) já sabe usar isso
-    // pra avisar o agente que essa conversa é uma correção, não uma vistoria
-    // nova, e o que precisa ser corrigido.
     bool isRetificacao = false,
     String? ajustesNecessarios,
     String? contextoVistoriaAnterior,
@@ -55,12 +50,7 @@ class ArgosAiService {
   }
 
   /// Manda uma mensagem de sistema (ex.: aviso de que as fotos subiram) e
-  /// DEVOLVE a resposta do agente.
-  ///
-  /// Antes era `Future<void>` e a reply era descartada — o que funcionava
-  /// com o Dialogflow CX, que nao olhava as fotos. Com o ADK, esse e
-  /// justamente o turno que produz o achado de visao e a pergunta de
-  /// divergencia: jogar fora a resposta esconderia o principal.
+  /// retorna a resposta do agente.
   Future<String> sendBackgroundMessage({
     required String text,
     required String inspectionId,
@@ -90,6 +80,8 @@ class ArgosAiService {
     return result.data['reply']?.toString() ?? '';
   }
 
+  /// Envia um áudio já transcrito/subido e retorna a transcrição + resposta
+  /// do agente.
   Future<ArgosAudioMessageResult> sendAudioMessage({
     required String idvistoria,
     required String sinistroId,
@@ -128,10 +120,7 @@ class ArgosAiService {
     return ArgosAudioMessageResult.fromMap(result.data);
   }
 
-  /// Checa (e expira, se for o caso) uma vistoria específica na hora, em vez
-  /// de esperar a varredura agendada (agora de 12 em 12h) passar por ela.
-  /// Chamada no momento em que o mecânico aperta "Continuar agora" no modal
-  /// de retomar vistoria — cobre a janela entre uma varredura e outra.
+  /// Checa (e expira, se for o caso) uma vistoria específica na hora.
   Future<bool> checkVistoriaExpiration({required String idvistoria}) async {
     final cleanId = idvistoria.trim();
 
@@ -147,6 +136,7 @@ class ArgosAiService {
   }
 }
 
+/// Resultado de `sendAudioMessage`: transcrições do áudio + resposta do agente.
 class ArgosAudioMessageResult {
   final String audioId;
   final String idvistoria;

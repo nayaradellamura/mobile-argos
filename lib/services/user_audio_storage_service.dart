@@ -5,19 +5,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 
-/// Serviço para gravar o áudio do chat já convertido em MP3 no Firebase Storage.
-///
-/// Nova estrutura final no Storage:
-/// vistorias/{idvistoria}/audio/{audioId}.mp3
-///
-/// Exemplo:
-/// vistorias/VIS-2026-0001/audio/VIS_2026_0001_AUD_01.mp3
-///
-/// Observação:
-/// Este service NÃO grava mais áudio em base64 no Firestore.
-/// A subcoleção vistorias/{idvistoria}/audios/{audioId} continua sendo gravada
-/// pela Cloud Function sendArgosAudioMessage, com storagePath, gcsUri,
-/// transcricaoOriginal, transcricaoRevisada e agentReply.
+/// Converte o áudio gravado no chat para MP3 e sobe pro Firebase Storage em
+/// `vistorias/{idvistoria}/audio/{audioId}.mp3`.
 class UserAudioStorageService {
   UserAudioStorageService._();
 
@@ -27,17 +16,8 @@ class UserAudioStorageService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseStorage _storage = FirebaseStorage.instance;
 
-  /// Mantive o nome do método para reduzir impacto no ai_chat_page.dart.
-  ///
-  /// Agora ele:
-  /// 1. Recebe o áudio local gravado em .m4a.
-  /// 2. Gera um ID sequencial por vistoria:
-  ///    VIS_2026_0001_AUD_01, VIS_2026_0001_AUD_02...
-  /// 3. Converte no dispositivo para .mp3 usando audio_converter_native.
-  /// 4. Salva somente o MP3 no Storage em:
-  ///    vistorias/{idvistoria}/audio/{audioId}.mp3
-  /// 5. Retorna o storagePath para a Cloud Function salvar na subcoleção:
-  ///    vistorias/{idvistoria}/audios/{audioId}
+  /// Recebe o áudio local (.m4a), gera um ID sequencial por vistoria,
+  /// converte para MP3 no dispositivo e sobe o resultado pro Storage.
   Future<UploadedUserAudio> uploadOriginalAudioForMp3Conversion({
     required String localAudioPath,
     required String idvistoria,
@@ -143,27 +123,16 @@ class UserAudioStorageService {
         idvistoria: cleanVistoriaId,
         mp3StoragePath: mp3StoragePath,
         mp3DownloadUrl: mp3DownloadUrl,
-
-        // Campos mantidos por compatibilidade com o ai_chat_page.dart atual.
-        // Agora apontam para o próprio MP3, porque não subimos mais o .m4a.
         originalStoragePath: mp3StoragePath,
         originalDownloadUrl: mp3DownloadUrl,
       );
     } catch (_) {
-      // Se falhar após reservar o número, não decrementamos o contador.
-      // Isso evita colisão de nome. Pode ficar um "buraco" na sequência,
-      // mas nunca teremos dois AUD_01 para a mesma vistoria.
       rethrow;
     }
   }
 
-  /// Gera o próximo ID de áudio dentro da vistoria usando transaction.
-  ///
-  /// Salva/atualiza no documento vistorias/{idvistoria}:
-  /// lastAudioNumber: 1, 2, 3...
-  ///
-  /// Retorna:
-  /// VIS_2026_0001_AUD_01
+  /// Gera o próximo ID sequencial de áudio da vistoria via transaction
+  /// (ex.: `VIS_2026_0001_AUD_01`), incrementando `lastAudioNumber`.
   Future<String> _createSequentialAudioId(String idvistoria) async {
     final vistoriaRef = _firestore.collection('vistorias').doc(idvistoria);
 
@@ -203,6 +172,7 @@ class UserAudioStorageService {
     return '${safeVistoriaId}_AUD_$number';
   }
 
+  /// Sanitiza um id de vistoria para uso em path/nome de arquivo no Storage.
   String _safeStorageName(String value) {
     return value
         .trim()
@@ -211,24 +181,21 @@ class UserAudioStorageService {
         .replaceAll(RegExp(r'_+'), '_');
   }
 
+  /// Normaliza o e-mail (minúsculo, sem espaços) pra gravar no Storage.
   String _normalizeEmail(String? email) {
     return (email ?? '').trim().toLowerCase();
   }
 }
 
+/// Resultado do upload de um áudio do chat já convertido para MP3.
 class UploadedUserAudio {
   final String uid;
   final String email;
   final String audioId;
   final String idvistoria;
 
-  /// Caminho final do MP3 no Storage:
-  /// vistorias/{idvistoria}/audio/{audioId}.mp3
   final String mp3StoragePath;
   final String mp3DownloadUrl;
-
-  /// Campos mantidos por compatibilidade com o chat atual.
-  /// Como agora salvamos somente MP3, eles apontam para o mesmo arquivo MP3.
   final String originalStoragePath;
   final String originalDownloadUrl;
 

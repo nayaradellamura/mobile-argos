@@ -4,14 +4,8 @@ import 'package:flutter/material.dart';
 
 import '../../services/argos_connectivity_service.dart';
 
-/// Antes disto, offline trocava a árvore inteira pela tela cheia de "sem
-/// conexão", travando o app até a rede voltar. O app agora funciona híbrido
-/// (a Fase 2/3 de offline já cobrem coleta em massa e a listagem de
-/// vistorias com o que está em cache) -- então o gate nunca mais bloqueia,
-/// só sinaliza com uma faixa fina não-bloqueante no topo. Cada tela decide
-/// sozinha o que fazer quando `ArgosConnectivityService.instance.isOnline`
-/// está falso (ex: `InspectionsPage` escondendo o ranking, `_registerCheckIn`
-/// recusando o check-in com uma mensagem clara).
+/// Envolve o app inteiro: nunca bloqueia a tela, só exibe uma faixa fina de
+/// status de conexão no topo, acima do conteúdo normal.
 class ArgosNetworkGate extends StatefulWidget {
   final Widget child;
 
@@ -22,14 +16,6 @@ class ArgosNetworkGate extends StatefulWidget {
 }
 
 class _ArgosNetworkGateState extends State<ArgosNetworkGate> {
-  // Enquanto o banner está visível (offline ou o "conectado novamente"
-  // passageiro), ele mesmo já reserva o espaço da status bar pra si
-  // (via SafeArea). Se o conteúdo abaixo também reservar -- e reserva,
-  // quase toda tela do app tem seu próprio SafeArea/Scaffold pensando que
-  // está encostada no topo físico -- o inset conta em dobro e sobra uma
-  // faixa vazia entre o banner e o conteúdo. `MediaQuery.removePadding`
-  // avisa o conteúdo que o topo já foi consumido, só enquanto o banner
-  // estiver de fato ocupando aquele espaço.
   bool _bannerReservesTopInset =
       !ArgosConnectivityService.instance.isOnline.value;
 
@@ -47,14 +33,6 @@ class _ArgosNetworkGateState extends State<ArgosNetworkGate> {
           )
         : widget.child;
 
-    // Column, não Stack/Positioned: a faixa precisa OCUPAR espaço de
-    // verdade e empurrar o conteúdo pra baixo -- um overlay flutuando por
-    // cima cobria o cabeçalho/busca da própria tela por baixo. Fica sempre
-    // montada (mesmo online, com altura 0) pra poder animar sozinha a
-    // confirmação breve de "conectado novamente" quando a rede volta.
-    // `stretch` é o que garante que a faixa ocupe a largura inteira da
-    // tela -- sem isso ela encolhe pro tamanho do conteúdo (ícone + texto)
-    // e fica um "pill" centralizado em vez de uma barra de ponta a ponta.
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -67,13 +45,11 @@ class _ArgosNetworkGateState extends State<ArgosNetworkGate> {
   }
 }
 
+/// Estados possíveis da faixa de conexão.
 enum _StatusBarState { hidden, offline, backOnline }
 
-/// Faixa de conectividade no estilo dos apps mais comuns do mercado (o
-/// "No Internet Connection" que desliza do topo no iOS, o "Conectando..."
-/// do WhatsApp): tom neutro (não é um erro da marca, é só um estado
-/// informativo), ícone + texto direto, e uma confirmação verde breve ao
-/// reconectar -- some sozinha depois de alguns segundos.
+/// Faixa de status de conexão: mostra "offline" enquanto sem rede e uma
+/// confirmação breve de "conectado novamente" ao reconectar.
 class _ConnectivityStatusBar extends StatefulWidget {
   final ValueChanged<bool> onVisibilityChanged;
 
@@ -157,12 +133,7 @@ class _ConnectivityStatusBarState extends State<_ConnectivityStatusBar> {
   }
 }
 
-/// Faixa minimalista, estilo Duolingo: só ícone + texto centralizados, sem
-/// nenhuma ação (nada de botão de retry) -- a reconexão já é detectada
-/// sozinha pelo `ArgosConnectivityService`, não depende do usuário tocar em
-/// nada. `SafeArea` (não um cálculo manual de `MediaQuery.padding.top`)
-/// garante que a faixa nunca fica por baixo da status bar, em qualquer
-/// aparelho (notch, ilha dinâmica, etc.).
+/// Conteúdo visual da faixa: ícone + texto centralizados sobre fundo colorido.
 class _StatusBarContent extends StatelessWidget {
   final Color color;
   final IconData icon;

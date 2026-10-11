@@ -5,6 +5,7 @@ import 'package:shimmer/shimmer.dart';
 
 import 'data/mechanic_performance.dart';
 
+// Tela de ranking/desempenho da equipe de mecânicos, com filtro de período.
 class MetricsPage extends StatefulWidget {
   final String credenciadoId;
 
@@ -20,9 +21,7 @@ class _MetricsPageState extends State<MetricsPage> {
   bool _showOnlyMine = false;
   late Future<List<MechanicPerformance>> _rankingFuture;
 
-  // Incrementado a cada novo carregamento, para que uma atualização em
-  // segundo plano de um pedido antigo (ex.: período trocado antes dela
-  // voltar) seja ignorada em vez de sobrescrever a tela com dado errado.
+  // Invalida respostas antigas quando um novo carregamento é disparado antes delas voltarem.
   int _loadToken = 0;
 
   @override
@@ -31,6 +30,7 @@ class _MetricsPageState extends State<MetricsPage> {
     _rankingFuture = _load();
   }
 
+  // Carrega o ranking do período atual, ignorando respostas de carregamentos já superados.
   Future<List<MechanicPerformance>> _load() {
     final token = ++_loadToken;
 
@@ -55,6 +55,7 @@ class _MetricsPageState extends State<MetricsPage> {
     });
   }
 
+  // Troca o período selecionado (ou abre o date range picker, se for personalizado) e recarrega.
   Future<void> _selectPeriod(MetricsPeriod period) async {
     if (period == MetricsPeriod.custom) {
       final now = DateTime.now();
@@ -289,9 +290,7 @@ class _MetricsPageState extends State<MetricsPage> {
   }
 }
 
-/// Faz o filho entrar com fade + leve deslize de baixo pra cima, com um
-/// atraso proporcional a [index] — dá o efeito de itens "chegando" um
-/// atrás do outro em vez de estourarem todos de uma vez.
+// Anima a entrada do filho com fade + deslize, atrasado proporcionalmente a [index].
 class _StaggeredEntrance extends StatefulWidget {
   final int index;
   final Widget child;
@@ -332,8 +331,7 @@ class _StaggeredEntranceState extends State<_StaggeredEntrance> {
   }
 }
 
-/// Pódio com os 3 primeiros colocados: 2º à esquerda, 1º no centro (maior,
-/// anel dourado), 3º à direita — clássico visual de leaderboard.
+// Pódio com os 3 primeiros colocados: 2º à esquerda, 1º no centro, 3º à direita.
 class _PodiumSection extends StatelessWidget {
   final List<MechanicPerformance> top;
   final String? currentUid;
@@ -394,6 +392,7 @@ class _PodiumSection extends StatelessWidget {
   }
 }
 
+// Um lugar do pódio: avatar com medalha, nome e contagem de concluídos.
 class _PodiumSpot extends StatefulWidget {
   final MechanicPerformance performance;
   final int position;
@@ -563,6 +562,7 @@ class _PodiumSpotState extends State<_PodiumSpot> {
   }
 }
 
+// Skeleton animado exibido enquanto o ranking carrega.
 class _MetricsSkeleton extends StatelessWidget {
   const _MetricsSkeleton();
 
@@ -587,6 +587,7 @@ class _MetricsSkeleton extends StatelessWidget {
   }
 }
 
+// Skeleton do card de visão geral da equipe.
 class _MetricsOverviewSkeleton extends StatelessWidget {
   const _MetricsOverviewSkeleton();
 
@@ -640,6 +641,7 @@ class _MetricsOverviewSkeleton extends StatelessWidget {
   }
 }
 
+// Skeleton de um card de ranking individual.
 class _MetricsRankingCardSkeleton extends StatelessWidget {
   const _MetricsRankingCardSkeleton();
 
@@ -711,6 +713,7 @@ class _MetricsRankingCardSkeleton extends StatelessWidget {
   }
 }
 
+// Retângulo cinza usado como placeholder de shimmer.
 class _SkeletonBox extends StatelessWidget {
   final double width;
   final double height;
@@ -735,6 +738,7 @@ class _SkeletonBox extends StatelessWidget {
   }
 }
 
+// Barra superior da tela de métricas: botão de voltar, título e subtítulo com o período.
 class _MetricsTopBar extends StatelessWidget {
   final String subtitle;
 
@@ -835,6 +839,7 @@ class _MetricsTopBar extends StatelessWidget {
   }
 }
 
+// Linha de chips pra escolher o período do ranking (7/30/90 dias, personalizado).
 class _PeriodSelector extends StatelessWidget {
   final MetricsPeriod selected;
   final ValueChanged<MetricsPeriod> onSelect;
@@ -894,6 +899,7 @@ class _PeriodSelector extends StatelessWidget {
   }
 }
 
+// Alterna entre ver o ranking da equipe inteira ou só o desempenho próprio.
 class _ViewModeToggle extends StatelessWidget {
   final bool showOnlyMine;
   final ValueChanged<bool> onChanged;
@@ -932,6 +938,7 @@ class _ViewModeToggle extends StatelessWidget {
   }
 }
 
+// Um segmento (aba) do toggle Equipe/Meu desempenho.
 class _ViewModeSegment extends StatelessWidget {
   final String label;
   final IconData icon;
@@ -984,15 +991,8 @@ class _ViewModeSegment extends StatelessWidget {
   }
 }
 
-/// Resumo visual da equipe: KPIs + gráfico de barras por status.
-///
-/// As cores usadas aqui (Pendentes/Em andamento/Em análise/Revisão/
-/// Canceladas/Concluídas) NÃO são as mesmas cores de status usadas em
-/// outras telas do app (chips/ícones isolados). Elas foram escolhidas e
-/// validadas especificamente para aparecer lado a lado num gráfico —
-/// a checagem de daltonismo mostrou que o conjunto antigo (laranja/
-/// laranja-escuro/vermelho/verde) tem pares quase indistinguíveis para
-/// quem tem deuteranopia/protanopia quando exibidos juntos.
+// Resumo visual da equipe: KPIs + gráfico de barras por status. Paleta própria,
+// validada para contraste em daltonismo, diferente das cores de status usadas alhures.
 class _TeamOverviewSection extends StatelessWidget {
   final List<MechanicPerformance> ranking;
   final String title;
@@ -1113,6 +1113,7 @@ class _TeamOverviewSection extends StatelessWidget {
   }
 }
 
+// Um tile de KPI (valor grande + rótulo) do resumo da equipe.
 class _TeamStatTile extends StatelessWidget {
   final String label;
   final String value;
@@ -1152,6 +1153,7 @@ class _TeamStatTile extends StatelessWidget {
   }
 }
 
+// Dados de uma categoria de status exibida no gráfico de barras da equipe.
 class _StatusBarData {
   final String label;
   final IconData icon;
@@ -1166,6 +1168,7 @@ class _StatusBarData {
   });
 }
 
+// Uma linha do gráfico de barras: ícone, rótulo, barra animada e valor.
 class _StatusBarRow extends StatefulWidget {
   final _StatusBarData data;
   final int max;
@@ -1266,6 +1269,7 @@ class _StatusBarRowState extends State<_StatusBarRow> {
   }
 }
 
+// Card de um mecânico no ranking: posição, avatar, nome, stats e barra de magnitude.
 class _RankingCard extends StatelessWidget {
   final int position;
   final MechanicPerformance performance;
@@ -1454,10 +1458,7 @@ class _RankingCard extends StatelessWidget {
   }
 }
 
-/// Barra de magnitude (mesma cor em todas as linhas): compara o número de
-/// concluídos deste mecânico com o do melhor colocado. Não é usada para
-/// distinguir identidade — por isso é sempre a mesma cor (azul da marca),
-/// diferente do gráfico de status da equipe, que usa cores por categoria.
+// Barra (sempre azul) comparando os concluídos deste mecânico com o melhor colocado.
 class _MagnitudeBar extends StatefulWidget {
   final int value;
   final int max;
@@ -1518,6 +1519,7 @@ class _MagnitudeBarState extends State<_MagnitudeBar> {
   }
 }
 
+// Chip pequeno com ícone + rótulo (ex: "5 concluídos") no card de ranking.
 class _StatChip extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -1556,6 +1558,7 @@ class _StatChip extends StatelessWidget {
   }
 }
 
+// Tela de estado vazio/erro do ranking, com ícone, mensagem e ação opcional.
 class _MetricsStateMessage extends StatelessWidget {
   final IconData icon;
   final String title;

@@ -1,5 +1,3 @@
-// lib/main.dart
-
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -20,6 +18,7 @@ import 'features/inspections/data/inspections_prefetch_service.dart';
 import 'services/bulk_sync_coordinator.dart';
 import 'services/session_context_service.dart';
 
+// Ponto de entrada: inicializa Firebase, notificações push e sync em background.
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -33,15 +32,14 @@ Future<void> main() async {
 
   await ArgosPushNotificationService.instance.initialize();
 
-  // Instancia cedo (não só quando o Chat IA abre) -- o coordenador escuta
-  // conectividade sozinho desde o boot, então a sincronização/reconciliação
-  // de vistorias em massa pendentes dispara em qualquer tela, não só se o
-  // mecânico passar pelo Argos IA antes de reconectar.
+  // Instancia cedo pra escutar conectividade e sincronizar vistorias
+  // pendentes desde o boot, em qualquer tela.
   BulkSyncCoordinator.instance;
 
   runApp(const ArgosApp());
 }
 
+// Widget raiz do app: tema, overlay de notificações e gate de conectividade.
 class ArgosApp extends StatelessWidget {
   const ArgosApp({super.key});
 
@@ -70,6 +68,7 @@ class ArgosApp extends StatelessWidget {
   }
 }
 
+// Sobrepõe o banner de notificação em primeiro plano por cima do app inteiro.
 class ArgosNotificationOverlay extends StatelessWidget {
   final Widget child;
 
@@ -113,6 +112,7 @@ class ArgosNotificationOverlay extends StatelessWidget {
   }
 }
 
+// Banner visual de uma notificação recebida com o app em primeiro plano.
 class _ArgosForegroundNotificationBanner extends StatelessWidget {
   final ArgosAppNotification notification;
   final VoidCallback onDismiss;
@@ -209,12 +209,8 @@ class _ArgosForegroundNotificationBanner extends StatelessWidget {
   }
 }
 
-/// Gate único de inicialização.
-///
-/// Mostra a SplashPage uma única vez na abertura do app.
-/// Depois que a splash inicial saiu, o app continua ouvindo mudanças de login.
-/// Assim, quando o usuário faz login pelo Google/e-mail, a tela troca para o
-/// MainShell sem precisar reiniciar a SplashPage e sem mostrar roda intermediária.
+// Gate de inicialização: mostra a SplashPage uma vez e depois alterna entre
+// LoginPage e MainShell conforme o estado de autenticação.
 class StartupGate extends StatefulWidget {
   const StartupGate({super.key});
 
@@ -269,6 +265,8 @@ class _StartupGateState extends State<StartupGate> {
     super.dispose();
   }
 
+  // Reage a mudanças de autenticação, disparando o pré-carregamento de
+  // vistorias e a checagem de perfil completo.
   Future<void> _handleAuthChanged(User? authUser) async {
     final token = ++_authChangeToken;
 
@@ -294,11 +292,6 @@ class _StartupGateState extends State<StartupGate> {
 
     _tryReleaseStartupGate();
 
-    // Aproveita o tempo da splash para já buscar as vistorias e as fotos de
-    // perfil da equipe: o gate só libera a splash depois que isso terminar
-    // (ou depois de um teto de segurança, para uma rede ruim não travar o
-    // login). Assim, quando a tela de Vistorias abrir de verdade, os cards
-    // já chegam prontos, sem o "pulo" de foto chegando atrasada.
     unawaited(_warmUpInspections());
     _warmUpTimeoutTimer =
         Timer(const Duration(seconds: 3), _markWarmUpCompleted);
@@ -316,18 +309,19 @@ class _StartupGateState extends State<StartupGate> {
     _tryReleaseStartupGate();
   }
 
+  // Pré-carrega vistorias e fotos de perfil durante a splash, com teto de
+  // segurança em _warmUpTimeoutTimer pra não travar o login numa rede ruim.
   Future<void> _warmUpInspections() async {
     try {
       final session = await SessionContextService.instance.resolve();
       await InspectionsPrefetchService.instance.warmUp(session.credenciadoId);
     } catch (_) {
-      // Sem oficina vinculada, sem rede, etc. — a tela de Vistorias resolve
-      // tudo normalmente por conta própria quando for aberta.
     } finally {
       _markWarmUpCompleted();
     }
   }
 
+  // Marca o pré-carregamento como concluído (por sucesso, falha ou timeout).
   void _markWarmUpCompleted() {
     _warmUpTimeoutTimer?.cancel();
 
@@ -340,6 +334,8 @@ class _StartupGateState extends State<StartupGate> {
     _tryReleaseStartupGate();
   }
 
+  // Checa se o usuário precisa completar o cadastro, tentando users/{email},
+  // depois users/{uid}, depois uma query por uid.
   Future<bool> _loadProfileCompletionRequired(User user) async {
     final email = (user.email ?? '').trim().toLowerCase();
 
@@ -350,9 +346,6 @@ class _StartupGateState extends State<StartupGate> {
     try {
       final db = FirebaseFirestore.instance;
 
-      // Tenta o cache local do Firestore primeiro: em aberturas mornas do
-      // app (usuário já logou antes neste aparelho), isso resolve quase
-      // instantaneamente, sem esperar a rede, encurtando a splash.
       final byEmail = await _getUserDocCacheFirst(
         db.collection('users').doc(email),
       );
@@ -389,8 +382,8 @@ class _StartupGateState extends State<StartupGate> {
     }
   }
 
-  /// Lê um documento tentando primeiro o cache local do Firestore, caindo
-  /// para o servidor apenas se não houver nada em cache ainda.
+  // Lê um documento tentando primeiro o cache local do Firestore, caindo
+  // para o servidor se não houver nada em cache ainda.
   Future<DocumentSnapshot<Map<String, dynamic>>> _getUserDocCacheFirst(
     DocumentReference<Map<String, dynamic>> ref,
   ) async {
@@ -398,13 +391,12 @@ class _StartupGateState extends State<StartupGate> {
       final cached = await ref.get(const GetOptions(source: Source.cache));
 
       if (cached.exists) return cached;
-    } catch (_) {
-      // Sem cache local ainda — segue para a leitura normal (servidor).
-    }
+    } catch (_) {}
 
     return ref.get();
   }
 
+  // Marca a splash como concluída (callback do SplashPage).
   void _finishSplash() {
     if (!mounted || _splashCompleted) return;
 
@@ -415,18 +407,16 @@ class _StartupGateState extends State<StartupGate> {
     _tryReleaseStartupGate();
   }
 
+  // Libera a splash só depois que ela terminou de tocar, o auth resolveu, o
+  // perfil carregou (se logado) e o pré-carregamento terminou (ou expirou).
   void _tryReleaseStartupGate() {
     if (!mounted || _startupGateReleased) return;
 
     if (!_splashCompleted) return;
     if (!_authResolved) return;
 
-    // Na abertura com usuário já logado, segura a splash até o perfil carregar.
-    // Depois que o gate já saiu da splash, novos logins não voltam para splash.
     if (_user != null && _isResolvingProfile) return;
 
-    // E até o pré-carregamento das vistorias/fotos terminar (ou o teto de
-    // segurança de _warmUpTimeoutTimer disparar).
     if (_user != null && !_warmUpCompleted) return;
 
     setState(() {
@@ -468,6 +458,7 @@ class _StartupGateState extends State<StartupGate> {
   }
 }
 
+// Gradiente de fundo usado atrás da splash/login/main shell.
 class _ArgosBackground extends StatelessWidget {
   const _ArgosBackground();
 

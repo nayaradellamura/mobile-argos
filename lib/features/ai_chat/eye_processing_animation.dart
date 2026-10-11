@@ -5,15 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-/// Animação exibida enquanto o pacote do modo "enviar tudo de uma vez" está
-/// sendo processado (upload de fotos/áudio + orçamento + transição de
-/// status) -- glow pulsante reaproveita o mesmo padrão de
-/// `_CameraReleaseButtonState` em `ai_chat_page.dart`, só centralizado e
-/// maior, com um anel giratório (efeito "scanner") em volta do olho.
-///
-/// `statusText` é dirigido por quem chama (o orquestrador do envio em
-/// massa), refletindo a etapa real (fotos/áudio/orçamento/finalizando) em
-/// vez de um texto cíclico desconectado do progresso de verdade.
+/// Animação (olho com glow pulsante + anel giratório) exibida enquanto o
+/// pacote do modo "enviar tudo de uma vez" está sendo processado; o texto de
+/// status é controlado por quem chama, via [statusText].
 class EyeProcessingAnimation extends StatefulWidget {
   final ValueListenable<String> statusText;
 
@@ -145,6 +139,7 @@ class _EyeProcessingAnimationState extends State<EyeProcessingAnimation>
   }
 }
 
+/// Desenha o arco giratório estilo "scanner" em volta do olho.
 class _ScanRingPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {

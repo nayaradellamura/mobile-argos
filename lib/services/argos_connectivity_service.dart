@@ -4,12 +4,8 @@ import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 
-/// Detecção de conectividade compartilhada -- antes vivia só dentro de
-/// `_ArgosNetworkGateState`; o app hoje funciona híbrido (offline não
-/// bloqueia mais nada, só avisa via faixa fina), e outras telas
-/// (`InspectionsPage`) também precisam saber se estão online -- pra
-/// esconder ações que exigem dado fresco (ranking) ou recusar uma
-/// transação (check-in) com uma mensagem clara em vez de travar tentando.
+/// Detecção de conectividade compartilhada: expõe [isOnline] e checa a
+/// internet de verdade (não só o rádio) ao detectar qualquer mudança de rede.
 class ArgosConnectivityService {
   ArgosConnectivityService._() {
     _init();
@@ -26,6 +22,8 @@ class ArgosConnectivityService {
   StreamSubscription<List<ConnectivityResult>>? _subscription;
   Timer? _debounce;
 
+  /// Faz a checagem inicial e passa a escutar mudanças de conectividade
+  /// (com debounce) pra reavaliar.
   void _init() {
     _checkInternet();
 
@@ -35,6 +33,7 @@ class ArgosConnectivityService {
     });
   }
 
+  /// Atualiza [isOnline] com o resultado de [hasRealInternet].
   Future<void> _checkInternet() async {
     isOnline.value = await hasRealInternet();
   }
@@ -42,6 +41,7 @@ class ArgosConnectivityService {
   /// Refaz a checagem agora (usado pelo botão "Tentar reconectar").
   Future<void> recheckNow() => _checkInternet();
 
+  /// Checa se há internet de fato: rádio conectado + lookup DNS bem-sucedido.
   Future<bool> hasRealInternet() async {
     try {
       final connectivityResult = await _connectivity.checkConnectivity();

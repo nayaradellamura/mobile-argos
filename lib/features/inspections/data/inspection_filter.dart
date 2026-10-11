@@ -2,12 +2,8 @@ import 'package:flutter/material.dart';
 
 import 'inspection_case.dart';
 
-// Ordem de EXIBIÇÃO dos chips na tela (Todas > Pendentes > Andamento >
-// Análise > Revisão > Concluídas > Canceladas) -- diferente da ordem de
-// RESOLUÇÃO usada internamente por InspectionCase.primaryCategory pra
-// decidir qual categoria vence em caso de condição ambígua. As duas podem
-// divergir sem problema: uma é "onde aparece na tela", a outra é "quem
-// ganha o empate".
+/// Filtros de status disponíveis na tela de Vistorias, na ordem de exibição
+/// dos chips (diferente da ordem de resolução de `InspectionCase.primaryCategory`).
 enum InspectionFilter {
   all,
   pending,
@@ -95,6 +91,7 @@ extension InspectionFilterX on InspectionFilter {
     }
   }
 
+  /// Se a inspeção pertence a este filtro.
   bool matches(InspectionCase inspection) {
     switch (this) {
       case InspectionFilter.all:

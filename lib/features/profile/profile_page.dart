@@ -12,6 +12,7 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import '../../services/session_context_service.dart';
 
+// Tela de perfil do usuário: visualiza/edita dados pessoais e completa o cadastro.
 class ProfilePage extends StatefulWidget {
   final User user;
   final bool requireCompletion;
@@ -66,6 +67,7 @@ class _ProfilePageState extends State<ProfilePage> {
 
   String get emailKey => (widget.user.email ?? '').trim().toLowerCase();
 
+  // Se o usuário acessa por e-mail/senha (exige foto de perfil pra completar o cadastro).
   bool get isPasswordAccess {
     if (provider == 'password') return true;
     if (tipoAcesso.contains('email_senha')) return true;
@@ -77,6 +79,7 @@ class _ProfilePageState extends State<ProfilePage> {
 
   bool get canEdit => widget.requireCompletion || isEditing;
 
+  // Se a oficina/empresa já está travada (cadastro completo com credenciado definido).
   bool get isCredenciadoLocked {
     final lockedId = lockedCredenciadoId?.trim() ?? '';
 
@@ -124,6 +127,7 @@ class _ProfilePageState extends State<ProfilePage> {
     );
   }
 
+  // Deduz o provider de login (google/password) a partir dos dados do FirebaseAuth.
   String _inferProvider() {
     final providers = widget.user.providerData.map((p) => p.providerId).toSet();
 
@@ -133,6 +137,7 @@ class _ProfilePageState extends State<ProfilePage> {
     return provider.isEmpty ? 'password' : provider;
   }
 
+  // Deduz o tipo de acesso ('sso_google'/'email_senha') a partir do provider.
   String _inferTipoAcesso() {
     final inferredProvider = provider.isEmpty ? _inferProvider() : provider;
 
@@ -141,6 +146,7 @@ class _ProfilePageState extends State<ProfilePage> {
     return 'email_senha';
   }
 
+  // Carrega credenciados, cidades e o perfil salvo do usuário, em paralelo.
   Future<void> _loadInitialData() async {
     setState(() {
       isLoading = true;
@@ -176,6 +182,7 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
+  // Busca a lista de oficinas/credenciados no Firestore (com cache estático entre instâncias).
   Future<void> _loadCredenciados() async {
     final cached = _cachedCredenciados;
 
@@ -205,6 +212,7 @@ class _ProfilePageState extends State<ProfilePage> {
     credenciados = loaded;
   }
 
+  // Busca a lista de municípios brasileiros na API do IBGE (com cache estático entre instâncias).
   Future<void> _loadBrazilianCities() async {
     final cached = _cachedCities;
 
@@ -259,6 +267,7 @@ class _ProfilePageState extends State<ProfilePage> {
     cities = loaded;
   }
 
+  // Carrega o doc do usuário em `users/{email}` e preenche os controllers do formulário.
   Future<void> _loadProfileData() async {
     final email = emailKey;
 
@@ -349,6 +358,7 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
+  // Busca um credenciado pelo id na lista carregada.
   CredenciadoOption? _findCredenciadoById(String id) {
     for (final credenciado in credenciados) {
       if (credenciado.id == id) return credenciado;
@@ -357,6 +367,7 @@ class _ProfilePageState extends State<ProfilePage> {
     return null;
   }
 
+  // Busca um credenciado pelo nome (comparação case-insensitive).
   CredenciadoOption? _findCredenciadoByName(String name) {
     final normalized = name.trim().toLowerCase();
 
@@ -371,6 +382,7 @@ class _ProfilePageState extends State<ProfilePage> {
     return null;
   }
 
+  // Busca uma cidade pelo nome (e UF, se informada) na lista carregada do IBGE.
   CityOption? _findCity(String name, String uf) {
     final normalizedName = name.trim().toLowerCase();
     final normalizedUf = uf.trim().toUpperCase();
@@ -387,6 +399,7 @@ class _ProfilePageState extends State<ProfilePage> {
     return null;
   }
 
+  // Abre a galeria pra escolher uma nova foto de perfil.
   Future<void> _pickPhoto() async {
     if (!canEdit || isSaving) return;
 
@@ -412,6 +425,7 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
+  // Sobe a foto selecionada pro Storage e retorna sua URL (ou a URL atual, se nada foi trocado).
   Future<String?> _uploadSelectedPhoto() async {
     final photo = selectedPhoto;
 
@@ -429,6 +443,7 @@ class _ProfilePageState extends State<ProfilePage> {
     return ref.getDownloadURL();
   }
 
+  // Replica nome/e-mail/foto atualizados pros sinistros já atribuídos a este usuário, em lotes.
   Future<void> _syncAssignedProfileToSinistros({
   required String uid,
   required String name,
@@ -480,6 +495,7 @@ class _ProfilePageState extends State<ProfilePage> {
     return photoURL != null && photoURL!.trim().isNotEmpty;
   }
 
+  // Pré-carrega a foto de perfil no ImageCache do Flutter, evitando repetir se a URL não mudou.
   Future<void> _cacheProfilePhoto(String? url) async {
     final cleanUrl = url?.trim() ?? '';
 
@@ -509,6 +525,7 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
+  // Valida um CPF pelos dígitos verificadores.
   bool _isValidCpf(String value) {
     final cpf = value.replaceAll(RegExp(r'\D'), '');
 
@@ -534,6 +551,7 @@ class _ProfilePageState extends State<ProfilePage> {
     return digit1 == int.parse(cpf[9]) && digit2 == int.parse(cpf[10]);
   }
 
+  // Valida o formulário e salva o perfil (foto, dados pessoais, oficina) no Firestore/Auth.
   Future<void> _saveProfile() async {
     if (isSaving) return;
 
@@ -668,9 +686,6 @@ class _ProfilePageState extends State<ProfilePage> {
 
       await _cacheProfilePhoto(uploadedPhotoURL);
 
-      // O cadastro pode ter mudado nome/credenciadoId — força o
-      // SessionContextService a buscar de novo em vez de continuar
-      // servindo o contexto antigo do cache para as outras telas.
       unawaited(SessionContextService.instance.resolve(forceRefresh: true));
 
       if (!mounted) return;
@@ -712,11 +727,13 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
+  // Desloga o usuário atual.
   Future<void> _logout() async {
     await SessionContextService.instance.logout();
   }
 
 
+  // Decoração padrão (bordas, cores) dos campos de texto do formulário.
   InputDecoration _fieldDecoration({
     required String label,
     IconData? icon,
@@ -750,6 +767,7 @@ class _ProfilePageState extends State<ProfilePage> {
     );
   }
 
+  // Campo de oficina/empresa: texto travado se já tem credenciado fixado, ou dropdown pra escolher.
   Widget _buildCredenciadoField() {
     if (!canEdit || isCredenciadoLocked) {
       return _ProfileTextField(
@@ -794,6 +812,7 @@ class _ProfilePageState extends State<ProfilePage> {
     );
   }
 
+  // Campo de cidade/UF: texto travado em modo leitura, ou autocomplete de cidades do IBGE.
   Widget _buildCityField() {
     if (!canEdit) {
       return Row(
@@ -1219,6 +1238,7 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 }
 
+// Banner pedindo pra finalizar o cadastro antes de liberar o uso do app.
 class _CompletionBanner extends StatelessWidget {
   final bool isPasswordAccess;
 
@@ -1256,6 +1276,7 @@ class _CompletionBanner extends StatelessWidget {
   }
 }
 
+// Banner mostrando o tipo de acesso e se o cadastro já está completo.
 class _StatusBanner extends StatelessWidget {
   final String provider;
   final String tipoAcesso;
@@ -1307,6 +1328,7 @@ class _StatusBanner extends StatelessWidget {
   }
 }
 
+// Campo de texto padronizado do formulário de perfil (bordas, cores, validação).
 class _ProfileTextField extends StatelessWidget {
   final TextEditingController controller;
   final String label;
@@ -1367,6 +1389,7 @@ class _ProfileTextField extends StatelessWidget {
   }
 }
 
+// Uma oficina/empresa credenciada selecionável no formulário de perfil.
 class CredenciadoOption {
   final String id;
   final String name;
@@ -1374,6 +1397,7 @@ class CredenciadoOption {
   const CredenciadoOption({required this.id, required this.name});
 }
 
+// Uma cidade brasileira (nome + UF) carregada da API do IBGE.
 class CityOption {
   final String name;
   final String uf;
@@ -1384,6 +1408,7 @@ class CityOption {
 }
 
 
+// Remove o sufixo " - UF" de um nome de cidade digitado, se presente.
 String _cleanCityName(String value) {
   final text = value.trim();
 
@@ -1396,6 +1421,7 @@ String _cleanCityName(String value) {
   return text.substring(0, match.start).trim();
 }
 
+// Formata telefone brasileiro como (DD) NNNNN-NNNN enquanto o usuário digita.
 class BrazilianPhoneFormatter extends TextInputFormatter {
   static String format(String value) {
     final digits = value.replaceAll(RegExp(r'\D'), '');
@@ -1429,6 +1455,7 @@ class BrazilianPhoneFormatter extends TextInputFormatter {
   }
 }
 
+// Formata CPF como NNN.NNN.NNN-NN enquanto o usuário digita.
 class CpfInputFormatter extends TextInputFormatter {
   static String format(String value) {
     final digits = value.replaceAll(RegExp(r'\D'), '');

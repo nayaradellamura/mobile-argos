@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../../inspections/data/inspection_case.dart';
 
+/// Período usado para filtrar o ranking de desempenho dos mecânicos.
 enum MetricsPeriod { last7Days, last30Days, allTime, custom }
 
 extension MetricsPeriodX on MetricsPeriod {
@@ -22,11 +23,8 @@ extension MetricsPeriodX on MetricsPeriod {
   }
 }
 
-/// Desempenho agregado de um mecânico dentro do período selecionado.
-///
-/// É calculado inteiramente em memória a partir dos sinistros já
-/// carregados do credenciado — não depende de nenhuma coleção/campo
-/// agregado extra no Firestore.
+/// Desempenho agregado de um mecânico no período selecionado, calculado em
+/// memória a partir dos sinistros já carregados do credenciado.
 class MechanicPerformance {
   final String uid;
   final String name;
@@ -58,6 +56,7 @@ class MechanicPerformance {
       totalAssigned == 0 ? 0 : completed / totalAssigned;
 }
 
+/// Identidade (nome/foto) de um mecânico, usada pra montar o roster.
 class _RosterEntry {
   final String uid;
   final String name;
@@ -72,21 +71,16 @@ class _RosterEntry {
   });
 }
 
+/// Monta o ranking de desempenho dos mecânicos de uma oficina.
 class MechanicPerformanceRepository {
   MechanicPerformanceRepository._();
 
   static final MechanicPerformanceRepository instance =
       MechanicPerformanceRepository._();
 
-  /// Monta o ranking de desempenho de todos os mecânicos que já tiveram
-  /// pelo menos um chamado atribuído nesta oficina, com as métricas
-  /// recalculadas apenas para o [period] selecionado.
-  ///
-  /// Tenta primeiro o cache local do Firestore para pintar a tela sem
-  /// esperar rede; se achar algo em cache, devolve na hora e, em paralelo,
-  /// busca do servidor — chamando [onBackgroundRefresh] com o resultado
-  /// atualizado se ele vier diferente. Sem cache local ainda (ex.: nunca
-  /// abriu essa tela neste aparelho), busca do servidor normalmente.
+  /// Monta o ranking de desempenho de todos os mecânicos da oficina para o
+  /// [period] selecionado, priorizando o cache local do Firestore e
+  /// chamando [onBackgroundRefresh] se o servidor trouxer dado diferente.
   Future<List<MechanicPerformance>> loadRanking({
     required String credenciadoId,
     required MetricsPeriod period,
@@ -106,9 +100,7 @@ class MechanicPerformanceRepository {
       if (cached.docs.isNotEmpty) {
         cachedSnapshot = cached;
       }
-    } catch (_) {
-      // Sem cache local ainda — segue para a leitura normal (servidor).
-    }
+    } catch (_) {}
 
     if (cachedSnapshot != null) {
       if (onBackgroundRefresh != null) {
@@ -120,9 +112,7 @@ class MechanicPerformanceRepository {
                   _buildRanking(serverSnapshot, period, customStart, customEnd),
                 );
               })
-              .catchError((Object _) {
-                // Falha silenciosa: a tela já está mostrando o dado do cache.
-              }),
+              .catchError((Object _) {}),
         );
       }
 
@@ -134,6 +124,7 @@ class MechanicPerformanceRepository {
     return _buildRanking(snapshot, period, customStart, customEnd);
   }
 
+  /// Agrupa as inspeções por mecânico e calcula as métricas de cada um.
   List<MechanicPerformance> _buildRanking(
     QuerySnapshot<Map<String, dynamic>> snapshot,
     MetricsPeriod period,
@@ -153,10 +144,6 @@ class MechanicPerformanceRepository {
             return !date.isBefore(range.start) && !date.isAfter(range.end);
           }).toList();
 
-    // Roster: um mecânico entra na lista se já teve algum chamado
-    // atribuído a ele em qualquer época (não só no período selecionado),
-    // para que ele continue aparecendo (com zeros) mesmo em períodos
-    // sem atividade. Nome/foto usam o registro mais recente disponível.
     final sortedByRecency = [...allInspections]
       ..sort((a, b) => b.scheduledDate.compareTo(a.scheduledDate));
 
@@ -205,6 +192,7 @@ class MechanicPerformanceRepository {
     return results;
   }
 
+  /// Converte o [period] (ou intervalo custom) num range de datas concreto.
   DateTimeRange? _resolveDateRange(
     MetricsPeriod period,
     DateTime? customStart,
