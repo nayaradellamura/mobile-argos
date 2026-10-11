@@ -6,6 +6,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import '../../services/argos_push_notification_service.dart';
 
+/// Tela de login: e-mail/senha, SSO Google, primeiro acesso e recuperação de senha.
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
 
@@ -13,6 +14,7 @@ class LoginPage extends StatefulWidget {
   State<LoginPage> createState() => _LoginPageState();
 }
 
+/// Controla os formulários de login, os fluxos de autenticação (Firebase Auth + Google) e a validação de acesso do usuário no Firestore.
 class _LoginPageState extends State<LoginPage> {
   final formKey = GlobalKey<FormState>();
 
@@ -35,6 +37,7 @@ class _LoginPageState extends State<LoginPage> {
     super.dispose();
   }
 
+  /// Mostra uma snackbar simples com a mensagem informada.
   void _showSnack(
     String message, {
     Color backgroundColor = const Color(0xFF0057C0),
@@ -46,10 +49,12 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 
+  /// Normaliza um e-mail (trim + minúsculas) pra usar como chave no Firestore.
   String _normalizeEmail(String email) {
     return email.trim().toLowerCase();
   }
 
+  /// Traduz um código de erro do Firebase Auth pra uma mensagem amigável em português.
   String _authErrorMessage(FirebaseAuthException e) {
     switch (e.code) {
       case 'user-disabled':
@@ -82,6 +87,7 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
+  /// Traduz o status de acesso do usuário (pendente/bloqueado) pra uma mensagem amigável.
   String _accessStatusMessage(String status) {
     switch (status) {
       case 'pendente':
@@ -93,16 +99,19 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
+  /// Converte o provider de login ('google'/'password') no valor salvo em `tipoAcesso`.
   String _tipoAcessoFromProvider(String provider) {
     return provider == 'google' ? 'sso_google' : 'email_senha';
   }
 
+  /// Converte o provider de login no ID de provider do Firebase Auth.
   String _providerIdFromProvider(String provider) {
     return provider == 'google'
         ? GoogleAuthProvider.PROVIDER_ID
         : EmailAuthProvider.PROVIDER_ID;
   }
 
+  /// Combina o `tipoAcesso` já salvo com o novo provider usado, acumulando ambos os métodos quando aplicável.
   String _mergedTipoAcesso({
     required String currentTipoAcesso,
     required String newTipoAcesso,
@@ -128,18 +137,18 @@ class _LoginPageState extends State<LoginPage> {
     return 'email_senha';
   }
 
+  /// Desloga do Firebase (e do Google, se aplicável) quando o acesso do usuário é negado.
   Future<void> _signOutDeniedAccess({bool google = false}) async {
     await FirebaseAuth.instance.signOut();
 
     if (google) {
       try {
         await GoogleSignIn().signOut();
-      } catch (_) {
-        // Ignora erro ao sair da conta Google.
-      }
+      } catch (_) {}
     }
   }
 
+  /// Confere/cria o documento do usuário no Firestore e decide se o login pode prosseguir, de acordo com o status de acesso.
   Future<bool> _validateUserAccessAfterLogin(
     User user, {
     required String provider,
@@ -182,7 +191,7 @@ class _LoginPageState extends State<LoginPage> {
         'tipoAcesso': newTipoAcesso,
         'providers': FieldValue.arrayUnion([newTipoAcesso]),
         'authProviderIds': FieldValue.arrayUnion([newProviderId]),
-        'status': 'ativo',
+        'status': 'pendente',
         'origem': provider == 'google' ? 'sso_google' : 'login_email_senha',
         'origens': FieldValue.arrayUnion([
           provider == 'google' ? 'sso_google' : 'login_email_senha',
@@ -210,10 +219,6 @@ class _LoginPageState extends State<LoginPage> {
       newTipoAcesso: newTipoAcesso,
     );
 
-    // Nova regra:
-    // Mesmo e-mail pode usar e-mail/senha e Google.
-    // Não bloqueia mais troca de modalidade.
-    // O documento continua único em users/{email_normalizado}.
     await userRef.set({
       'uid': user.uid,
       'authUid': user.uid,
@@ -254,6 +259,7 @@ class _LoginPageState extends State<LoginPage> {
     return false;
   }
 
+  /// Diálogo que pede a senha atual pra vincular um login Google a uma conta e-mail/senha já existente.
   Future<String?> _showPasswordToLinkGoogleDialog({
     required String email,
   }) async {
@@ -341,6 +347,7 @@ class _LoginPageState extends State<LoginPage> {
     return password;
   }
 
+  /// Diálogo de confirmação pra vincular a senha informada a uma conta já cadastrada via Google.
   Future<bool> _showConfirmLinkPasswordToGoogleDialog({
     required String email,
   }) async {
@@ -384,6 +391,7 @@ class _LoginPageState extends State<LoginPage> {
     return result ?? false;
   }
 
+  /// Faz login com e-mail/senha e vincula a credencial Google à mesma conta.
   Future<UserCredential> _linkGoogleToEmailPasswordAccount({
     required String email,
     required String password,
@@ -413,6 +421,7 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
+  /// Faz login com Google (conferindo que é o mesmo e-mail) e vincula a senha informada à conta.
   Future<UserCredential> _signInWithGoogleAndLinkPassword({
     required String email,
     required String password,
@@ -492,6 +501,7 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
+  /// Faz login com e-mail e senha, tratando o caso de a conta já estar vinculada ao Google.
   Future<void> signInWithEmailAndPassword() async {
     if (isLoading) return;
 
@@ -643,6 +653,7 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
+  /// Faz login com o SSO Google, vinculando a uma conta e-mail/senha existente se necessário.
   Future<void> signInWithGoogle() async {
     if (isLoading) return;
 
@@ -761,6 +772,7 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
+  /// Pede o e-mail e dispara o fluxo de primeiro acesso (cria solicitação pendente) ou recuperação de senha.
   Future<void> sendAccessEmail({required bool firstAccess}) async {
     if (isLoading) return;
 
@@ -1278,6 +1290,7 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 
+  /// Bolinha verde do indicador "sistema online".
   Widget _statusDot() {
     return Container(
       width: 8,
