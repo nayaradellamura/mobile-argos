@@ -26,12 +26,10 @@ enum ChatMessageType { ai, user, photo, audio }
 
 enum ContinueVistoriaAction { continueNow, continueLater, startNew }
 
-/// Modo de coleta escolhido pelo mecânico ao abrir uma vistoria nova:
-/// `guiado` é o fluxo passo a passo de sempre (inalterado); `emMassa` pula a
-/// conversa turno-a-turno e deixa o mecânico montar um pacote (fotos, áudio,
-/// texto, orçamento) pra enviar de uma vez só.
+/// Modo de coleta da vistoria: passo a passo (guiado) ou tudo de uma vez (em massa).
 enum ColetaModo { guiado, emMassa }
 
+/// Representa uma mensagem renderizada no chat (IA, usuário, foto ou áudio).
 class ChatMessage {
   final ChatMessageType type;
   final String text;
@@ -52,22 +50,16 @@ class ChatMessage {
   /// URL pública/autenticada do MP3, usada para reproduzir depois que o app reabrir.
   final String? mp3DownloadUrl;
 
-  /// Status visual do áudio no app:
-  /// local, uploading, processing, transcribing, done ou error.
+  /// Status visual do áudio no app (local, uploading, processing, transcribing, done ou error).
   final String? audioStatus;
 
   /// Horário em que a mensagem foi criada/exibida no chat.
   final DateTime? createdAt;
 
-  /// true só na mensagem da pergunta bifurcada (guiado vs. em massa) --
-  /// renderiza os dois botões inline na bolha em vez de um dialog por cima
-  /// do chat.
+  /// true na mensagem que pergunta o modo de coleta, pra renderizar os botões inline na bolha.
   final bool isColetaModoPrompt;
 
-  /// Preenchido só depois que o mecânico toca numa das opções da pergunta
-  /// bifurcada -- registra qual foi escolhida na própria bolha (ver
-  /// _handleColetaModoChosen), em vez dos botões simplesmente sumirem sem
-  /// deixar rastro nenhum de qual resposta foi dada.
+  /// Modo escolhido pelo mecânico na pergunta bifurcada, registrado na própria bolha.
   final ColetaModo? selectedColetaModo;
 
   const ChatMessage({
@@ -107,39 +99,33 @@ class ChatMessage {
   }
 }
 
+/// Tela de chat/coleta de vistoria, guiada (com agente) ou em massa, incluindo retificação.
 class AiChatPage extends StatefulWidget {
-  /// ID do sinistro atual.
-  ///
-  /// Quando o chat for aberto a partir da tela de vistorias, passe este valor
-  /// para vincular mensagens, fotos e áudios ao sinistro correto.
+  /// ID do sinistro vinculado a esta vistoria.
   final String? sinistroId;
 
-  /// Quando true, ao abrir esta página ela não tenta retomar/criar uma
-  /// vistoria normal — ela busca a vistoria REJEITADA do sinistro e inicia
-  /// uma retificação a partir dela (ver
-  /// VistoriaChatSessionService.startRetificacaoFromSinistro). Usado pelo
-  /// botão "Iniciar Retificação" na tela de resumo.
+  /// Quando true, abre esta página já em fluxo de retificação de uma vistoria rejeitada.
   final bool startRetificacao;
 
-  /// Índice da aba selecionada no MainShell (ver `_selectedIndexNotifier`).
-  /// Escutado só pra recarregar a lista de veículos com check-in disponível
-  /// sempre que o usuário reabre esta aba -- sem isso, a lista só era
-  /// buscada uma vez no initState e ficava desatualizada quando o check-in
-  /// acontecia depois, na aba de Vistorias (o IndexedStack do MainShell
-  /// mantém esta página montada o tempo todo, initState não roda de novo).
+  /// Índice da aba selecionada no MainShell; recarrega a lista de veículos ao reabrir esta aba.
   final ValueListenable<int>? selectedTabIndexListenable;
+
+  /// Callback pra voltar a aba do MainShell para "Vistorias".
+  final VoidCallback? onGoToInspections;
 
   const AiChatPage({
     super.key,
     this.sinistroId,
     this.startRetificacao = false,
     this.selectedTabIndexListenable,
+    this.onGoToInspections,
   });
 
   @override
   State<AiChatPage> createState() => _AiChatPageState();
 }
 
+/// Orquestra bootstrap de sessão, envio de mensagens/fotos/áudio, modos online/offline e UI do chat.
 class _AiChatPageState extends State<AiChatPage> {
   final TextEditingController messageController = TextEditingController();
   final ScrollController scrollController = ScrollController();
@@ -151,20 +137,13 @@ class _AiChatPageState extends State<AiChatPage> {
   StreamSubscription<VistoriaChatCompletionState>?
       vistoriaCompletionSubscription;
 
-  /// Escuta `BulkSyncCoordinator.onPackageSubmitted` -- único jeito
-  /// confiável de saber que o pacote em massa desta vistoria terminou de
-  /// enviar, já que `watchCompletionState` não serve pro modo em massa
-  /// (exige `laudo_analitico`, que só o agente guiado preenche). Dispara
-  /// tanto quando o próprio toque em "Enviar" termina quanto quando a
-  /// varredura automática em segundo plano (sem esta tela nem montada)
-  /// processa esta mesma vistoria primeiro.
+  /// Assinatura que detecta quando o pacote em massa desta vistoria terminou de enviar.
   StreamSubscription<String>? _bulkSubmittedSubscription;
 
   List<SinistroVistoriaOption> availableSinistros = [];
   bool isLoadingSession = true;
 
-  /// Trava de reentrância pra `_bootstrapChatSession` -- ver comentário no
-  /// início do método.
+  /// Trava de reentrância para `_bootstrapChatSession`.
   bool _isBootstrapping = false;
   bool isInspectionCompleted = false;
   String completedInspectionStatus = '';
@@ -174,49 +153,30 @@ class _AiChatPageState extends State<AiChatPage> {
   bool isStartingRecording = false;
   bool isAiTyping = false;
 
-  /// null enquanto o mecânico não escolheu (ou a sessão foi retomada, onde a
-  /// escolha já não se aplica mais). Só `emMassa` habilita o botão de envio
-  /// em massa no composer.
+  /// Modo de coleta escolhido para a vistoria atual; null até o mecânico decidir.
   ColetaModo? coletaModo;
   bool awaitingColetaModoChoice = false;
   bool isBulkProcessing = false;
 
-  /// true depois que já ofereceu "abandonar e usar envio em massa" uma vez
-  /// nesta queda de conexão (ver `_handleOfflineDuringGuidedChat`) -- evita
-  /// reabrir o mesmo diálogo a cada toque enquanto a rede não volta.
-  /// Reseta em `_handleConnectivityRestored`.
+  /// true após já ter oferecido trocar pra envio em massa nesta queda de conexão.
   bool _offlineGuidedPromptShown = false;
 
-  /// true quando, offline, a vistoria em aberto pro sinistro começou pelo
-  /// chat guiado (ou ainda não tinha `coletaModo` definido) -- guiado
-  /// depende do agente (ADK), que precisa de internet, então não dá pra
-  /// prosseguir de jeito nenhum aqui enquanto sem conexão. Esconde o
-  /// composer inteiro (ver `_buildComposerArea`), só mostra o aviso.
+  /// true quando a vistoria guiada em aberto está bloqueada por falta de conexão.
   bool isBlockedOfflineGuidedHistory = false;
 
-  /// true enquanto abandona a vistoria guiada e cria a nova em massa
-  /// offline -- mostra uma tela dedicada de "convertendo" em vez do
-  /// "Preparando sessão..." genérico (que parecia travado sem explicação
-  /// nenhuma quando essa escrita demorava mais que o normal).
+  /// true quando a retificação foi tentada offline; retificação não tem modo degradado.
+  bool isBlockedOfflineRetificacao = false;
+
+  /// true enquanto troca a vistoria guiada pela nova vistoria em massa offline.
   bool isConvertingToOfflineBulk = false;
 
-  /// true depois que o mecânico toca "Enviar" no modo em massa estando
-  /// offline -- o pacote já está seguro (rascunho persistido), só falta a
-  /// internet voltar. Troca o botão de envio por um aviso travado (ver
-  /// `_buildComposerArea`) pra não deixar reabrir/editar o pacote por
-  /// engano enquanto ele já foi "confirmado". Sai sozinho assim que
-  /// `_handleConnectivityRestored` retoma o envio de verdade.
+  /// true quando o pacote em massa já foi confirmado offline e aguarda conexão para enviar.
   bool isAwaitingBulkSync = false;
   final ValueNotifier<String> bulkStatusText = ValueNotifier<String>(
     'Processando...',
   );
 
-  // Câmera começa travada — só libera quando o agente diz a frase exata de
-  // liberação da leva de danos externos (_isPhotoReleaseText). Uma vez
-  // liberada, fica liberada pelo resto da sessão (não existe sinal de
-  // "re-travar" pras levas seguintes). cameraPulsing acende só no momento
-  // em que acabou de liberar, e apaga assim que a câmera for aberta pela
-  // primeira vez (botão fixo ou ação dentro da própria bolha).
+  /// Controla o travamento da câmera e o pulso visual de "recém-liberada".
   bool cameraUnlocked = false;
   bool cameraPulsing = false;
 
@@ -240,30 +200,15 @@ class _AiChatPageState extends State<AiChatPage> {
 
     widget.selectedTabIndexListenable?.addListener(_onSelectedTabIndexChanged);
 
-    // O envio de verdade (upload + finalização) é feito pelo
-    // BulkSyncCoordinator, que já se retoma sozinho ao reconectar
-    // independente desta tela estar montada -- aqui só precisamos saber
-    // QUANDO isso termina, pra virar a UI pra "concluído" se for esta
-    // mesma vistoria.
     _bulkSubmittedSubscription =
         BulkSyncCoordinator.instance.onPackageSubmitted.listen(
       _handleBulkPackageSubmitted,
     );
 
-    // Vistoria guiada bloqueada offline -- assim que a conexão volta, isso
-    // ainda precisa de um retry local (refazer o bootstrap pra cair no
-    // ramo online de verdade), diferente do envio em massa.
     ArgosConnectivityService.instance.isOnline.addListener(
       _handleConnectivityRestored,
     );
 
-    // Adiado pro pós-frame -- `_bootstrapChatSession` pode abrir um
-    // `showDialog` (aviso offline), que precisa de um `context` com as
-    // dependências (Theme/Localizations) já resolvidas. Chamado direto
-    // aqui, ainda dentro do `initState`, estourava "dependOnInherited...
-    // called before initState() completed" (bug real, achado testando no
-    // aparelho). `isLoadingSession` já nasce `true`, então não muda nada
-    // visualmente adiar por um frame.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _bootstrapChatSession();
@@ -296,9 +241,7 @@ class _AiChatPageState extends State<AiChatPage> {
 
   static const int _kChatTabIndex = 1;
 
-  // Só recarrega quando: esta aba acabou de ficar visível, é a tela de
-  // escolha de veículo (sem sinistroId fixo) e não tem sessão/carregamento
-  // em andamento -- nunca interrompe uma conversa já aberta.
+  /// Recarrega a lista de veículos quando esta aba fica visível, sem sessão em andamento.
   void _onSelectedTabIndexChanged() {
     if (!mounted) return;
     if (widget.selectedTabIndexListenable?.value != _kChatTabIndex) return;
@@ -366,8 +309,7 @@ class _AiChatPageState extends State<AiChatPage> {
     );
   }
 
-  // Não abre mais a câmera sozinha — só destrava o botão (fixo na barra de
-  // composição) e acende o pulso, deixando o mecânico decidir quando tocar.
+  /// Destrava o botão de câmera e acende o pulso ao detectar a frase de liberação.
   void _openCameraAfterPhotoRelease(String text) {
     if (cameraUnlocked) return;
     if (!_isPhotoReleaseText(text)) return;
@@ -416,14 +358,8 @@ class _AiChatPageState extends State<AiChatPage> {
     });
   }
 
+  /// Inicializa a sessão de vistoria (direto por sinistro ou lista de seleção).
   Future<void> _bootstrapChatSession() async {
-    // Reentrância: `_handleConnectivityRestored` pode chamar isto de novo
-    // (retry do bloqueio guiado) -- se a conexão "piscar" (confirma true,
-    // cai, confirma true de novo) rápido o bastante, duas execuções
-    // concorrentes tentando mostrar diálogo/mexer no mesmo estado ao
-    // mesmo tempo é exatamente o tipo de corrida que pode deixar a tela
-    // presa em "Carregando sessão..." pra sempre. Só a execução em
-    // andamento tem permissão de mexer em `isLoadingSession`/diálogos.
     if (_isBootstrapping) return;
     _isBootstrapping = true;
 
@@ -432,16 +368,6 @@ class _AiChatPageState extends State<AiChatPage> {
     });
 
     try {
-      // Nada de aviso genérico aqui antes de saber o que o mecânico quer
-      // fazer -- chegou a existir um diálogo bloqueando a ENTRADA inteira
-      // da aba offline (mesmo sem nenhuma vistoria escolhida ainda), mas
-      // isso era pura fricção: a lista abaixo (`_loadAvailableSinistros`)
-      // já funciona 100% do cache sem precisar de decisão nenhuma, e quem
-      // sabe de verdade o que fazer com uma vistoria específica offline é
-      // `_startVistoriaOffline` (bloqueia/retoma/cria conforme o histórico
-      // de CADA sinistro, com a mensagem certa pra cada caso) -- chamado
-      // logo abaixo, dentro de `_startVistoriaFromSinistro`, só quando o
-      // mecânico de fato escolheu um veículo.
       final directSinistroId = widget.sinistroId?.trim();
 
       if (directSinistroId != null && directSinistroId.isNotEmpty) {
@@ -505,12 +431,7 @@ class _AiChatPageState extends State<AiChatPage> {
     });
   }
 
-  /// Pergunta bifurcada mostrada só uma vez, ao abrir uma vistoria nova de
-  /// verdade (nunca em retomada nem em retificação, que já saem antes deste
-  /// ponto em `_startVistoriaFromSinistro`/`_startRetificacaoFromSinistro`).
-  /// Vem como mensagem do próprio bot no chat (botões inline na bolha, ver
-  /// `_AiBubble`), não um dialog por cima -- e esconde o composer normal
-  /// enquanto a escolha não é feita (`awaitingColetaModoChoice`).
+  /// Pergunta o modo de coleta ao abrir uma vistoria nova, como mensagem do bot no chat.
   void _offerColetaModoChoice() {
     if (currentSession == null) return;
 
@@ -538,11 +459,6 @@ class _AiChatPageState extends State<AiChatPage> {
       coletaModo = escolha;
       awaitingColetaModoChoice = false;
 
-      // Registra a escolha na própria bolha da pergunta -- sem isso os
-      // botões só somem (onChooseColetaModo vira null pro resto da tela
-      // assim que awaitingColetaModoChoice fica false) sem deixar
-      // nenhum rastro visível de qual opção foi tocada (bug real,
-      // reportado pelo usuário).
       final promptIndex = messages.lastIndexWhere(
         (m) => m.isColetaModoPrompt && m.selectedColetaModo == null,
       );
@@ -567,7 +483,7 @@ class _AiChatPageState extends State<AiChatPage> {
           ChatMessage(
             type: ChatMessageType.ai,
             text:
-                'Beleza! Toque no botão "Montar envio em massa" aqui embaixo '
+                'Beleza! Toque no botão "Enviar tudo de uma vez" aqui embaixo '
                 'pra juntar fotos, áudio, observações e orçamento e mandar '
                 'tudo de uma vez.',
             createdAt: DateTime.now(),
@@ -582,10 +498,7 @@ class _AiChatPageState extends State<AiChatPage> {
     await _sendInitialOiToAgent();
   }
 
-  /// Só pra vistorias em modo em massa ainda não enviadas -- oferece
-  /// continuar montando o pacote ou trocar pro chat guiado, em vez do
-  /// diálogo "continuar agora/mais tarde/nova" (que pressupõe um papo em
-  /// andamento, e aqui não tem nenhum).
+  /// Pergunta se o mecânico quer continuar montando o pacote em massa ou trocar pro guiado.
   Future<ColetaModo?> _askResumeBulkMode(VistoriaSession session) {
     final placa = session.placa.trim().isEmpty ? 'Sem placa' : session.placa;
 
@@ -621,7 +534,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  'Envio em massa em andamento',
+                  'Pacote ainda não enviado',
                   textAlign: TextAlign.center,
                   style: GoogleFonts.spaceGrotesk(
                     fontSize: 18,
@@ -644,7 +557,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 const SizedBox(height: 20),
                 _VistoriaActionTile(
                   icon: Icons.upload_file_rounded,
-                  title: 'Continuar envio em massa',
+                  title: 'Continuar enviando tudo de uma vez',
                   subtitle: 'Volta pro botão de montar o pacote.',
                   color: const Color(0xFF0057C0),
                   filled: true,
@@ -654,7 +567,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 const SizedBox(height: 10),
                 _VistoriaActionTile(
                   icon: Icons.chat_bubble_rounded,
-                  title: 'Mudar para o chat guiado',
+                  title: 'Mudar para o passo a passo',
                   subtitle: 'Descarta o pacote e conversa comigo passo a passo.',
                   color: const Color(0xFF0057C0),
                   onTap: () =>
@@ -774,7 +687,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 _VistoriaActionTile(
                   icon: Icons.schedule_rounded,
                   title: 'Continuar mais tarde',
-                  subtitle: 'Fecha por agora — o progresso fica salvo.',
+                  subtitle: 'Fecha por agora, o progresso fica salvo.',
                   color: const Color(0xFF0057C0),
                   onTap: () => Navigator.of(context)
                       .pop(ContinueVistoriaAction.continueLater),
@@ -796,10 +709,7 @@ class _AiChatPageState extends State<AiChatPage> {
     );
   }
 
-  /// Mostrado no lugar de _askVistoriaAction quando a checagem em tempo
-  /// real (checkVistoriaExpiration) já confirmou que a sessão passou das 24h
-  /// úteis — não faz sentido oferecer "Continuar agora" pra uma vistoria que
-  /// acabou de ser marcada EXPIRADA no backend.
+  /// Diálogo de vistoria expirada: só oferece continuar mais tarde ou começar nova.
   Future<ContinueVistoriaAction?> _showVistoriaExpiredDialog(
     VistoriaSession session,
   ) {
@@ -909,10 +819,7 @@ class _AiChatPageState extends State<AiChatPage> {
     );
   }
 
-  /// Mesmo padrão visual dos outros diálogos desta tela (ícone circular,
-  /// título, subtítulo curto, dois `_VistoriaActionTile`) -- era um
-  /// `AlertDialog` genérico com um parágrafo inteiro no corpo, destoando do
-  /// resto (`_askAbandonGuidedAndStartOfflineBulk`/`_askResumeBulkMode`).
+  /// Confirma com o mecânico se quer abandonar a vistoria atual e começar outra.
   Future<bool> _confirmStartNewVistoria(VistoriaSession session) async {
     final result = await showDialog<bool>(
       context: context,
@@ -1013,13 +920,6 @@ class _AiChatPageState extends State<AiChatPage> {
 
       if (!mounted) return;
 
-      // findOpenVistoria já é 100% offline-safe (query no cache local +
-      // expiração calculada localmente, auto-expira via escrita simples,
-      // não transação) -- diferente do resto deste método, que depende de
-      // checkVistoriaExpiration (Cloud Function) e createOrResumeFromSinistro
-      // (transação pro número sequencial), nenhum dos dois funciona sem
-      // rede. Por isso o ramo offline é tratado à parte, sem reusar esses
-      // dois.
       if (!ArgosConnectivityService.instance.isOnline.value) {
         await _startVistoriaOffline(sinistroId, openSession);
         return;
@@ -1030,20 +930,11 @@ class _AiChatPageState extends State<AiChatPage> {
           isLoadingSession = false;
         });
 
-        // Checa em tempo real em vez de confiar só na varredura agendada
-        // (agora de 12 em 12h) — sem isso o mecânico podia cair numa sessão
-        // que já devia estar expirada só porque o job ainda não tinha
-        // passado por ela.
         final alreadyExpired = await ArgosAiService.instance
             .checkVistoriaExpiration(idvistoria: openSession.docId);
 
         if (!mounted) return;
 
-        // Modo em massa não tem conversa pra "continuar agora"/"mais tarde"
-        // -- esse diálogo existe pra retomar um PAPO em andamento, e no modo
-        // em massa não existe papo nenhum, só um pacote que ainda não foi
-        // enviado. Em vez disso, pergunta só o que faz sentido aqui:
-        // continuar montando o pacote ou trocar pro chat guiado.
         if (!alreadyExpired && openSession.isEmMassa) {
           final resumeChoice = await _askResumeBulkMode(openSession);
 
@@ -1078,14 +969,6 @@ class _AiChatPageState extends State<AiChatPage> {
           return;
         }
 
-        // Nunca respondeu "Como você quer coletar essa vistoria?" -- não
-        // existe papo nenhum pra "continuar agora"/"mais tarde", só a
-        // pergunta pendente (o mecânico saiu do app antes de tocar num dos
-        // botões). Sem este caso, "continuar agora" carregava um chat
-        // vazio sem nenhum jeito de responder de novo -- a única saída era
-        // abandonar a vistoria pra gerar outra do zero (bug real,
-        // reportado pelo usuário). Reoferece a pergunta direto, igual
-        // acontece na criação.
         if (!alreadyExpired &&
             !openSession.isEmMassa &&
             openSession.coletaModo.trim().isEmpty) {
@@ -1122,8 +1005,6 @@ class _AiChatPageState extends State<AiChatPage> {
 
         if (action == ContinueVistoriaAction.startNew) {
           if (alreadyExpired) {
-            // Já foi marcada EXPIRADA pela checagem acima — não há nada pra
-            // confirmar nem descartar, só seguir e criar a próxima.
             setState(() {
               isLoadingSession = true;
             });
@@ -1191,13 +1072,8 @@ class _AiChatPageState extends State<AiChatPage> {
     }
   }
 
-  /// Ramo offline de `_startVistoriaFromSinistro`. `openSession` já veio de
-  /// `findOpenVistoria` (100% local, já descartou sessões expiradas) --
-  /// aqui só decide com base na regra de negócio: guiado precisa do agente
-  /// (ADK), que não funciona sem internet, então:
-  /// - sem histórico nenhum (ou já era em massa) -> pode elaborar offline;
-  /// - histórico de chat guiado em aberto -> bloqueia, sem entrar no
-  ///   composer.
+  /// Ramo offline de `_startVistoriaFromSinistro`: bloqueia histórico guiado em aberto,
+  /// permite continuar/criar vistoria em massa.
   Future<void> _startVistoriaOffline(
     String sinistroId,
     VistoriaSession? openSession,
@@ -1218,12 +1094,6 @@ class _AiChatPageState extends State<AiChatPage> {
       }
 
       setState(() {
-        // Precisa setar currentSession -- o build() decide entre a tela de
-        // seleção de veículo e o chat com base só em `currentSession ==
-        // null`. Sem isso, o aviso de bloqueio nunca chegava a aparecer: a
-        // tela ficava presa na lista de seleção, parecendo que "não
-        // acontecia nada" ao tocar no veículo (bug real, achado testando
-        // no aparelho).
         currentSession = openSession;
         isLoadingSession = false;
         isBlockedOfflineGuidedHistory = true;
@@ -1232,7 +1102,7 @@ class _AiChatPageState extends State<AiChatPage> {
           ..add(
             ChatMessage(
               type: ChatMessageType.ai,
-              text: 'Esta vistoria foi iniciada pelo chat guiado, que '
+              text: 'Esta vistoria foi iniciada no passo a passo, que '
                   'depende de internet pra funcionar. Conecte-se para '
                   'continuar de onde parou.',
             ),
@@ -1245,11 +1115,6 @@ class _AiChatPageState extends State<AiChatPage> {
     setState(() => isBlockedOfflineGuidedHistory = false);
 
     if (openSession != null) {
-      // Já em massa -- retoma direto, sem o diálogo de "mudar pra guiado"
-      // (opção que não existe offline). Se o pacote já tinha sido
-      // confirmado ("Enviar" tocado) antes de sair da tela, volta direto
-      // pro estado travado de "aguardando sincronização" -- não deixa
-      // reabrir o botão de montar um pacote que já foi confirmado.
       setState(() {
         coletaModo = ColetaModo.emMassa;
         _loadSessionIntoChat(openSession);
@@ -1261,16 +1126,10 @@ class _AiChatPageState extends State<AiChatPage> {
       return;
     }
 
-    // Sem histórico nenhum pro sinistro -- cria do zero.
     await _createFreshOfflineVistoria(sinistroId);
   }
 
-  /// Variante offline de `_confirmStartNewVistoria` -- guiado é inviável
-  /// sem conexão, então em vez de só bloquear, oferece abandonar a
-  /// vistoria guiada em aberto e começar uma nova pelo envio em massa (o
-  /// único modo que funciona offline). Mesmo efeito de dados que o botão
-  /// "Começar nova" online -- `abandonVistoria` nunca cancela/anula o
-  /// sinistro, só o analista no web pode fazer isso.
+  /// Oferece abandonar a vistoria guiada em aberto e começar uma nova em massa offline.
   Future<bool> _askAbandonGuidedAndStartOfflineBulk(
     VistoriaSession session,
   ) async {
@@ -1306,7 +1165,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  'Vistoria guiada — sem rede',
+                  'Passo a passo — sem rede',
                   textAlign: TextAlign.center,
                   style: GoogleFonts.spaceGrotesk(
                     fontSize: 18,
@@ -1316,8 +1175,8 @@ class _AiChatPageState extends State<AiChatPage> {
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  'O chat guiado precisa de internet. Offline, só dá pra '
-                  'continuar pelo envio em massa.',
+                  'O passo a passo precisa de internet. Offline, só dá pra '
+                  'continuar enviando tudo de uma vez.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     color: Color(0xFF6B7280),
@@ -1329,7 +1188,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 const SizedBox(height: 20),
                 _VistoriaActionTile(
                   icon: Icons.upload_file_rounded,
-                  title: 'Abandonar e usar envio em massa',
+                  title: 'Abandonar e enviar tudo de uma vez',
                   subtitle: 'Começa agora. Não cancela o sinistro.',
                   color: Colors.deepOrange,
                   filled: true,
@@ -1339,7 +1198,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 _VistoriaActionTile(
                   icon: Icons.schedule_rounded,
                   title: 'Esperar conexão',
-                  subtitle: 'Continua o chat guiado quando a rede voltar.',
+                  subtitle: 'Continua o passo a passo quando a rede voltar.',
                   color: const Color(0xFF6B7280),
                   onTap: () => Navigator.of(dialogContext).pop(false),
                 ),
@@ -1353,26 +1212,11 @@ class _AiChatPageState extends State<AiChatPage> {
     return result ?? false;
   }
 
-  /// Executa de verdade o "abandonar e usar envio em massa" depois que
-  /// `_askAbandonGuidedAndStartOfflineBulk` confirmou -- extraído pra ser
-  /// chamado tanto ao reabrir o app offline com uma guiada em aberto
-  /// (`_startVistoriaOffline`) quanto ao tentar mandar mensagem/foto/áudio
-  /// no meio de uma conversa guiada que ficou sem rede (`_handleOfflineDuringGuidedChat`).
-  /// Retorna `true` se trocou com sucesso (o chamador deve parar por aqui,
-  /// a tela já está mostrando a vistoria nova); `false` se falhou (o
-  /// chamador decide o que fazer -- normalmente cair no aviso de bloqueio).
+  /// Abandona a vistoria guiada e cria uma nova em massa offline; retorna se trocou com sucesso.
   Future<bool> _abandonGuidedAndSwitchToOfflineBulk({
     required VistoriaSession openSession,
     required String sinistroId,
   }) async {
-    // Fica NA MESMA TELA mostrando um estado de "convertendo" -- precisa
-    // de currentSession != null pro build() não voltar pra lista de
-    // seleção (que é como o erro ficava "escondido" antes). Essa escrita
-    // específica já provou (testando no aparelho) que pode demorar bem
-    // mais que o normal, por isso o timeout generoso lá no serviço -- aqui
-    // só esperamos honestamente, mostrando que algo está acontecendo, em
-    // vez do "Preparando sessão..." genérico que parecia travado sem
-    // explicação.
     setState(() {
       isLoadingSession = false;
       isConvertingToOfflineBulk = true;
@@ -1380,16 +1224,6 @@ class _AiChatPageState extends State<AiChatPage> {
     });
 
     try {
-      // Cria a vistoria NOVA primeiro -- o serviço já resolve rápido
-      // offline (não espera mais o Future de rede, só aplica local e
-      // segue -- ver `VistoriaChatSessionService._writeNoWaitOffline`).
-      // O abandono da antiga vira fire-and-forget logo abaixo: a nova já
-      // é a mais recente (`updatedAt`), então `findOpenVistoria` já
-      // prefere ela mesmo que o abandono ainda não tenha "chegado".
-      //
-      // Isso ficou rápido demais pro mecânico ler a mensagem da tela de
-      // "Convertendo vistoria" -- garante um tempo mínimo visível nela,
-      // mesmo que o trabalho de verdade já tenha terminado.
       final session = await Future.wait([
         VistoriaChatSessionService.instance.createVistoriaOffline(
           sinistroId: sinistroId,
@@ -1434,16 +1268,7 @@ class _AiChatPageState extends State<AiChatPage> {
     }
   }
 
-  /// Chamado quando o mecânico tenta mandar mensagem/foto/áudio no chat
-  /// guiado estando offline NO MEIO de uma conversa já em andamento --
-  /// diferente de abrir o app já offline (`_startVistoriaOffline`), aqui a
-  /// sessão já existe e pode ter evidência real gravada, então a escolha é
-  /// do mecânico: abandonar (perde o que já foi feito, mas destrava agora)
-  /// ou esperar a conexão voltar (mantém tudo, só não dá pra continuar
-  /// agora). Pergunta uma vez por "trecho offline" (reseta ao reconectar,
-  /// ver `_handleConnectivityRestored`) -- tentativas seguintes na mesma
-  /// queda só mostram o aviso de sempre, sem insistir com o diálogo de
-  /// novo.
+  /// Oferece abandonar o chat guiado ou esperar a conexão, ao tentar enviar algo offline.
   Future<void> _handleOfflineDuringGuidedChat() async {
     final session = currentSession;
     if (session == null || _offlineGuidedPromptShown) return;
@@ -1462,10 +1287,7 @@ class _AiChatPageState extends State<AiChatPage> {
     );
   }
 
-  /// Cria uma vistoria do zero offline (ID provisório, direto em modo em
-  /// massa) e carrega na tela -- compartilhado entre "sinistro sem
-  /// histórico nenhum" e "abandonou a vistoria guiada e quer começar de
-  /// novo". Bifurcação não faz sentido aqui: guiado é inviável sem conexão.
+  /// Cria uma vistoria do zero offline, já em modo em massa, e carrega na tela.
   Future<void> _createFreshOfflineVistoria(String sinistroId) async {
     final session = await VistoriaChatSessionService.instance
         .createVistoriaOffline(sinistroId: sinistroId);
@@ -1481,21 +1303,48 @@ class _AiChatPageState extends State<AiChatPage> {
     _scrollToBottom();
   }
 
-  /// Caminho separado de propósito de _startVistoriaFromSinistro — não passa
-  /// por findOpenVistoria (a vistoria rejeitada não está EM_ANDAMENTO, nunca
-  /// seria achada) nem pelo diálogo de continuar/começar de novo. Sempre
-  /// cria a vistoria de retificação a partir da rejeitada.
+  /// Sempre cria a vistoria de retificação a partir da rejeitada do sinistro.
   Future<void> _startRetificacaoFromSinistro(String sinistroId) async {
+    if (!ArgosConnectivityService.instance.isOnline.value) {
+      setState(() {
+        currentSession = VistoriaSession(
+          docId: '',
+          idvistoria: '',
+          sinistroId: sinistroId,
+          placa: '',
+          veiculo: '',
+          cliente: '',
+          credenciado: '',
+          status: '',
+          tipoVistoria: '',
+          vistoriaOrigemId: '',
+          ajustesNecessarios: '',
+          contextoVistoriaAnterior: '',
+          chatMessages: const [],
+        );
+        isLoadingSession = false;
+        isBlockedOfflineRetificacao = true;
+        messages
+          ..clear()
+          ..add(
+            const ChatMessage(
+              type: ChatMessageType.ai,
+              text: 'A retificação precisa de internet pra funcionar. Por '
+                  'ser um processo mais delicado, não tem um modo offline '
+                  'alternativo, conecte-se pra continuar.',
+            ),
+          );
+      });
+      return;
+    }
+
+    isBlockedOfflineRetificacao = false;
+
     setState(() {
       isLoadingSession = true;
     });
 
     try {
-      // Antes disto o botão criava uma retificação nova toda vez que era
-      // tocado — mesmo que já existisse uma em andamento — sem nunca
-      // perguntar nada pro mecânico. findOpenVistoria acha qualquer vistoria
-      // EM_ANDAMENTO do sinistro (original ou retificação), então serve
-      // igual ao fluxo normal pra decidir se continua, adia ou descarta.
       final openSession = await VistoriaChatSessionService.instance
           .findOpenVistoria(sinistroId: sinistroId);
 
@@ -1584,11 +1433,8 @@ class _AiChatPageState extends State<AiChatPage> {
     }
   }
 
-  /// Cria a retificação em si. Se `discardedOrigemId` vier preenchido, é
-  /// porque acabamos de descartar uma retificação já em andamento — nesse
-  /// caso sinistro.vistoriaAtualId aponta pro que acabou de ser descartado,
-  /// então busca a vistoria REJEITADA original diretamente por id em vez de
-  /// usar startRetificacaoFromSinistro (que leria o ponteiro errado).
+  /// Cria a retificação; se `discardedOrigemId` vier preenchido, busca a vistoria
+  /// rejeitada original por id em vez de reler o ponteiro do sinistro.
   Future<void> _createRetificacaoAfterDiscard({
     required String sinistroId,
     String? discardedOrigemId,
@@ -1697,19 +1543,10 @@ class _AiChatPageState extends State<AiChatPage> {
     currentSession = session;
     isInspectionCompleted = false;
     completedInspectionStatus = '';
-    // Retificação não repete o roteiro original (identificação → danos
-    // externos → estruturais) que emite a frase exata de liberação — o
-    // agente já sabe o que existe e pode pedir foto nova a qualquer momento
-    // da correção. Travar o botão esperando por uma frase que talvez nunca
-    // venha deixaria a câmera bloqueada pro resto da retificação.
     cameraUnlocked = session.isRetificacao;
     cameraPulsing = false;
     _listenToVistoriaCompletion(session);
 
-    // audio_transcription vem do backend como uma entrada separada do
-    // chatmessages (role: user, mesmo audioId) — em vez de virar uma bolha
-    // de texto solta, anexa na bolha do áudio correspondente, pra dar pra
-    // esconder atrás do botão "Transcrever áudio" (estilo WhatsApp).
     final loadedMessages = <ChatMessage>[];
 
     for (final item in session.chatMessages) {
@@ -1743,8 +1580,6 @@ class _AiChatPageState extends State<AiChatPage> {
       ..clear()
       ..addAll(loadedMessages);
 
-    // Retomando uma sessão que já passou desse ponto — destrava sem pulsar
-    // (o pulso é só pro momento em que a liberação acabou de acontecer).
     if (messages.any(
       (m) => m.type == ChatMessageType.ai && _isPhotoReleaseText(m.text),
     )) {
@@ -1829,11 +1664,104 @@ class _AiChatPageState extends State<AiChatPage> {
   }
 
   Future<void> _handleSinistroSelected(SinistroVistoriaOption option) async {
+    if (!ArgosConnectivityService.instance.isOnline.value) {
+      final shouldContinueOffline = await _askOfflineEntryChoice();
+
+      if (!mounted) return;
+
+      if (!shouldContinueOffline) {
+        widget.onGoToInspections?.call();
+        return;
+      }
+    }
+
     if (option.isRetificacaoPendente) {
       await _startRetificacaoFromSinistro(option.sinistroId);
       return;
     }
     await _startVistoriaFromSinistro(option.sinistroId);
+  }
+
+  /// Pergunta, ao tocar num veículo offline, se o mecânico quer seguir com envio em massa.
+  Future<bool> _askOfflineEntryChoice() async {
+    final choice = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return Dialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+          ),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 60,
+                    height: 60,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFFFF7E6),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.wifi_off_rounded,
+                      color: Color(0xFFB45309),
+                      size: 30,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Você está offline',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.spaceGrotesk(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: const Color(0xFF1F2937),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'O passo a passo com o agente precisa de internet pra '
+                  'funcionar. Sem conexão, só é possível trabalhar '
+                  'enviando tudo de uma vez.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Color(0xFF6B7280),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    height: 1.3,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                _VistoriaActionTile(
+                  icon: Icons.upload_file_rounded,
+                  title: 'Continuar offline',
+                  subtitle: 'Envia tudo de uma vez enquanto a rede não volta.',
+                  color: const Color(0xFF0057C0),
+                  filled: true,
+                  onTap: () => Navigator.of(dialogContext).pop(true),
+                ),
+                const SizedBox(height: 10),
+                _VistoriaActionTile(
+                  icon: Icons.arrow_back_rounded,
+                  title: 'Continuar mais tarde',
+                  subtitle: 'Volta pra tela principal e espera a internet.',
+                  color: const Color(0xFF6B7280),
+                  onTap: () => Navigator.of(dialogContext).pop(false),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    return choice ?? false;
   }
 
   Future<void> _closeCurrentChatAndBackToSelection() async {
@@ -1864,10 +1792,6 @@ class _AiChatPageState extends State<AiChatPage> {
       return;
     }
 
-    // O guiado depende do agente (ADK/Gemini) pra cada turno -- diferente
-    // do modo em massa, não tem como enfileirar offline. Falha rápido
-    // antes de limpar o campo de texto (senão o mecânico perderia o que
-    // escreveu sem nem saber por quê não foi).
     if (!ArgosConnectivityService.instance.isOnline.value) {
       if (_offlineGuidedPromptShown) {
         _showSnack(
@@ -1991,9 +1915,6 @@ class _AiChatPageState extends State<AiChatPage> {
       return;
     }
 
-    // Recusa antes de sequer abrir a câmera -- sem isso o mecânico tirava
-    // as fotos e só descobria que falhou (sem aviso nenhum, só um log) na
-    // hora do upload.
     if (!ArgosConnectivityService.instance.isOnline.value) {
       if (_offlineGuidedPromptShown) {
         _showSnack(
@@ -2079,13 +2000,7 @@ class _AiChatPageState extends State<AiChatPage> {
     await _analyzePhotosWithAgent(session: session, quantity: photos.length);
   }
 
-  /// Avisa o agente que a leva de fotos subiu e MOSTRA a resposta dele.
-  ///
-  /// Antes isto era `unawaited(...)` com a reply descartada, e a tela exibia
-  /// um texto fixo montado aqui. Fazia sentido com o Dialogflow CX, que não
-  /// enxerga imagem. Com o ADK, este é o turno em que `AnalistaDanosVisao` e
-  /// `VerificadorConsistencia` rodam — descartar a resposta esconderia
-  /// exatamente o que a troca de backend veio entregar.
+  /// Avisa o agente que a leva de fotos subiu e mostra a resposta dele no chat.
   Future<void> _analyzePhotosWithAgent({
     required VistoriaSession session,
     required int quantity,
@@ -2131,41 +2046,18 @@ class _AiChatPageState extends State<AiChatPage> {
     _scrollToBottom();
   }
 
-  /// Abre o modal de composição do modo "enviar tudo de uma vez"
-  /// (`BulkUploadSheet`) e, se o mecânico confirmar o envio, orquestra o
-  /// upload -- reaproveitando literalmente as mesmas chamadas de serviço que
-  /// o fluxo guiado já usa por item, só que em loop e sem notificar o
-  /// agente a cada foto/áudio.
-  /// Chamado toda vez que `ArgosConnectivityService.isOnline` muda -- só
-  /// nos interessa a borda offline→online, e só quando tem um pacote em
-  /// massa parado esperando conexão nesta vistoria (o rascunho persistido
-  /// é a fonte da verdade, não o `BulkUploadSheet`, que pode nem estar
-  /// aberto nesse momento).
+  /// Refaz o bootstrap quando a conexão volta, pra sair dos estados bloqueados offline.
   void _handleConnectivityRestored() {
     if (!ArgosConnectivityService.instance.isOnline.value) return;
 
-    // Próxima queda de conexão merece o diálogo de novo -- isso aqui não
-    // é um "já perguntei uma vez pra sempre", é por trecho offline.
     _offlineGuidedPromptShown = false;
 
-    // Tela bloqueada (vistoria guiada em aberto, offline) -- assim que a
-    // conexão volta, refaz o bootstrap do zero: agora cai no ramo online
-    // normal (`_askVistoriaAction`/diálogo de retomada), que é quem
-    // realmente sabe lidar com uma sessão guiada em aberto. O envio em
-    // massa pendente NÃO é tratado aqui -- isso é o `BulkSyncCoordinator`
-    // (singleton, sobrevive a troca de tela) que faz sozinho, pra TODAS as
-    // vistorias pendentes do mecânico, não só a que porventura estiver
-    // montada nesta tela (ver `_handleBulkPackageSubmitted`).
-    if (isBlockedOfflineGuidedHistory) {
+    if (isBlockedOfflineGuidedHistory || isBlockedOfflineRetificacao) {
       unawaited(_bootstrapChatSession());
     }
   }
 
-  /// Chamado pelo `BulkSyncCoordinator` quando QUALQUER pacote em massa
-  /// termina de enviar -- só reage se for a vistoria que esta tela está
-  /// mostrando agora. Cobre tanto o envio disparado pelo próprio toque em
-  /// "Enviar" (`_submitBulkPackage`) quanto o que a varredura automática em
-  /// segundo plano processou sozinha, sem esta tela ter feito nada.
+  /// Reage ao fim do envio de um pacote em massa, se for o desta tela.
   void _handleBulkPackageSubmitted(String vistoriaDocId) {
     if (!mounted) return;
     if (currentSession?.docId != vistoriaDocId) return;
@@ -2192,10 +2084,6 @@ class _AiChatPageState extends State<AiChatPage> {
 
     FocusScope.of(context).unfocus();
 
-    // Busca direto do servidor (não confia no snapshot em memória de
-    // `session`) -- é exatamente o cenário que essa fila existe pra cobrir:
-    // uma tentativa anterior pode ter deixado itens marcados no Firestore
-    // depois que esta sessão já tinha sido carregada.
     final draft = await VistoriaChatSessionService.instance
         .fetchEnvioEmMassaRascunho(session.docId);
 
@@ -2219,35 +2107,14 @@ class _AiChatPageState extends State<AiChatPage> {
     await _submitBulkPackage(session: session, result: result);
   }
 
-  /// O upload de verdade (fotos/áudios/texto/orçamento + finalização) mora
-  /// inteiro no `BulkSyncCoordinator` -- um singleton que sobrevive a troca
-  /// de tela, igual o `ArgosConnectivityService`. Isso é o que permite a
-  /// retomada automática funcionar mesmo que o mecânico saia desta tela
-  /// entre o "Enviar offline" e a reconexão (limitação real que existia
-  /// antes, quando esse código vivia só aqui dentro). A transição pra
-  /// "concluído" não acontece aqui dentro -- acontece em
-  /// `_handleBulkPackageSubmitted`, disparada pelo
-  /// `onPackageSubmitted` do coordenador, pra funcionar igual nos dois
-  /// casos (enviado por este toque ou por uma varredura em segundo plano
-  /// que ganhou a corrida).
+  /// Envia o pacote em massa via `BulkSyncCoordinator`, que sobrevive à troca de tela.
   Future<void> _submitBulkPackage({
     required VistoriaSession session,
     required BulkUploadResult result,
   }) async {
-    // O rascunho já está seguro no Firestore (cada item foi sincronizado
-    // assim que entrou no BulkUploadSheet, isso funciona offline sozinho).
-    // O que NÃO funciona offline é o upload de verdade pro Storage nem a
-    // chamada ao agente pra transcrever áudio -- diferente de escrita
-    // Firestore comum, essas não enfileiram. Sem essa checagem, tocar
-    // "Enviar" offline subia nada, falhava calado (só um debugPrint) e
-    // ainda assim finalizava a vistoria como se tivesse dado tudo certo.
     if (!ArgosConnectivityService.instance.isOnline.value) {
       setState(() => isAwaitingBulkSync = true);
 
-      // Persistido (não só em memória nesta tela) -- se o mecânico sair e
-      // voltar antes de reconectar, uma instância nova do AiChatPage
-      // precisa saber que este pacote já foi confirmado, pra mostrar a
-      // tela travada em vez do botão de montar de novo.
       unawaited(
         VistoriaChatSessionService.instance.markEnvioEmMassaConfirmadoOffline(
           vistoriaDocId: session.docId,
@@ -2308,8 +2175,6 @@ class _AiChatPageState extends State<AiChatPage> {
     if (isRecording || isStartingRecording) return;
     if (isInspectionCompleted) return;
 
-    // Recusa antes de gravar -- transcrição e envio dependem do backend,
-    // gravar pra descobrir depois que falhou só desperdiça o áudio.
     if (!ArgosConnectivityService.instance.isOnline.value) {
       if (_offlineGuidedPromptShown) {
         _showSnack(
@@ -2560,9 +2425,6 @@ class _AiChatPageState extends State<AiChatPage> {
         if (index >= 0) {
           messages[index] = ChatMessage(
             type: ChatMessageType.audio,
-            // Fica escondida por padrão — a bolha mostra um botão
-            // "Transcrever áudio" (estilo WhatsApp) que revela isso ali
-            // dentro, em vez de virar uma mensagem separada sempre visível.
             text: audioResult.revisedTranscript,
             audioPath: path,
             durationSeconds: duration,
@@ -2669,15 +2531,11 @@ class _AiChatPageState extends State<AiChatPage> {
     return '${minutes.toString().padLeft(2, '0')}:${remainingSeconds.toString().padLeft(2, '0')}';
   }
 
-  /// Três estados possíveis embaixo do chat:
-  /// 1. Pergunta bifurcada pendente -- nada aqui, os botões ficam inline na
-  ///    própria bolha (ver `_ChatBubble`/`_AiBubble`).
-  /// 2. Modo em massa escolhido e ainda não enviado -- some com
-  ///    câmera/texto/mic (não fazem sentido fora do modal) e mostra um único
-  ///    botão grande que abre o `BulkUploadSheet`.
-  /// 3. Guiado (ou vistoria antiga sem esse campo) -- composer de sempre.
+  /// Monta a área de composição: oculta, botão de envio em massa ou composer de texto/áudio.
   Widget _buildComposerArea(String duration) {
-    if (awaitingColetaModoChoice || isBlockedOfflineGuidedHistory) {
+    if (awaitingColetaModoChoice ||
+        isBlockedOfflineGuidedHistory ||
+        isBlockedOfflineRetificacao) {
       return const SizedBox.shrink(key: ValueKey('awaiting_choice'));
     }
 
@@ -2877,6 +2735,7 @@ class _AiChatPageState extends State<AiChatPage> {
   }
 }
 
+/// Spinner centralizado mostrado enquanto a sessão de chat carrega.
 class _ChatSessionLoading extends StatelessWidget {
   const _ChatSessionLoading();
 
@@ -2909,6 +2768,7 @@ class _ChatSessionLoading extends StatelessWidget {
   }
 }
 
+/// Tela de conclusão mostrada quando a vistoria já foi finalizada/analisada.
 class _InspectionCompletedView extends StatefulWidget {
   final VistoriaSession session;
   final String status;
@@ -2955,8 +2815,7 @@ class _InspectionCompletedViewState extends State<_InspectionCompletedView>
     super.dispose();
   }
 
-  // O status que chega aqui é o valor cru do Firestore (vistorias.status) —
-  // nunca deve aparecer pro mecânico sem tradução (ex: "EM_ANALISE_OPERACIONAL").
+  /// Traduz o status cru do Firestore para um texto amigável ao mecânico.
   static String _friendlyStatus(String rawStatus) {
     final normalized = rawStatus.trim().toUpperCase();
 
@@ -2977,9 +2836,6 @@ class _InspectionCompletedViewState extends State<_InspectionCompletedView>
 
     if (normalized.isEmpty) return '';
 
-    // Fallback pra qualquer status novo que a gente ainda não mapeou aqui:
-    // pelo menos humaniza (sem underscore, sem caixa alta) em vez de
-    // mostrar a constante do banco crua.
     return normalized
         .split('_')
         .map((word) => word.isEmpty
@@ -3129,6 +2985,7 @@ class _InspectionCompletedViewState extends State<_InspectionCompletedView>
   }
 }
 
+/// Lista de veículos com busca, pra escolher qual sinistro iniciar/retomar.
 class _SinistroSelectionView extends StatefulWidget {
   final List<SinistroVistoriaOption> options;
   final ValueChanged<SinistroVistoriaOption> onSelect;
@@ -3394,6 +3251,7 @@ class _SinistroSelectionViewState extends State<_SinistroSelectionView> {
   }
 }
 
+/// Linha com ícone, rótulo e valor, usada nos cards de resumo da vistoria.
 class _VistoriaInfoRow extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -3434,6 +3292,7 @@ class _VistoriaInfoRow extends StatelessWidget {
   }
 }
 
+/// Tile tocável com ícone, título e subtítulo, usado nos diálogos de ação da vistoria.
 class _VistoriaActionTile extends StatelessWidget {
   final IconData icon;
   final String title;
@@ -3508,9 +3367,7 @@ class _VistoriaActionTile extends StatelessWidget {
   }
 }
 
-/// Fica fixo no topo do chat de retificação, pra nunca deixar o mecânico
-/// esquecer o que o analista pediu pra corrigir — mesma cor/ícone da aba
-/// "Revisão" da listagem (inspection_filter.dart), de propósito.
+/// Banner fixo no topo do chat de retificação com o que o analista pediu pra corrigir.
 class _RetificacaoBanner extends StatelessWidget {
   final String ajustesNecessarios;
 
@@ -3559,6 +3416,7 @@ class _RetificacaoBanner extends StatelessWidget {
   }
 }
 
+/// Cabeçalho do chat com número da vistoria, placa e botão de fechar.
 class _ChatHeader extends StatelessWidget {
   final VistoriaSession? session;
   final VoidCallback? onCloseChat;
@@ -3573,8 +3431,6 @@ class _ChatHeader extends StatelessWidget {
     final idvistoria = session?.idvistoria.trim() ?? '';
     final placa = session?.placa.trim() ?? '';
 
-    // O formato VIS-OFFLINE-NNNN já é autoexplicativo -- não precisa de
-    // selo extra avisando que é provisório.
     final subtitle = [
       if (idvistoria.isNotEmpty) idvistoria,
       if (placa.isNotEmpty) placa,
@@ -3674,16 +3530,15 @@ class _ChatHeader extends StatelessWidget {
     );
   }
 }
+
+/// Decide, pelo tipo da mensagem, qual bolha renderizar (IA, usuário, foto ou áudio).
 class _ChatBubble extends StatelessWidget {
   final ChatMessage message;
 
-  /// Só não-nulo na bolha exata que liberou a câmera (calculado pelo
-  /// chamador com _isPhotoReleaseText, que é um método de estado e não dá
-  /// pra chamar direto daqui, já que esta é uma StatelessWidget à parte).
+  /// Não-nulo apenas na bolha que liberou a câmera.
   final VoidCallback? onOpenCamera;
 
-  /// Só não-nulo na bolha da pergunta bifurcada
-  /// (`message.isColetaModoPrompt`) -- renderiza os dois botões inline.
+  /// Não-nulo apenas na bolha da pergunta bifurcada, pra renderizar os botões inline.
   final void Function(ColetaModo)? onChooseColetaModo;
 
   const _ChatBubble({
@@ -3731,6 +3586,7 @@ class _ChatBubble extends StatelessWidget {
   }
 }
 
+/// Bolha de mensagem da IA, com suporte a negrito em linhas específicas e à pergunta bifurcada de coleta.
 class _AiBubble extends StatelessWidget {
   final String text;
   final List<int> boldLineIndexes;
@@ -3829,12 +3685,6 @@ class _AiBubble extends StatelessWidget {
                     icon: Icons.chat_bubble_rounded,
                     label: 'Passo a passo',
                     selected: selectedColetaModo == ColetaModo.guiado,
-                    // Enquanto não respondida (selectedColetaModo == null),
-                    // os dois botões ficam tocáveis. Depois de respondida,
-                    // os dois ficam só-leitura -- mostrando qual foi
-                    // escolhida em vez de sumirem sem deixar rastro (bug
-                    // reportado pelo usuário: a resposta não ficava
-                    // registrada na tela).
                     onTap: selectedColetaModo == null &&
                             onChooseColetaModo != null
                         ? () => onChooseColetaModo!(ColetaModo.guiado)
@@ -3890,13 +3740,13 @@ class _AiBubble extends StatelessWidget {
   }
 }
 
+/// Botão de opção (guiado/em massa) usado na bolha da pergunta bifurcada.
 class _ColetaModoChoiceButton extends StatelessWidget {
   final IconData icon;
   final String label;
   final bool selected;
 
-  /// Null enquanto a pergunta já foi respondida (ver _handleColetaModoChosen)
-  /// -- o botão vira só-leitura, sem InkWell nenhum.
+  /// Null quando a pergunta já foi respondida; o botão vira só-leitura.
   final VoidCallback? onTap;
 
   const _ColetaModoChoiceButton({
@@ -3956,6 +3806,7 @@ class _ColetaModoChoiceButton extends StatelessWidget {
   }
 }
 
+/// Bolha de texto enviada pelo mecânico, alinhada à direita.
 class _UserBubble extends StatelessWidget {
   final String text;
   final DateTime? createdAt;
@@ -4017,6 +3868,7 @@ class _UserBubble extends StatelessWidget {
   }
 }
 
+/// Bolha com a foto enviada pelo mecânico, alinhada à direita.
 class _PhotoBubble extends StatelessWidget {
   final String text;
   final String? imagePath;
@@ -4099,6 +3951,7 @@ class _PhotoBubble extends StatelessWidget {
   }
 }
 
+/// Bolha de áudio com player, forma de onda e transcrição revelável.
 class _AudioBubble extends StatefulWidget {
   final String text;
   final String? audioPath;
@@ -4394,6 +4247,7 @@ class _AudioBubbleState extends State<_AudioBubble> {
   }
 }
 
+/// Avatar com selo de microfone, usado na bolha de áudio.
 class _AudioProfileAvatar extends StatelessWidget {
   final String? photoUrl;
   final Color bubbleColor;
@@ -4445,6 +4299,7 @@ class _AudioProfileAvatar extends StatelessWidget {
   }
 }
 
+/// Botão circular de play/pause/retry da bolha de áudio, conforme o estado.
 class _AudioPlayButton extends StatelessWidget {
   final bool isProcessing;
   final bool isError;
@@ -4496,6 +4351,7 @@ class _AudioPlayButton extends StatelessWidget {
   }
 }
 
+/// Ícone pequeno de status (enviando/enviado/erro) no rodapé da bolha de áudio.
 class _AudioStatusIcon extends StatelessWidget {
   final bool isProcessing;
   final bool isDone;
@@ -4536,6 +4392,7 @@ class _AudioStatusIcon extends StatelessWidget {
   }
 }
 
+/// Forma de onda animada estilo WhatsApp, refletindo o progresso de reprodução.
 class _WhatsappWaveform extends StatefulWidget {
   final bool isProcessing;
   final bool isError;
@@ -4690,6 +4547,7 @@ String _formatAudioBubbleDuration(int seconds) {
   return '$minutes:${remainingSeconds.toString().padLeft(2, '0')}';
 }
 
+/// Botão fixo no rodapé que abre o modal de montar o pacote em massa.
 class _BulkComposerButton extends StatelessWidget {
   final VoidCallback onTap;
 
@@ -4710,7 +4568,7 @@ class _BulkComposerButton extends StatelessWidget {
           onPressed: onTap,
           icon: const Icon(Icons.upload_file_rounded),
           label: const Text(
-            'Montar envio em massa',
+            'Enviar tudo de uma vez',
             style: TextStyle(fontWeight: FontWeight.w800),
           ),
           style: ElevatedButton.styleFrom(
@@ -4726,21 +4584,7 @@ class _BulkComposerButton extends StatelessWidget {
   }
 }
 
-/// Tela cheia mostrada no lugar do chat quando o pacote em massa já foi
-/// "confirmado" estando offline -- não é mais um rascunho editável, é um
-/// envio pendente esperando rede. Mesmo padrão visual/estrutural de
-/// `_InspectionCompletedView` (ícone grande num círculo, título, card com
-/// a placa, botão pra voltar), só que em tom âmbar (aguardando) em vez de
-/// verde (concluído). Sem nenhum botão de reabrir o pacote de propósito: o
-/// mecânico não deve conseguir editar o pacote por engano depois de já ter
-/// confirmado o envio; a retomada de verdade acontece sozinha
-/// (`_handleConnectivityRestored`) assim que a conexão voltar.
-/// Tela cheia mostrada enquanto abandona a vistoria guiada e cria a nova
-/// em massa offline -- essa escrita específica pode demorar bem mais que
-/// o normal neste tipo de cenário (já confirmado testando no aparelho).
-/// Fica NA MESMA TELA em vez de navegar pra outro lugar, mostrando um
-/// spinner de verdade em vez do "Preparando sessão..." genérico, que
-/// parecia travado sem explicação nenhuma do que estava acontecendo.
+/// Tela cheia mostrada enquanto abandona a vistoria guiada e cria a nova em massa offline.
 class _ConvertingToOfflineBulkScreen extends StatefulWidget {
   final String placa;
 
@@ -4794,8 +4638,6 @@ class _ConvertingToOfflineBulkScreenState
                 ),
               ],
             ),
-            // Vira de cabeça pra baixo na metade de cada volta -- simula
-            // a ampulheta sendo virada assim que a areia "acaba".
             child: Center(
               child: AnimatedBuilder(
                 animation: _controller,
@@ -4829,10 +4671,11 @@ class _ConvertingToOfflineBulkScreenState
           const SizedBox(height: 10),
           Text(
             widget.placa.isEmpty
-                ? 'Abandonando o chat guiado e criando o envio em massa. '
-                    'Isso pode levar alguns instantes.'
-                : 'Abandonando o chat guiado de ${widget.placa} e criando '
-                    'o envio em massa. Isso pode levar alguns instantes.',
+                ? 'Abandonando o passo a passo e preparando pra enviar '
+                    'tudo de uma vez. Isso pode levar alguns instantes.'
+                : 'Abandonando o passo a passo de ${widget.placa} e '
+                    'preparando pra enviar tudo de uma vez. Isso pode '
+                    'levar alguns instantes.',
             textAlign: TextAlign.center,
             style: const TextStyle(
               color: Color(0xFF414755),
@@ -4847,6 +4690,7 @@ class _ConvertingToOfflineBulkScreenState
   }
 }
 
+/// Tela cheia mostrada quando o pacote em massa já foi confirmado offline e aguarda conexão para enviar.
 class _BulkAwaitingSyncScreen extends StatelessWidget {
   final VistoriaSession session;
   final VoidCallback onBackToSelection;
@@ -4957,6 +4801,7 @@ class _BulkAwaitingSyncScreen extends StatelessWidget {
   }
 }
 
+/// Barra de composição do chat guiado: campo de texto, câmera e microfone.
 class _TextComposer extends StatelessWidget {
   final TextEditingController controller;
   final bool hasText;
@@ -5132,6 +4977,7 @@ class _CameraReleaseButtonState extends State<_CameraReleaseButton>
   }
 }
 
+/// Barra de composição durante a gravação de áudio: duração, ondas e ações de cancelar/enviar.
 class _RecordingComposer extends StatelessWidget {
   final String duration;
   final VoidCallback onCancel;
@@ -5192,6 +5038,7 @@ class _RecordingComposer extends StatelessWidget {
   }
 }
 
+/// Botão circular de ação (enviar, cancelar, etc.) usado nas barras de composição.
 class _RoundActionButton extends StatelessWidget {
   final IconData icon;
   final VoidCallback onTap;
@@ -5233,6 +5080,7 @@ class _RoundActionButton extends StatelessWidget {
   }
 }
 
+/// Barras animadas simulando ondas de áudio durante a gravação.
 class _AnimatedAudioWaves extends StatefulWidget {
   const _AnimatedAudioWaves();
 
@@ -5289,6 +5137,7 @@ class _AnimatedAudioWavesState extends State<_AnimatedAudioWaves>
   }
 }
 
+/// Bolha com três pontinhos pulsantes indicando que a IA está digitando.
 class _TypingBubble extends StatefulWidget {
   const _TypingBubble();
 

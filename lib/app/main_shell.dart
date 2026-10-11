@@ -11,10 +11,11 @@ import '../features/profile/profile_page.dart';
 import '../services/argos_push_notification_service.dart';
 import '../services/session_context_service.dart';
 
+/// Shell principal do app: navegação por abas (Vistorias, Chat IA, Perfil).
 class MainShell extends StatefulWidget {
   final User user;
 
-  /// Recebido do StartupGate para evitar segunda SplashPage/loading.
+  // Recebido do StartupGate pra pular a checagem de perfil duplicada.
   final bool? initialProfileCompletionRequired;
 
   const MainShell({
@@ -38,31 +39,17 @@ class _MainShellState extends State<MainShell> {
       _accountStatusSubscription;
   bool _accountBlockedDialogShown = false;
 
-  /// Guarda o sinistro selecionado quando o usuário abre o Chat IA
-  /// a partir do botão dentro do sumário da vistoria.
+  // Sinistro selecionado quando o Chat IA é aberto a partir do sumário da vistoria.
   String? selectedSinistroIdForChat;
   String? notificationSinistroIdToOpen;
 
-  /// true quando o chat foi aberto pelo botão "Iniciar Retificação" — o
-  /// AiChatPage usa isso pra pular o fluxo normal (findOpenVistoria) e ir
-  /// direto pra startRetificacaoFromSinistro.
+  // true quando o chat foi aberto pelo botão "Iniciar Retificação".
   bool selectedRetificacaoForChat = false;
 
-  /// Incrementado toda vez que _openChatForSinistro/_openRetificacaoForSinistro
-  /// é chamado — entra na ValueKey do AiChatPage pra forçar reconstrução
-  /// mesmo quando o mesmo sinistroId é reaberto em seguida (ex: usuário
-  /// cancela o diálogo "continuar vistoria?" e toca no botão de novo). Sem
-  /// isso, o cache de `pages` via selectedSinistroIdForChat não via mudança
-  /// nenhuma e reaproveitava a página de chat exatamente como tinha ficado,
-  /// sem rodar o bootstrap (e sem perguntar) de novo.
+  // Força reconstrução do AiChatPage mesmo reabrindo o mesmo sinistroId.
   int _chatRequestNonce = 0;
 
-  /// Sinaliza pro AiChatPage qual aba está selecionada agora, sem precisar
-  /// invalidar o cache de `pages` (que de propósito ignora troca de aba —
-  /// ver comentário em `pages`). O AiChatPage escuta isso pra recarregar a
-  /// lista de veículos com check-in sempre que a aba dele for reaberta, em
-  /// vez de só uma vez no initState (que ficava desatualizada quando o
-  /// check-in acontecia depois, na aba de Vistorias).
+  // Notifica o AiChatPage de qual aba está selecionada, sem invalidar o cache de `pages`.
   final ValueNotifier<int> _selectedIndexNotifier = ValueNotifier<int>(0);
 
   String get _emailKey => (widget.user.email ?? '').trim().toLowerCase();
@@ -108,10 +95,7 @@ class _MainShellState extends State<MainShell> {
     super.dispose();
   }
 
-  /// Escuta em tempo real o próprio documento do usuário para reagir se um
-  /// administrador bloquear (ou de qualquer forma tirar de "ativo") a
-  /// conta enquanto a sessão já está em uso — sem isso, o usuário só
-  /// descobriria o bloqueio da próxima vez que tentasse logar de novo.
+  /// Escuta em tempo real o status do usuário e mostra o bloqueio se a conta sair de "ativo".
   void _watchAccountStatus() {
     final email = _emailKey;
 
@@ -137,6 +121,7 @@ class _MainShellState extends State<MainShell> {
     );
   }
 
+  /// Mostra o diálogo de conta bloqueada/pendente e desloga ao confirmar.
   Future<void> _showAccountBlockedDialog(String status) async {
     _accountBlockedDialogShown = true;
     _accountStatusSubscription?.cancel();
@@ -159,6 +144,7 @@ class _MainShellState extends State<MainShell> {
     );
   }
 
+  /// Busca no Firestore se o cadastro do usuário está completo e ajusta a aba inicial.
   Future<void> _loadProfileCompletionStatus() async {
     final email = _emailKey;
 
@@ -203,6 +189,7 @@ class _MainShellState extends State<MainShell> {
     }
   }
 
+  /// Libera a navegação normal assim que o cadastro é concluído.
   void _handleProfileCompleted() {
     setState(() {
       profileCompletionRequired = false;
@@ -210,6 +197,7 @@ class _MainShellState extends State<MainShell> {
     });
   }
 
+  /// Abre a aba de vistorias no sinistro indicado por uma notificação recebida.
   void _handleNotificationSinistroOpened() {
     final sinistroId =
         ArgosPushNotificationService.instance.openedSinistroId.value?.trim() ??
@@ -245,6 +233,7 @@ class _MainShellState extends State<MainShell> {
     );
   }
 
+  /// Troca de aba pelo tap na barra inferior, bloqueando se o cadastro estiver pendente.
   void _handleNavTap(int index) {
     if (profileCompletionRequired && index != 2) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -264,14 +253,13 @@ class _MainShellState extends State<MainShell> {
     setState(() {
       selectedIndex = index;
 
-      /// Se o usuário tocar manualmente no Chat IA pela barra inferior,
-      /// abre o chat sem sinistro selecionado, mostrando a lista de placas.
       if (index == 1) {
         selectedSinistroIdForChat = null;
       }
     });
   }
 
+  /// Abre o Chat IA sem nenhum sinistro pré-selecionado.
   void _openGenericChat() {
     if (profileCompletionRequired) {
       _handleNavTap(1);
@@ -284,6 +272,7 @@ class _MainShellState extends State<MainShell> {
     });
   }
 
+  /// Abre o Chat IA já com o sinistro selecionado, no modo normal de vistoria.
   void _openChatForSinistro(String sinistroId) {
     if (profileCompletionRequired) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -308,6 +297,7 @@ class _MainShellState extends State<MainShell> {
     });
   }
 
+  /// Abre o Chat IA já com o sinistro selecionado, direto no modo retificação.
   void _openRetificacaoForSinistro(String sinistroId) {
     if (profileCompletionRequired) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -339,13 +329,7 @@ class _MainShellState extends State<MainShell> {
   bool? _cachedPagesRetificacao;
   int? _cachedChatRequestNonce;
 
-  /// Cacheado: o IndexedStack mantém as 3 páginas montadas o tempo todo, e
-  /// InspectionsPage sozinha é uma árvore enorme. Sem esse cache, qualquer
-  /// setState do MainShell (troca de aba, notificação, cadastro concluído)
-  /// recriava as 3 instâncias de widget do zero, forçando o Flutter a
-  /// reconstruir a InspectionsPage inteira mesmo quando nada relevante para
-  /// ela havia mudado — contribuindo para os frames perdidos logo na
-  /// abertura do app.
+  /// Monta (e cacheia) as 3 páginas do IndexedStack, só recriando quando algo relevante muda.
   List<Widget> get pages {
     final needsRebuild = _cachedPages == null ||
         _cachedPagesSinistroKey != selectedSinistroIdForChat ||
@@ -370,11 +354,6 @@ class _MainShellState extends State<MainShell> {
         notificationSinistroIdToOpen: notificationSinistroIdToOpen,
       ),
 
-      /// O ValueKey força o Flutter a reconstruir o chat quando outro
-      /// sinistro (ou o modo retificação) for selecionado — ou quando o
-      /// mesmo sinistro for reaberto de novo (_chatRequestNonce), pra sempre
-      /// rodar o bootstrap (e a pergunta de continuar vistoria) de novo em
-      /// vez de reaproveitar a tela como ficou da vez anterior.
       AiChatPage(
         key: ValueKey(
           '${selectedSinistroIdForChat ?? 'chat_sem_sinistro'}_${selectedRetificacaoForChat ? 'retificacao' : 'normal'}_$_chatRequestNonce',
@@ -382,6 +361,7 @@ class _MainShellState extends State<MainShell> {
         sinistroId: selectedSinistroIdForChat,
         startRetificacao: selectedRetificacaoForChat,
         selectedTabIndexListenable: _selectedIndexNotifier,
+        onGoToInspections: () => setState(() => selectedIndex = 0),
       ),
 
       ProfilePage(
@@ -397,8 +377,6 @@ class _MainShellState extends State<MainShell> {
   @override
   Widget build(BuildContext context) {
     if (isLoadingProfile) {
-      // Fallback para uso fora do StartupGate. No fluxo normal, o StartupGate
-      // já entrega initialProfileCompletionRequired e este bloco não aparece.
       return const SizedBox.expand();
     }
 
@@ -416,6 +394,7 @@ class _MainShellState extends State<MainShell> {
   }
 }
 
+/// Diálogo cheio mostrando que a conta está pendente de aprovação ou bloqueada.
 class _AccountBlockedDialog extends StatelessWidget {
   final String status;
   final VoidCallback onAcknowledge;
@@ -571,6 +550,7 @@ class _AccountBlockedDialog extends StatelessWidget {
   }
 }
 
+/// Barra de navegação inferior com os 3 ícones de aba (Vistorias, Argos IA, Perfil).
 class _ArgosBottomNav extends StatelessWidget {
   final int currentIndex;
   final bool completionRequired;
@@ -664,6 +644,7 @@ class _ArgosBottomNav extends StatelessWidget {
   }
 }
 
+/// Par ícone + rótulo de um item da barra de navegação inferior.
 class _NavItem {
   final IconData icon;
   final String label;
