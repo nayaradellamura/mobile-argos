@@ -144,3 +144,16 @@ web/
 windows/
 # Ferramentas locais de teste (snapshot/restore de sinistro) — não vai pro repo.
 functions/tools/
+
+# Agentes ADK: ambiente virtual, sessões locais e pacotes zipados (o zip
+# antigo contém um .env com chave de API).
+adk_agents/.venv/
+adk_agents/.adk/
+__pycache__/
+*.zip
+
+# Material de referência local (apresentação, prints).
+Ref/
+
+# Backup local da versao anterior dos agentes (substituida pela publicada).
+adk_agents_antigo/
