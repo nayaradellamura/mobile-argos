@@ -2,7 +2,7 @@ const express = require("express");
 const admin = require("firebase-admin");
 
 const { loadLaudoContext } = require("./lib/data");
-const { gerarAchadosTecnicos } = require("./lib/gemini");
+const { gerarAchadosTecnicos, MODEL: LAUDO_GEMINI_MODEL } = require("./lib/gemini");
 const { renderLaudoPdf, renderOrcamentoAprovadoPdf } = require("./lib/pdf");
 const { uploadLaudoPdf, uploadOrcamentoAprovadoPdf } = require("./lib/storage");
 
@@ -10,6 +10,30 @@ if (!admin.apps.length) {
   admin.initializeApp({
     projectId: process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || "fho-argos",
   });
+}
+
+// Idempotência: o documento já está pronto para ESTA requisição? Compara
+// tanto o ID resolvido (vistoriaId) quanto o ID que veio na requisição
+// original (vistoriaIdSolicitado) — se a vistoria tinha ID provisório
+// (VIS-OFFLINE-...) já reconciliado, o gravado é o resolvido, e a
+// reentrega da mesma tarefa pelo Cloud Tasks ainda chega com o provisório.
+function jaProntoPara(documento, vistoriaIdRequisicao) {
+  if (documento?.status !== "pronto") return false;
+  return (
+    documento.vistoriaId === vistoriaIdRequisicao ||
+    documento.vistoriaIdSolicitado === vistoriaIdRequisicao
+  );
+}
+
+// Campos de uma tentativa anterior que falhou. As gravações usam
+// set(..., { merge: true }) no mapa aninhado, então sem apagar
+// explicitamente o `erro`/`falhouEm` antigo sobreviveria num status
+// "gerando"/"pronto" posterior.
+function limparErroAnterior() {
+  return {
+    erro: admin.firestore.FieldValue.delete(),
+    falhouEm: admin.firestore.FieldValue.delete(),
+  };
 }
 
 const app = express();
@@ -40,14 +64,21 @@ app.post("/gerar-laudo", async (req, res) => {
     // não gera de novo nem sobrescreve.
     const sinistroSnapAntes = await sinistroRef.get();
     const laudoAtual = sinistroSnapAntes.data()?.laudoTecnico;
-    if (laudoAtual?.status === "pronto" && laudoAtual?.vistoriaId === vistoriaId) {
+    if (jaProntoPara(laudoAtual, vistoriaId)) {
       console.log("Laudo já estava pronto, ignorando:", { sinistroId, vistoriaId });
       res.status(200).json({ status: "ja_existia", url: laudoAtual.url });
       return;
     }
 
     await sinistroRef.set(
-      { laudoTecnico: { status: "gerando", vistoriaId, iniciadoEm: admin.firestore.FieldValue.serverTimestamp() } },
+      {
+        laudoTecnico: {
+          status: "gerando",
+          vistoriaId,
+          iniciadoEm: admin.firestore.FieldValue.serverTimestamp(),
+          ...limparErroAnterior(),
+        },
+      },
       { merge: true }
     );
 
@@ -66,12 +97,14 @@ app.post("/gerar-laudo", async (req, res) => {
         laudoTecnico: {
           status: "pronto",
           vistoriaId: resolvedVistoriaId,
+          vistoriaIdSolicitado: vistoriaId,
           url,
           storagePath,
           classificacaoContran: achados.classificacaoContran || null,
           achados,
           geradoEm: admin.firestore.FieldValue.serverTimestamp(),
-          modelo: process.env.LAUDO_GEMINI_MODEL || "gemini-2.5-flash",
+          modelo: LAUDO_GEMINI_MODEL,
+          ...limparErroAnterior(),
         },
       },
       { merge: true }
@@ -124,7 +157,7 @@ app.post("/gerar-orcamento-aprovado", async (req, res) => {
   try {
     const sinistroSnapAntes = await sinistroRef.get();
     const orcamentoAtual = sinistroSnapAntes.data()?.orcamentoAprovado;
-    if (orcamentoAtual?.status === "pronto" && orcamentoAtual?.vistoriaId === vistoriaId) {
+    if (jaProntoPara(orcamentoAtual, vistoriaId)) {
       console.log("Orçamento aprovado já estava pronto, ignorando:", { sinistroId, vistoriaId });
       res.status(200).json({ status: "ja_existia", url: orcamentoAtual.url });
       return;
@@ -136,6 +169,7 @@ app.post("/gerar-orcamento-aprovado", async (req, res) => {
           status: "gerando",
           vistoriaId,
           iniciadoEm: admin.firestore.FieldValue.serverTimestamp(),
+          ...limparErroAnterior(),
         },
       },
       { merge: true }
@@ -175,10 +209,12 @@ app.post("/gerar-orcamento-aprovado", async (req, res) => {
         orcamentoAprovado: {
           status: "pronto",
           vistoriaId: resolvedVistoriaId,
+          vistoriaIdSolicitado: vistoriaId,
           url,
           storagePath,
           valorTotal: context.orcamentoCampo.valorTotal,
           geradoEm: admin.firestore.FieldValue.serverTimestamp(),
+          ...limparErroAnterior(),
         },
       },
       { merge: true }

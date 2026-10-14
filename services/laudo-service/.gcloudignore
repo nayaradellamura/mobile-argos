@@ -1,0 +1,10 @@
+# Não sobe segredos locais nem dependências instaladas na máquina — o
+# Dockerfile roda `npm ci` dentro da imagem.
+.env
+.env.*
+!.env.example
+node_modules/
+test/
+.gcloudignore
+.git
+.gitignore

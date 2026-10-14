@@ -117,9 +117,12 @@ gcloud iam service-accounts add-iam-policy-binding \
 ```
 
 **7. Configurar as functions** — copie `functions/.env.example` pra
-`functions/.env` e preencha `LAUDO_SERVICE_URL` (pegue com o comando no
-próprio `.env.example`), `LAUDO_TASKS_QUEUE`, `LAUDO_TASKS_LOCATION` e
+`functions/.env` e preencha `LAUDO_SERVICE_URL` e `ORCAMENTO_SERVICE_URL`
+(pegue a URL base com o comando no próprio `.env.example`),
+`LAUDO_TASKS_QUEUE`, `LAUDO_TASKS_LOCATION` e
 `LAUDO_INVOKER_SERVICE_ACCOUNT`. Depois `firebase deploy --only functions`.
+Se alguma das duas URLs ficar vazia, o trigger grava `status: "erro"` em
+`laudoTecnico`/`orcamentoAprovado` no sinistro em vez de pular em silêncio.
 
 ## Design do PDF
 
