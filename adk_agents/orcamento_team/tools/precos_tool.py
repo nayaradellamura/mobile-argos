@@ -28,7 +28,11 @@ _FALLBACK_PRECOS = {
     "condensador de ar-condicionado": {"valor_peca": 420.0, "horas_mao_obra": 1.6},
 }
 
-_VALOR_HORA_MAO_OBRA = 90.0
+# Só para itens sem `valor_hora` (vistorias antigas). O valor real é
+# configurado por cada oficina, por tipo de serviço, em
+# `credenciados/{id}.valoresHoraMaoObra`; o app congela o valor usado em cada
+# item (`valorHora`) — ver lib/features/orcamento/orcamento_calculo.dart.
+_VALOR_HORA_LEGADO = 90.0
 _TOLERANCIA_FAIXA_PRECO = 0.20  # 20% acima do valor de referência
 
 _CATEGORIA_DEFAULT = "popular_compacto"
@@ -304,10 +308,11 @@ def calcular_orcamento_total(itens: list[dict]) -> dict:
     calcular esse valor por conta própria.
 
     Args:
-        itens: lista de dicts no formato
-            `{"peca": str, "valor_peca": float, "horas_mao_obra": float}`.
-            `valor_peca` e `horas_mao_obra` podem ser 0 quando não se
-            aplicam ao item (ex.: item só de mão de obra ou só de peça).
+        itens: lista de dicts no formato `{"peca": str, "quantidade": int,
+            "valor_peca": float, "horas_mao_obra": float, "valor_hora":
+            float}`. `valor_peca` é unitário; `quantidade` vale 1 se
+            ausente; sem `valor_hora` usa o valor legado. `valor_peca` e
+            `horas_mao_obra` podem ser 0 quando não se aplicam ao item.
 
     Returns:
         dict com `valor_total_pecas`, `valor_total_mao_obra`,
@@ -318,9 +323,15 @@ def calcular_orcamento_total(itens: list[dict]) -> dict:
     valor_total_mao_obra = 0.0
 
     for item in itens:
-        valor_peca = _para_float(item.get("valor_peca"))
+        quantidade = max(1, round(_para_float(item.get("quantidade")) or 1))
+        valor_peca = _para_float(item.get("valor_peca")) * quantidade
         horas = _para_float(item.get("horas_mao_obra"))
-        valor_mao_obra = horas * _VALOR_HORA_MAO_OBRA
+        valor_hora = (
+            _VALOR_HORA_LEGADO
+            if item.get("valor_hora") is None
+            else _para_float(item.get("valor_hora"))
+        )
+        valor_mao_obra = horas * valor_hora
 
         valor_total_pecas += valor_peca
         valor_total_mao_obra += valor_mao_obra
@@ -328,7 +339,9 @@ def calcular_orcamento_total(itens: list[dict]) -> dict:
         detalhamento.append(
             {
                 "peca": item.get("peca"),
+                "quantidade": quantidade,
                 "valor_peca": round(valor_peca, 2),
+                "valor_hora": valor_hora,
                 "horas_mao_obra": horas,
                 "valor_mao_obra": round(valor_mao_obra, 2),
                 "valor_item_total": round(valor_peca + valor_mao_obra, 2),

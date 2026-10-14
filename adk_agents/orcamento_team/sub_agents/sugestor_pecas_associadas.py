@@ -45,7 +45,7 @@ Regras:
 - Severidade "grave" → pode sugerir até 3, priorizando itens de segurança
   (ex.: airbag, feixe de cabos, radiador/condensador em impacto frontal).
 - Cada `motivo` precisa ser curto o bastante pra virar uma pergunta de
-  chat (algo que um colega perguntaria, não um laudo técnico).
+  chat (objetiva e sem gíria, não um laudo técnico).
 - Se não houver nenhuma correlação razoável, retorne `sugestoes: []` —
   não invente sugestão só para preencher.
 """

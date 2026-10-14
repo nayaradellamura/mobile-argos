@@ -3,8 +3,9 @@
 O modelo vem de variavel de ambiente para poder ser trocado com um
 `gcloud run services update --update-env-vars`, sem rebuild da imagem.
 
-Padrao: `gemini-3.1-flash-lite` — faixa de baixo custo, e o mais barato que
-passou no teste real contra este projeto.
+Padrao: `gemini-3.8-flash` (mesmo modelo das Cloud Functions). Antes era
+`gemini-3.1-flash-lite`, o mais barato que passou no teste real abaixo —
+o 3.8-flash ainda precisa ser validado com os evals (adk_agents/eval).
 
 TESTADO NO VERTEX DO fho-argos EM 2026-09-16, com o agente de verdade:
   - gemini-2.5-flash-lite   NAO USAR como coordenador. Ele NAO consegue emitir
@@ -30,7 +31,7 @@ from __future__ import annotations
 
 import os
 
-_PADRAO = "gemini-3.1-flash-lite"
+_PADRAO = "gemini-3.8-flash"
 
 
 def modelo_conversa() -> str:

@@ -31,8 +31,8 @@ Regras:
 - `consistente` só é true se `divergencias` estiver vazio.
 - Só reporte divergência relevante (peça/região/severidade), não diferenças
   de fraseado.
-- `pergunta_sugerida` precisa soar como um colega perguntando, curta e
-  direta (ex.: "Vi o farol estourado na foto, quer incluir ele na lista?"),
+- `pergunta_sugerida` precisa ser curta, direta e sem gíria
+  (ex.: "A foto mostra o farol quebrado. Deseja incluí-lo na lista?"),
   nunca como uma auditoria ou acusação de erro.
 - Se `achados_visao` estiver vazio ou não tiver chegado ainda, retorne
   `consistente: true` e `divergencias: []` — não invente divergência sem

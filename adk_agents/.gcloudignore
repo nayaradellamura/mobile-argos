@@ -17,3 +17,8 @@ README.md
 */README.md
 .git/
 .gitignore
+
+# Testes e avaliacoes nao fazem parte do runtime.
+tests/
+eval/
+*/eval/

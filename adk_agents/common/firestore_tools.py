@@ -125,7 +125,9 @@ def salvar_rascunho_orcamento(id_vistoria: str, itens: list[dict]) -> dict:
     Args:
         id_vistoria: id do documento em `vistorias/{id_vistoria}`.
         itens: lista de dicts `{"peca": str, "tipo_intervencao": str,
-            "valor_peca": float, "horas_mao_obra": float, "origem": str}`.
+            "quantidade": int, "valor_peca": float, "tipo_servico": str,
+            "horas_mao_obra": float, "valor_hora": float, "origem": str}`.
+            `valor_hora` é o da oficina para o `tipo_servico` do item.
             `origem` é "vistoria" ou "sugestao_aceita", só para o app poder
             sinalizar visualmente o que veio de sugestão proativa.
 
@@ -138,9 +140,18 @@ def salvar_rascunho_orcamento(id_vistoria: str, itens: list[dict]) -> dict:
         {
             "peca": item.get("peca", ""),
             "tipoIntervencao": item.get("tipo_intervencao", "substituicao"),
+            "quantidade": max(1, round(_para_float(item.get("quantidade")) or 1)),
             "valorPeca": _para_float(item.get("valor_peca")),
+            "tipoServico": item.get("tipo_servico") or "funilaria",
             "horasMaoObra": _para_float(item.get("horas_mao_obra")),
             "origem": item.get("origem", "vistoria"),
+            # Congelado no item, como o app faz; sem valor, o histórico e o
+            # laudo caem no valor legado.
+            **(
+                {"valorHora": _para_float(item.get("valor_hora"))}
+                if item.get("valor_hora") is not None
+                else {}
+            ),
         }
         for item in itens
     ]
@@ -182,8 +193,11 @@ def carregar_orcamento_confirmado(id_vistoria: str) -> dict:
         {
             "peca": item.get("peca", ""),
             "tipo_intervencao": item.get("tipoIntervencao", "substituicao"),
+            "quantidade": int(_para_float(item.get("quantidade")) or 1),
             "valor_peca": _para_float(item.get("valorPeca")),
+            "tipo_servico": item.get("tipoServico", ""),
             "horas_mao_obra": _para_float(item.get("horasMaoObra")),
+            "valor_hora": item.get("valorHora"),
         }
         for item in itens_finais
     ]
