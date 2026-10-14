@@ -8,9 +8,11 @@ const { GoogleGenAI } = require("@google/genai");
 
 const PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || "fho-argos";
 const LOCATION = process.env.GOOGLE_CLOUD_LOCATION || "us-central1";
-// Mesmo modelo que o resto do backend já usa para revisão (functions/index.js,
-// GEMINI_REVIEW_MODEL) — mantém previsibilidade de custo/qualidade. Se trocar
-// pra um modelo 3.x, GOOGLE_CLOUD_LOCATION também precisa virar "global".
+// Modelo configurável pela env var LAUDO_GEMINI_MODEL (default
+// gemini-2.5-flash). NÃO é o mesmo das Cloud Functions (functions/index.js,
+// GEMINI_REVIEW_MODEL, que usa um modelo 3.x no endpoint "global") — os dois
+// são independentes. Se trocar aqui pra um modelo 3.x, GOOGLE_CLOUD_LOCATION
+// também precisa virar "global".
 const MODEL = process.env.LAUDO_GEMINI_MODEL || "gemini-2.5-flash";
 const STORAGE_BUCKET =
   process.env.ARGOS_STORAGE_BUCKET || `${PROJECT_ID}.firebasestorage.app`;
@@ -161,11 +163,11 @@ async function gerarAchadosTecnicos(context) {
   const orcamentoTexto =
     orcamento && orcamento.itens.length > 0
       ? `
-Orçamento registrado pelo agente de campo durante a vistoria (NÃO
+Orçamento registrado em campo durante a vistoria (NÃO
 verificado de forma independente — cruze com as fotos antes de usar; se
 divergir do que você vê nas imagens, ignore ou ajuste):
-${orcamento.itens.map((item) => `- ${item.peca} — R$ ${item.valor.toFixed(2)} (${item.horasMaoObra}h de mão de obra)`).join("\n")}
-Total estimado em campo: R$ ${orcamento.valorTotal.toFixed(2)}
+${orcamento.itens.map((item) => `- ${item.quantidade}x ${item.peca} — peças R$ ${item.valorPecas.toFixed(2)}; mão de obra ${item.horasMaoObra}h${item.tipoServico ? ` (${item.tipoServico})` : ""} × R$ ${item.valorHora.toFixed(2)}/h = R$ ${item.valorMaoObra.toFixed(2)}`).join("\n")}
+Total estimado em campo: R$ ${orcamento.valorTotal.toFixed(2)} (peças R$ ${orcamento.valorPecas.toFixed(2)} + mão de obra R$ ${orcamento.valorMaoObra.toFixed(2)})
 `
       : "";
 
@@ -238,4 +240,4 @@ function enforceManualReviewOnRisk(achados) {
   };
 }
 
-module.exports = { gerarAchadosTecnicos };
+module.exports = { gerarAchadosTecnicos, MODEL };

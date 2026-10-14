@@ -26,6 +26,107 @@ function formatDate(value) {
   });
 }
 
+// Valor da hora usado só para itens antigos, gravados antes de cada oficina
+// configurar o seu (`credenciados/{id}.valoresHoraMaoObra`). Itens novos já
+// chegam com `valorHora` congelado pelo app — ver
+// lib/features/orcamento/orcamento_calculo.dart no app mobile.
+const VALOR_HORA_LEGADO = 90;
+
+function num(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Normaliza um item vindo de qualquer fonte para o mesmo formato e recalcula
+// os totais a partir dos campos base (nunca confia num total pronto).
+function normalizarItem({ peca, quantidade, valorPeca, tipoServico, horasMaoObra, valorHora }) {
+  const qtd = Math.max(1, Math.round(num(quantidade)) || 1);
+  const horas = num(horasMaoObra);
+  const hora = valorHora === undefined || valorHora === null ? VALOR_HORA_LEGADO : num(valorHora);
+  const unitario = num(valorPeca);
+  const valorPecas = unitario * qtd;
+  const valorMaoObra = horas * hora;
+
+  return {
+    peca: str(peca),
+    quantidade: qtd,
+    valorPeca: unitario,
+    valorPecas,
+    tipoServico: str(tipoServico),
+    horasMaoObra: horas,
+    valorHora: hora,
+    valorMaoObra,
+    valorTotal: valorPecas + valorMaoObra,
+  };
+}
+
+/**
+ * Orçamento registrado em campo, com o total calculado sempre da mesma forma
+ * (peças × quantidade + horas × valor da hora), venha de qual fluxo vier.
+ * Fontes, em ordem de prioridade:
+ *
+ * 1. `orcamentoItensFinais` — tabela confirmada no chat guiado (escrita pelo
+ *    app, não pelo modelo, então não sofre erro de transcrição do LLM).
+ * 2. `orcamentoRascunho` com origem 'mecanico' — envio em massa (o ADK nunca
+ *    participa desse fluxo).
+ * 3. `agentParameters.itens_orcamento` — vistorias antigas do chat guiado,
+ *    de antes da tabela gravar `orcamentoItensFinais`.
+ *
+ * É passado ao Gemini como referência NÃO verificada, não como veredito,
+ * para evitar ancoragem do laudo no que o campo já concluiu.
+ */
+function buildOrcamentoCampo({ vistoria, agentParameters }) {
+  const daTabela = (lista) =>
+    lista
+      .filter((item) => item && typeof item === "object")
+      .map((item) =>
+        normalizarItem({
+          peca: item.peca,
+          quantidade: item.quantidade,
+          valorPeca: item.valorPeca,
+          tipoServico: item.tipoServico,
+          horasMaoObra: item.horasMaoObra,
+          valorHora: item.valorHora,
+        })
+      )
+      .filter((item) => item.peca);
+
+  let itens = [];
+
+  if (Array.isArray(vistoria.orcamentoItensFinais) && vistoria.orcamentoItensFinais.length > 0) {
+    itens = daTabela(vistoria.orcamentoItensFinais);
+  }
+
+  if (itens.length === 0 && Array.isArray(vistoria.orcamentoRascunho)) {
+    itens = daTabela(vistoria.orcamentoRascunho.filter((item) => item && item.origem === "mecanico"));
+  }
+
+  if (itens.length === 0 && Array.isArray(agentParameters.itens_orcamento)) {
+    itens = agentParameters.itens_orcamento
+      .filter((item) => item && typeof item === "object")
+      .map((item) =>
+        normalizarItem({
+          peca: item.peca,
+          quantidade: item.quantidade,
+          valorPeca: item.valor_peca,
+          tipoServico: item.tipo_servico,
+          horasMaoObra: item.horas_mao_obra,
+          valorHora: item.valor_hora,
+        })
+      )
+      .filter((item) => item.peca);
+  }
+
+  const soma = (campo) => itens.reduce((total, item) => total + item[campo], 0);
+
+  return {
+    itens,
+    valorPecas: soma("valorPecas"),
+    valorMaoObra: soma("valorMaoObra"),
+    valorTotal: soma("valorTotal"),
+  };
+}
+
 /**
  * Junta tudo que o laudo precisa: dados do sinistro (snapshots denormalizados
  * de cliente/veículo/seguradora/credenciado), da vistoria (fotos, mensagens
@@ -94,44 +195,7 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
     }))
     .filter((m) => m.texto);
 
-  // Orçamento que o agente ADK já rascunhou ao vivo durante o chat (tool
-  // `salvar_estado_vistoria`) — passado como referência NÃO verificada pro
-  // Gemini cruzar com as fotos, não como severidade/veredito pronto (isso
-  // evitaria o efeito de ancoragem: o laudo só repetindo o que o agente de
-  // campo já concluiu, em vez de reanalisar de fato).
-  //
-  // itensAgente vem do chat guiado (agentParameters, só o ADK escreve).
-  // itensMecanico vem do envio em massa (vistoria.orcamentoRascunho,
-  // origem: 'mecanico', gravado por appendOrcamentoMecanicoItem no app
-  // mobile) -- o ADK nunca participa desse fluxo, então
-  // agentParameters.itens_orcamento sempre ficava vazio pra essas vistorias
-  // e o orçamento do mecânico nunca chegava na IA (bug real, achado
-  // 2026-10-02 verificando o pipeline fim a fim).
-  const itensAgente = Array.isArray(agentParameters.itens_orcamento)
-    ? agentParameters.itens_orcamento
-        .filter((item) => item && typeof item === "object")
-        .map((item) => ({
-          peca: str(item.peca),
-          valor: Number(item.valor_peca) || 0,
-          horasMaoObra: Number(item.horas_mao_obra) || 0,
-        }))
-        .filter((item) => item.peca)
-    : [];
-
-  const orcamentoRascunho = Array.isArray(vistoria.orcamentoRascunho)
-    ? vistoria.orcamentoRascunho
-    : [];
-
-  const itensMecanico = orcamentoRascunho
-    .filter((item) => item && typeof item === "object" && item.origem === "mecanico")
-    .map((item) => ({
-      peca: str(item.peca),
-      valor: Number(item.valorPeca) || 0,
-      horasMaoObra: Number(item.horasMaoObra) || 0,
-    }))
-    .filter((item) => item.peca);
-
-  const valorTotalMecanico = itensMecanico.reduce((sum, item) => sum + item.valor, 0);
+  const orcamentoCampo = buildOrcamentoCampo({ vistoria, agentParameters });
 
   return {
     sinistroId,
@@ -179,13 +243,10 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
 
     transcricao,
 
-    orcamentoCampo: {
-      itens: [...itensAgente, ...itensMecanico],
-      valorTotal: itensAgente.length > 0
-        ? Number(agentParameters.valor_total_final) || 0
-        : valorTotalMecanico,
-    },
+    orcamentoCampo,
   };
 }
 
-module.exports = { loadLaudoContext };
+// buildOrcamentoCampo, normalizarItem e VALOR_HORA_LEGADO são exportados só
+// para os testes (test/data.test.js) — o servidor usa apenas loadLaudoContext.
+module.exports = { loadLaudoContext, buildOrcamentoCampo, normalizarItem, VALOR_HORA_LEGADO };

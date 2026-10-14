@@ -145,19 +145,23 @@
     <h2 class="section-title">Itens Aprovados</h2>
     <table class="itens">
       <thead>
-        <tr><th>Peça / Serviço</th><th class="valor">Mão de obra</th><th class="valor">Valor</th></tr>
+        <tr><th>Peça / Serviço</th><th class="valor">Qtd.</th><th class="valor">Peças</th><th class="valor">Mão de obra</th><th class="valor">Total</th></tr>
       </thead>
       <tbody>
         {{#each orcamentoCampo.itens}}
         <tr>
           <td>{{peca}}</td>
-          <td class="valor">{{horasMaoObra}}h</td>
-          <td class="valor">R$ {{currency valor}}</td>
+          <td class="valor">{{quantidade}}</td>
+          <td class="valor">R$ {{currency valorPecas}}</td>
+          <td class="valor">{{horasMaoObra}}h × R$ {{currency valorHora}}<br>R$ {{currency valorMaoObra}}</td>
+          <td class="valor">R$ {{currency valorTotal}}</td>
         </tr>
         {{/each}}
       </tbody>
       <tfoot>
-        <tr><td colspan="2">Total aprovado</td><td class="valor">R$ {{currency orcamentoCampo.valorTotal}}</td></tr>
+        <tr><td colspan="4">Peças</td><td class="valor">R$ {{currency orcamentoCampo.valorPecas}}</td></tr>
+        <tr><td colspan="4">Mão de obra</td><td class="valor">R$ {{currency orcamentoCampo.valorMaoObra}}</td></tr>
+        <tr><td colspan="4">Total aprovado</td><td class="valor">R$ {{currency orcamentoCampo.valorTotal}}</td></tr>
       </tfoot>
     </table>
 
