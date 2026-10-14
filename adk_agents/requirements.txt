@@ -1,0 +1,6 @@
+# Versões pinadas nas que já foram validadas localmente.
+google-adk==2.8.0
+google-cloud-firestore==2.29.0
+# Obrigatório para --artifact_service_uri=gs://... (as fotos da vistoria).
+# Sem isso o GcsArtifactService quebra na primeira leva de imagens.
+google-cloud-storage>=2.18,<4

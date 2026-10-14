@@ -1,0 +1,17 @@
+# Sem isto, o `COPY . /app/agents/` arrasta o .venv (centenas de MB) para
+# dentro do agents_dir — e um diretório estranho lá dentro ainda confunde o
+# loader de agentes do ADK.
+.venv
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+.adk/
+*.db
+scripts/
+ui_teste/
+.git/
+Dockerfile
+.dockerignore
+.gcloudignore
