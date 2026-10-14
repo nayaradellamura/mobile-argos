@@ -10,7 +10,9 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import '../../services/bulk_sync_coordinator.dart';
 import '../../services/session_context_service.dart';
+import '../../services/vistoria_chat_session_service.dart';
 
 // Tela de perfil do usuário: visualiza/edita dados pessoais e completa o cadastro.
 class ProfilePage extends StatefulWidget {
@@ -727,9 +729,80 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
-  // Desloga o usuário atual.
+  // Desloga o usuário atual, após confirmação.
   Future<void> _logout() async {
+    final hasPending = await _hasPendingBulkSends();
+    if (!mounted) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+          ),
+          title: Text(
+            'Sair da conta?',
+            style: GoogleFonts.spaceGrotesk(
+              fontWeight: FontWeight.bold,
+              color: const Color(0xFF1F2937),
+            ),
+          ),
+          content: Text(
+            hasPending
+                ? 'Há envios de vistoria pendentes neste aparelho. Eles só '
+                    'serão concluídos quando você entrar novamente.'
+                : 'Você precisará entrar novamente para usar o app.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancelar'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
+              child: const Text('Sair'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) return;
     await SessionContextService.instance.logout();
+  }
+
+  // Verifica (só no cache local, sem rede) se há pacote em massa sendo
+  // enviado ou com rascunho ainda não enviado.
+  Future<bool> _hasPendingBulkSends() async {
+    if (BulkSyncCoordinator.instance.syncingVistoriaIds.value.isNotEmpty) {
+      return true;
+    }
+
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('vistorias')
+          .where('inspectorId', isEqualTo: widget.user.uid)
+          .where(
+            'status',
+            isEqualTo: VistoriaChatSessionService.statusEmAndamento,
+          )
+          .where('coletaModo', isEqualTo: 'em_massa')
+          .get(const GetOptions(source: Source.cache))
+          .timeout(const Duration(seconds: 3));
+
+      return snapshot.docs.any((doc) {
+        final rascunho = doc.data()['envioEmMassaRascunho'];
+        if (rascunho is! Map) return false;
+        return rascunho.values.any(
+          (item) => item is Map && item['status'] != 'enviado',
+        );
+      });
+    } catch (e) {
+      debugPrint('Erro ao verificar envios pendentes antes de sair: $e');
+      return false;
+    }
   }
 
 

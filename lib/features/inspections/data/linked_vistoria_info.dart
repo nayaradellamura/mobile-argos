@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../../orcamento/orcamento_calculo.dart';
 import 'package:flutter/material.dart';
 
 import 'inspection_parsing_utils.dart';
@@ -34,23 +35,37 @@ class ChatPreviewInfo {
   });
 }
 
-// Item de orçamento rascunhado pela vistoria (peça + intervenção + valores).
+// Item de orçamento da vistoria (peça + intervenção + valores).
 class OrcamentoRascunhoItem {
   final String peca;
   final String tipoIntervencao;
+  final int quantidade;
   final double valorPeca;
+  final String tipoServico;
   final double horasMaoObra;
+  final double valorHora;
 
-  // 'vistoria' (montado pelo ADK) ou 'mecanico' (digitado manualmente).
+  // 'vistoria' (montado pelo ADK), 'sugestao_aceita' (sugestão da IA aceita)
+  // ou 'mecanico' (envio em massa).
   final String origem;
 
   const OrcamentoRascunhoItem({
     required this.peca,
     required this.tipoIntervencao,
+    required this.quantidade,
     required this.valorPeca,
+    required this.tipoServico,
     required this.horasMaoObra,
+    required this.valorHora,
     required this.origem,
   });
+
+  double get valorTotal => valorTotalItem(
+        valorPeca: valorPeca,
+        quantidade: quantidade,
+        horasMaoObra: horasMaoObra,
+        valorHora: valorHora,
+      );
 
   bool get isDoMecanico => origem == 'mecanico';
 }
@@ -70,6 +85,7 @@ class LinkedVistoriaInfo {
   final List<AudioPreviewInfo> audioPreviews;
   final List<ChatPreviewInfo> chatPreviews;
   final String laudo;
+  final String pdfLaudoUrl;
   final String observacoes;
   final String placa;
   final String veiculo;
@@ -99,6 +115,7 @@ class LinkedVistoriaInfo {
     required this.audioPreviews,
     required this.chatPreviews,
     required this.laudo,
+    this.pdfLaudoUrl = '',
     required this.observacoes,
     required this.placa,
     required this.veiculo,
@@ -156,6 +173,7 @@ class LinkedVistoriaInfo {
       audioPreviews: audioPreviewList,
       chatPreviews: _extractChatPreviews(chatmessages),
       laudo: laudo,
+      pdfLaudoUrl: pdfLaudoUrl,
       observacoes: stringValue(data['observacoes']),
       placa: stringValue(data['placa']),
       veiculo: stringValue(data['veiculo']),
@@ -174,7 +192,7 @@ class LinkedVistoriaInfo {
       createdAt: parseFirestoreDateTime(data['createdAt']),
       updatedAt: parseFirestoreDateTime(data['updatedAt']),
       coletaModo: stringValue(data['coletaModo']),
-      orcamentoItems: _extractOrcamentoItems(data['orcamentoRascunho']),
+      orcamentoItems: _extractOrcamentoItems(data),
     );
   }
 
@@ -321,20 +339,34 @@ List<String> _extractImageBase64Previews(List<dynamic> images) {
   return previews;
 }
 
-// Converte a lista crua de orçamento rascunhado em OrcamentoRascunhoItem.
-List<OrcamentoRascunhoItem> _extractOrcamentoItems(dynamic raw) {
+// Itens de orçamento da vistoria. No fluxo guiado, a lista confirmada pelo
+// mecânico fica em `orcamentoItensFinais` (o `orcamentoRascunho` é só o
+// pré-preenchimento do agente); no envio em massa, em `orcamentoRascunho`.
+List<OrcamentoRascunhoItem> _extractOrcamentoItems(Map<String, dynamic> data) {
+  final finais = data['orcamentoItensFinais'];
+  final raw = (finais is List && finais.isNotEmpty)
+      ? finais
+      : data['orcamentoRascunho'];
+
   if (raw is! List) return const [];
 
+  double toDouble(dynamic value) => value is num
+      ? value.toDouble()
+      : parseValorDecimal('${value ?? ''}') ?? 0;
+
   return raw.whereType<Map>().map((item) {
+    final quantidade = toDouble(item['quantidade']).round();
+
     return OrcamentoRascunhoItem(
       peca: stringValue(item['peca']),
       tipoIntervencao: stringValue(item['tipoIntervencao']),
-      valorPeca: (item['valorPeca'] is num)
-          ? (item['valorPeca'] as num).toDouble()
-          : double.tryParse('${item['valorPeca']}') ?? 0,
-      horasMaoObra: (item['horasMaoObra'] is num)
-          ? (item['horasMaoObra'] as num).toDouble()
-          : double.tryParse('${item['horasMaoObra']}') ?? 0,
+      quantidade: quantidade < 1 ? 1 : quantidade,
+      valorPeca: toDouble(item['valorPeca']),
+      tipoServico: stringValue(item['tipoServico']),
+      horasMaoObra: toDouble(item['horasMaoObra']),
+      valorHora: item['valorHora'] == null
+          ? kValorHoraLegado
+          : toDouble(item['valorHora']),
       origem: stringValue(item['origem'], fallback: 'vistoria'),
     );
   }).toList();
