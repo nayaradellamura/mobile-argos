@@ -6,10 +6,13 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 
 import '../../services/vistoria_chat_session_service.dart';
 import '../camera/camera_page.dart';
+import '../orcamento/orcamento_calculo.dart';
+import '../orcamento/orcamento_table_page.dart';
 
 const int kBulkMaxPhotos = 10;
 const int kBulkMaxAudios = 10;
@@ -17,47 +20,80 @@ const int kBulkMaxAudios = 10;
 // Chave fixa do item de texto livre no rascunho (só existe um por vez).
 const String kBulkTextRascunhoKey = '__texto__';
 
+/// Explica por que o microfone é necessário quando a permissão foi negada e
+/// oferece abrir as configurações do aparelho. Usado aqui e no chat guiado.
+Future<void> showMicrophonePermissionDialog(BuildContext context) async {
+  final permanentlyDenied = await Permission.microphone.isPermanentlyDenied;
+
+  if (!context.mounted) return;
+
+  await showDialog<void>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Microfone sem permissão'),
+      content: Text(
+        permanentlyDenied
+            ? 'O acesso ao microfone está bloqueado. Para gravar os áudios '
+                'da vistoria, libere o microfone nas configurações do '
+                'aparelho.'
+            : 'O Argos precisa do microfone para gravar os áudios da '
+                'vistoria. Libere o acesso para continuar.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(),
+          child: const Text('Agora não'),
+        ),
+        TextButton(
+          onPressed: () {
+            Navigator.of(dialogContext).pop();
+            openAppSettings();
+          },
+          child: const Text('Abrir configurações'),
+        ),
+      ],
+    ),
+  );
+}
+
 /// Gera um ID local único pra um item do pacote (foto, áudio ou orçamento).
 String _newLocalId() =>
     'bulk_${DateTime.now().microsecondsSinceEpoch}';
 
-/// Item de orçamento (peça + mão de obra) dentro do pacote de envio em massa.
+/// Item de orçamento dentro do pacote de envio em massa. `dados` é o mapa
+/// devolvido pela `OrcamentoTablePage` (peça, quantidade, horas, valor da
+/// hora congelado e totais) — o `localId` é o mesmo `id` do item.
 class BulkOrcamentoItem {
   final String localId;
-  final String peca;
-  final String tipoIntervencao;
-  final double valorPeca;
-  final double horasMaoObra;
+  final Map<String, dynamic> dados;
 
-  const BulkOrcamentoItem({
-    required this.localId,
-    required this.peca,
-    required this.tipoIntervencao,
-    required this.valorPeca,
-    required this.horasMaoObra,
-  });
+  const BulkOrcamentoItem({required this.localId, required this.dados});
+
+  String get peca => (dados['peca'] ?? '').toString();
+
+  double get valorTotal =>
+      (dados['valorTotal'] is num) ? (dados['valorTotal'] as num).toDouble() : 0;
+
+  // Rascunho gravado antes do valor da hora configurável não tem
+  // `valorTotal`: precisa passar pela tabela antes de ir com mão de obra
+  // zerada.
+  bool get precisaRevisao => dados['valorTotal'] is! num;
 
   Map<String, dynamic> toRascunhoItem() => {
+        ...dados,
+        'id': localId,
         'tipo': 'orcamento',
         'status': 'rascunho',
-        'peca': peca,
-        'tipoIntervencao': tipoIntervencao,
-        'valorPeca': valorPeca,
-        'horasMaoObra': horasMaoObra,
       };
 
   static BulkOrcamentoItem? fromRascunho(String localId, Map data) {
-    return BulkOrcamentoItem(
-      localId: localId,
-      peca: (data['peca'] ?? '').toString(),
-      tipoIntervencao: (data['tipoIntervencao'] ?? '').toString(),
-      valorPeca: (data['valorPeca'] is num)
-          ? (data['valorPeca'] as num).toDouble()
-          : double.tryParse('${data['valorPeca']}') ?? 0,
-      horasMaoObra: (data['horasMaoObra'] is num)
-          ? (data['horasMaoObra'] as num).toDouble()
-          : double.tryParse('${data['horasMaoObra']}') ?? 0,
-    );
+    final dados = data.map((key, value) => MapEntry(key.toString(), value))
+      ..remove('tipo')
+      ..remove('status');
+
+    if ((dados['peca'] ?? '').toString().trim().isEmpty) return null;
+
+    return BulkOrcamentoItem(localId: localId, dados: {...dados, 'id': localId});
   }
 }
 
@@ -334,31 +370,44 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
 
     if (!hasPermission) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Permissão de microfone necessária.')),
-      );
+      await showMicrophonePermissionDialog(context);
       return;
     }
 
-    final directory = await getApplicationDocumentsDirectory();
-    final audioDirectory = Directory('${directory.path}/argos_audios');
+    final String path;
 
-    if (!await audioDirectory.exists()) {
-      await audioDirectory.create(recursive: true);
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final audioDirectory = Directory('${directory.path}/argos_audios');
+
+      if (!await audioDirectory.exists()) {
+        await audioDirectory.create(recursive: true);
+      }
+
+      path =
+          '${audioDirectory.path}/argos_audio_bulk_${DateTime.now().millisecondsSinceEpoch}.m4a';
+
+      await _recorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.aacLc,
+          bitRate: 128000,
+          sampleRate: 44100,
+          numChannels: 1,
+        ),
+        path: path,
+      );
+    } catch (e) {
+      debugPrint('Erro ao iniciar gravação no envio em massa: $e');
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Não foi possível iniciar a gravação. Tente novamente.'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+      return;
     }
-
-    final path =
-        '${audioDirectory.path}/argos_audio_bulk_${DateTime.now().millisecondsSinceEpoch}.m4a';
-
-    await _recorder.start(
-      const RecordConfig(
-        encoder: AudioEncoder.aacLc,
-        bitRate: 128000,
-        sampleRate: 44100,
-        numChannels: 1,
-      ),
-      path: path,
-    );
 
     if (!mounted) return;
 
@@ -432,135 +481,97 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
     });
   }
 
-  /// Abre o diálogo de novo item de orçamento e adiciona o resultado à lista.
-  Future<void> _addOrcamentoItem() async {
-    final item = await _showOrcamentoItemDialog();
+  /// Abre a tabela de orçamento (a mesma do fluxo guiado) com os itens
+  /// atuais e substitui a lista pelo que o mecânico confirmar.
+  Future<void> _editOrcamento() async {
+    final modelo = await _modeloVeiculo();
 
-    if (item == null || !mounted) return;
+    if (!mounted) return;
 
-    _syncItem(item.localId, item.toRascunhoItem());
-
-    setState(() => _orcamentoItems.add(item));
-  }
-
-  /// Diálogo de formulário pra cadastrar um item de orçamento (peça, tipo, valor, horas).
-  Future<BulkOrcamentoItem?> _showOrcamentoItemDialog() {
-    final pecaController = TextEditingController();
-    final tipoController = TextEditingController();
-    final valorController = TextEditingController();
-    final horasController = TextEditingController();
-
-    return showDialog<BulkOrcamentoItem>(
-      context: context,
-      builder: (dialogContext) {
-        return Dialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(28),
-          ),
-          insetPadding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(24, 24, 24, 20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text(
-                  'Item de orçamento',
-                  style: GoogleFonts.spaceGrotesk(
-                    fontSize: 17,
-                    fontWeight: FontWeight.bold,
-                    color: const Color(0xFF1F2937),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: pecaController,
-                  decoration: const InputDecoration(labelText: 'Peça'),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: tipoController,
-                  decoration: const InputDecoration(
-                    labelText: 'Tipo de intervenção',
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: valorController,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                  ),
-                  decoration: const InputDecoration(
-                    labelText: 'Valor da peça (R\$)',
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: horasController,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                  ),
-                  decoration: const InputDecoration(
-                    labelText: 'Horas de mão de obra',
-                  ),
-                ),
-                const SizedBox(height: 20),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextButton(
-                        onPressed: () => Navigator.of(dialogContext).pop(),
-                        child: const Text('Cancelar'),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF0057C0),
-                          foregroundColor: Colors.white,
-                        ),
-                        onPressed: () {
-                          final peca = pecaController.text.trim();
-                          if (peca.isEmpty) return;
-
-                          Navigator.of(dialogContext).pop(
-                            BulkOrcamentoItem(
-                              localId: _newLocalId(),
-                              peca: peca,
-                              tipoIntervencao: tipoController.text.trim(),
-                              valorPeca: double.tryParse(
-                                    valorController.text.replaceAll(',', '.'),
-                                  ) ??
-                                  0,
-                              horasMaoObra: double.tryParse(
-                                    horasController.text.replaceAll(',', '.'),
-                                  ) ??
-                                  0,
-                            ),
-                          );
-                        },
-                        child: const Text('Adicionar'),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        );
-      },
+    final result = await Navigator.of(context).push<List<Map<String, dynamic>>?>(
+      MaterialPageRoute(
+        builder: (_) => OrcamentoTablePage(
+          itensIniciais: _orcamentoItems
+              .map((item) => OrcamentoItemDraft.fromMap(item.dados))
+              .toList(),
+          modeloVeiculo: modelo,
+          submitLabel: 'Salvar orçamento',
+        ),
+      ),
     );
+
+    if (result == null || !mounted) return;
+
+    final novos = result
+        .map((dados) => BulkOrcamentoItem(
+              localId: dados['id'].toString(),
+              dados: dados,
+            ))
+        .toList();
+    final novosIds = novos.map((item) => item.localId).toSet();
+
+    for (final antigo in _orcamentoItems) {
+      if (!novosIds.contains(antigo.localId)) {
+        _removeSyncedItem(antigo.localId);
+      }
+    }
+
+    for (final item in novos) {
+      _syncItem(item.localId, item.toRascunhoItem());
+    }
+
+    setState(() {
+      _orcamentoItems
+        ..clear()
+        ..addAll(novos);
+    });
   }
+
+  String? _modeloVeiculoCache;
+
+  /// Marca/modelo do veículo da vistoria, pra escolher a tabela de preço.
+  Future<String> _modeloVeiculo() async {
+    final cached = _modeloVeiculoCache;
+    if (cached != null) return cached;
+
+    try {
+      final modelo = await VistoriaChatSessionService.instance
+          .loadVeiculoDaVistoria(widget.vistoriaDocId);
+      return _modeloVeiculoCache = modelo;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  bool get _orcamentoPrecisaRevisao =>
+      _orcamentoItems.any((item) => item.precisaRevisao);
 
   bool get _canSubmit =>
-      _photos.isNotEmpty ||
-      _audios.isNotEmpty ||
-      _textController.text.trim().isNotEmpty ||
-      _orcamentoItems.isNotEmpty;
+      !_orcamentoPrecisaRevisao &&
+      (_photos.isNotEmpty ||
+          _audios.isNotEmpty ||
+          _textController.text.trim().isNotEmpty ||
+          _orcamentoItems.isNotEmpty);
 
-  /// Fecha o modal devolvendo o pacote montado (fotos, áudios, texto e orçamento).
-  void _submit() {
+  /// Pede confirmação com o resumo do pacote antes de finalizar: o envio
+  /// manda a vistoria para análise e não pode ser desfeito.
+  Future<void> _submit() async {
+    final confirmado = await showDialog<bool>(
+      context: context,
+      builder: (_) => _ConfirmarEnvioDialog(
+        fotos: _photos.length,
+        audios: _audios.length,
+        temObservacoes: _textController.text.trim().isNotEmpty,
+        itensOrcamento: _orcamentoItems.length,
+        totalOrcamento: _orcamentoItems.fold<double>(
+          0,
+          (sum, item) => sum + item.valorTotal,
+        ),
+      ),
+    );
+
+    if (confirmado != true || !mounted) return;
+
     Navigator.of(context).pop(
       BulkUploadResult(
         photos: _photos,
@@ -680,14 +691,10 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
                       const SizedBox(height: 20),
                       const _SectionLabel('Orçamento'),
                       const SizedBox(height: 8),
-                      _OrcamentoList(
+                      _OrcamentoResumo(
                         items: _orcamentoItems,
-                        onAdd: _addOrcamentoItem,
-                        onRemove: (i) {
-                          final removed = _orcamentoItems[i];
-                          _removeSyncedItem(removed.localId);
-                          setState(() => _orcamentoItems.removeAt(i));
-                        },
+                        precisaRevisao: _orcamentoPrecisaRevisao,
+                        onEdit: _editOrcamento,
                       ),
                     ],
                   ),
@@ -1013,24 +1020,26 @@ class _BulkAudioPlayerTileState extends State<_BulkAudioPlayerTile> {
   }
 }
 
-/// Lista dos itens de orçamento adicionados, com botão de adicionar mais um.
-class _OrcamentoList extends StatelessWidget {
+/// Resumo do orçamento do pacote; o detalhe é editado na tabela completa.
+class _OrcamentoResumo extends StatelessWidget {
   final List<BulkOrcamentoItem> items;
-  final VoidCallback onAdd;
-  final void Function(int index) onRemove;
+  final bool precisaRevisao;
+  final VoidCallback onEdit;
 
-  const _OrcamentoList({
+  const _OrcamentoResumo({
     required this.items,
-    required this.onAdd,
-    required this.onRemove,
+    required this.precisaRevisao,
+    required this.onEdit,
   });
 
   @override
   Widget build(BuildContext context) {
+    final total = items.fold<double>(0, (sum, item) => sum + item.valorTotal);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        for (var i = 0; i < items.length; i++)
+        if (items.isNotEmpty)
           Container(
             margin: const EdgeInsets.only(bottom: 8),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -1038,37 +1047,74 @@ class _OrcamentoList extends StatelessWidget {
               color: const Color(0xFFF3FBFF),
               borderRadius: BorderRadius.circular(14),
             ),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        items[i].peca,
-                        style: const TextStyle(fontWeight: FontWeight.w700),
-                      ),
-                      Text(
-                        '${items[i].tipoIntervencao} • R\$${items[i].valorPeca.toStringAsFixed(2)} • ${items[i].horasMaoObra}h',
-                        style: const TextStyle(
-                          color: Color(0xFF6B7280),
-                          fontSize: 12,
+                for (final item in items)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            item.peca,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          ),
                         ),
-                      ),
-                    ],
+                        Text(
+                          item.precisaRevisao
+                              ? 'Revisar'
+                              : formatCurrencyBRL(item.valorTotal),
+                          style: TextStyle(
+                            color: item.precisaRevisao
+                                ? const Color(0xFFB45309)
+                                : const Color(0xFF6B7280),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.delete_outline_rounded, size: 20),
-                  onPressed: () => onRemove(i),
+                const Divider(height: 16),
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'Total',
+                        style: TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                    Text(
+                      formatCurrencyBRL(total),
+                      style: const TextStyle(
+                        color: Color(0xFF0057C0),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
+        if (precisaRevisao)
+          const Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: Text(
+              'Alguns itens precisam ser revisados antes do envio.',
+              style: TextStyle(
+                color: Color(0xFFB45309),
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
         OutlinedButton.icon(
-          onPressed: onAdd,
-          icon: const Icon(Icons.add_rounded),
-          label: const Text('Adicionar item'),
+          onPressed: onEdit,
+          icon: Icon(items.isEmpty ? Icons.add_rounded : Icons.edit_rounded),
+          label: Text(items.isEmpty ? 'Montar orçamento' : 'Editar orçamento'),
           style: OutlinedButton.styleFrom(
             foregroundColor: const Color(0xFF0057C0),
             side: const BorderSide(color: Color(0xFF0057C0)),
@@ -1078,6 +1124,153 @@ class _OrcamentoList extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Confirmação final do envio em massa, com o resumo do que vai ser enviado
+/// e avisos do que está faltando (sem fotos, sem orçamento).
+class _ConfirmarEnvioDialog extends StatelessWidget {
+  final int fotos;
+  final int audios;
+  final bool temObservacoes;
+  final int itensOrcamento;
+  final double totalOrcamento;
+
+  const _ConfirmarEnvioDialog({
+    required this.fotos,
+    required this.audios,
+    required this.temObservacoes,
+    required this.itensOrcamento,
+    required this.totalOrcamento,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final avisos = <String>[
+      if (fotos == 0) 'Nenhuma foto foi adicionada.',
+      if (itensOrcamento == 0) 'Nenhum item de orçamento foi adicionado.',
+    ];
+
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 24, 24, 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Finalizar vistoria?',
+              style: GoogleFonts.spaceGrotesk(
+                fontSize: 17,
+                fontWeight: FontWeight.bold,
+                color: const Color(0xFF1F2937),
+              ),
+            ),
+            const SizedBox(height: 14),
+            _ResumoLinha(label: 'Fotos', value: '$fotos'),
+            _ResumoLinha(label: 'Áudios', value: '$audios'),
+            _ResumoLinha(
+              label: 'Observações',
+              value: temObservacoes ? 'Sim' : 'Não',
+            ),
+            _ResumoLinha(
+              label: 'Orçamento',
+              value: itensOrcamento == 0
+                  ? '-'
+                  : '$itensOrcamento ite${itensOrcamento > 1 ? 'ns' : 'm'} • '
+                      '${formatCurrencyBRL(totalOrcamento)}',
+            ),
+            for (final aviso in avisos)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(
+                      Icons.warning_amber_rounded,
+                      color: Color(0xFFB45309),
+                      size: 18,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        aviso,
+                        style: const TextStyle(
+                          color: Color(0xFF92400E),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 14),
+            const Text(
+              'Depois do envio, a vistoria vai para análise e não poderá '
+              'ser alterada.',
+              style: TextStyle(color: Color(0xFF6B7280), fontSize: 12),
+            ),
+            const SizedBox(height: 18),
+            Row(
+              children: [
+                Expanded(
+                  child: TextButton(
+                    onPressed: () => Navigator.of(context).pop(false),
+                    child: const Text('Revisar'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0057C0),
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: () => Navigator.of(context).pop(true),
+                    child: const Text('Enviar'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ResumoLinha extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _ResumoLinha({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(color: Color(0xFF6B7280), fontSize: 13),
+            ),
+          ),
+          Text(
+            value,
+            style: const TextStyle(
+              color: Color(0xFF1F2937),
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

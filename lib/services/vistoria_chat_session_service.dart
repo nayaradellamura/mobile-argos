@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../features/orcamento/orcamento_calculo.dart';
 import 'dart:io';
 import 'dart:math';
 
@@ -40,6 +41,8 @@ class VistoriaChatSessionService {
       _db.collection('sinistro');
 
   // Observa o status da vistoria e se o laudo analítico já foi preenchido.
+  // Conclui assim que a vistoria é enviada pra análise (ou já passou disso),
+  // sem esperar o laudo; outros status só contam se o laudo já existir.
   Stream<VistoriaChatCompletionState> watchCompletionState({
     required String vistoriaDocId,
   }) {
@@ -50,11 +53,21 @@ class VistoriaChatSessionService {
 
       return VistoriaChatCompletionState(
         status: status,
+        hasAnalyticalReport: hasAnalyticalReport,
         isCompleted: status.isNotEmpty &&
             status != statusEmAndamento &&
-            hasAnalyticalReport,
+            (_isSubmittedStatus(status) || hasAnalyticalReport),
       );
     });
+  }
+
+  // Status que indicam que a coleta terminou e a vistoria seguiu adiante.
+  static bool _isSubmittedStatus(String status) {
+    final normalized = status.toUpperCase();
+
+    return normalized == statusEmAnaliseOperacional ||
+        normalized == statusFinalizada ||
+        normalized.contains('APROVAD');
   }
 
   // Busca a vistoria EM_ANDAMENTO mais recente do inspetor atual (opcionalmente
@@ -987,6 +1000,14 @@ class VistoriaChatSessionService {
 
     if (cleanText.isEmpty && role != 'audio') return;
 
+    // TTL de sessão (24h úteis) é renovado aqui, no app — não depende de
+    // nenhuma Cloud Function/backend do agente escrever isso de volta.
+    // Antes disso, só o Cloud Function do Dialogflow CX recalculava
+    // `agentBusinessExpiresAt` a cada turno; com o corte pro ADK isso
+    // ficaria sem dono. Mantendo client-side, o comportamento continua
+    // igual independente de qual backend está respondendo.
+    final now = DateTime.now();
+
     await _vistorias.doc(vistoriaDocId).set({
       'chatmessages': FieldValue.arrayUnion([
         {
@@ -997,6 +1018,9 @@ class VistoriaChatSessionService {
         }
       ]),
       'agentLastTurnAt': FieldValue.serverTimestamp(),
+      'agentBusinessExpiresAt': Timestamp.fromDate(
+        _addBusinessHours(now, 24),
+      ),
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
   }
@@ -1012,26 +1036,46 @@ class VistoriaChatSessionService {
     }, SetOptions(merge: true));
   }
 
-  // Adiciona um item de orçamento digitado pelo mecânico (envio em massa).
-  Future<void> appendOrcamentoMecanicoItem({
+  // Grava os itens de orçamento do envio em massa em `orcamentoRascunho`
+  // (origem 'mecanico'), substituindo por `id` os que já existirem. Não usa
+  // arrayUnion: ele descartava itens idênticos (duas peças iguais com o
+  // mesmo valor viravam uma), e por id o reenvio após falha é idempotente.
+  Future<void> salvarOrcamentoMecanicoItens({
     required String vistoriaDocId,
-    required String peca,
-    required String tipoIntervencao,
-    required double valorPeca,
-    required double horasMaoObra,
+    required List<Map<String, dynamic>> itens,
   }) async {
-    await _vistorias.doc(vistoriaDocId).set({
-      'orcamentoRascunho': FieldValue.arrayUnion([
-        {
-          'peca': peca.trim(),
-          'tipoIntervencao': tipoIntervencao.trim(),
-          'valorPeca': valorPeca,
-          'horasMaoObra': horasMaoObra,
-          'origem': 'mecanico',
-        }
-      ]),
-      'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    if (itens.isEmpty) return;
+
+    final ref = _vistorias.doc(vistoriaDocId);
+    final novos = itens
+        .map((item) => <String, dynamic>{
+              ...item,
+              'origem': 'mecanico',
+            }..remove('tipo')..remove('status'))
+        .toList();
+    final novosIds = novos.map((item) => item['id']).toSet();
+
+    await FirebaseFirestore.instance.runTransaction((transaction) async {
+      final snapshot = await transaction.get(ref);
+      final atual = snapshot.data()?['orcamentoRascunho'];
+
+      final mantidos = (atual is List ? atual : const [])
+          .where((item) => !(item is Map &&
+              item['origem'] == 'mecanico' &&
+              novosIds.contains(item['id'])))
+          .toList();
+
+      transaction.set(ref, {
+        'orcamentoRascunho': [...mantidos, ...novos],
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    });
+  }
+
+  // Marca/modelo do veículo gravado na vistoria (usado na tabela de preços).
+  Future<String> loadVeiculoDaVistoria(String vistoriaDocId) async {
+    final doc = await _vistorias.doc(vistoriaDocId).get();
+    return _str(doc.data()?['veiculo']);
   }
 
   // Grava/atualiza um item do rascunho de envio em massa, por localId.
@@ -1133,6 +1177,45 @@ class VistoriaChatSessionService {
       fileName: fileName,
       contentType: 'image/jpeg',
       sizeBytes: bytes,
+    );
+  }
+
+  /// Lê o rascunho de orçamento pré-preenchido pelo `OrcamentoOficinaAgent`
+  /// (`salvar_rascunho_orcamento`, ADK) para abrir a tela de tabela
+  /// editável já com peça/tipo/valor/horas sugeridos.
+  Future<List<Map<String, dynamic>>> loadOrcamentoRascunho({
+    required String vistoriaDocId,
+  }) async {
+    final doc = await _vistorias.doc(vistoriaDocId).get();
+    final data = doc.data() ?? <String, dynamic>{};
+    final rascunho = data['orcamentoRascunho'];
+
+    if (rascunho is! List) return [];
+
+    return rascunho
+        .whereType<Map>()
+        .map((item) => item.map((key, value) => MapEntry(key.toString(), value)))
+        .toList();
+  }
+
+  /// Grava a lista final e completa de itens do orçamento numa única
+  /// escrita (ver skill `nova-captura-em-lote`) e confirma no chat com uma
+  /// única mensagem — nunca item por item.
+  Future<void> submitOrcamento({
+    required String vistoriaDocId,
+    required List<Map<String, dynamic>> itens,
+  }) async {
+    await _vistorias.doc(vistoriaDocId).set({
+      'orcamentoItensFinais': itens,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await appendChatMessage(
+      vistoriaDocId: vistoriaDocId,
+      role: 'system',
+      text: 'Orçamento enviado: ${itens.length} '
+          'ite${itens.length > 1 ? 'ns' : 'm'}, total de '
+          '${formatCurrencyBRL(somarItensOrcamento(itens))}.',
     );
   }
 
@@ -1458,10 +1541,12 @@ class VistoriaChatSessionService {
 class VistoriaChatCompletionState {
   final String status;
   final bool isCompleted;
+  final bool hasAnalyticalReport;
 
   const VistoriaChatCompletionState({
     required this.status,
     required this.isCompleted,
+    this.hasAnalyticalReport = false,
   });
 }
 

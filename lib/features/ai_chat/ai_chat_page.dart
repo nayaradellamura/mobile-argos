@@ -19,6 +19,8 @@ import '../../services/user_audio_storage_service.dart';
 import '../../services/vistoria_chat_session_service.dart';
 import '../../shared/widgets/ellipsis_text.dart';
 import '../camera/camera_page.dart';
+import '../orcamento/orcamento_calculo.dart';
+import '../orcamento/orcamento_table_page.dart';
 import 'bulk_upload_sheet.dart';
 import 'eye_processing_animation.dart';
 
@@ -148,6 +150,9 @@ class _AiChatPageState extends State<AiChatPage> {
   bool isInspectionCompleted = false;
   String completedInspectionStatus = '';
 
+  /// true quando concluiu antes do laudo técnico ficar pronto.
+  bool completedLaudoPending = false;
+
   bool hasText = false;
   bool isRecording = false;
   bool isStartingRecording = false;
@@ -179,6 +184,7 @@ class _AiChatPageState extends State<AiChatPage> {
   /// Controla o travamento da câmera e o pulso visual de "recém-liberada".
   bool cameraUnlocked = false;
   bool cameraPulsing = false;
+  bool autoOrcamentoOpenedForRelease = false;
 
   Timer? recordingTimer;
   int recordingSeconds = 0;
@@ -284,9 +290,20 @@ class _AiChatPageState extends State<AiChatPage> {
   bool _isPhotoReleaseText(String value) {
     final normalized = _normalizeMessage(value);
 
-    return normalized.contains('identificação recebida') &&
-        normalized.contains('liberei') &&
-        normalized.contains('fotos dos danos externos');
+    // "liberei a câmera" é o gatilho do agente ADK (ver Passo 4 em
+    // adk_agents/vistoria_team/agent.py); a outra frase é a do antigo
+    // playbook do Dialogflow, mantida para históricos já gravados.
+    return normalized.contains('liberei a câmera') ||
+        (normalized.contains('identificação recebida') &&
+            normalized.contains('liberei') &&
+            normalized.contains('fotos dos danos externos'));
+  }
+
+  bool _isOrcamentoReleaseText(String value) {
+    final normalized = _normalizeMessage(value);
+
+    return normalized.contains('liberei') &&
+        normalized.contains('tela de orçamento');
   }
 
   ChatMessage _aiMessageFromText(String text, {DateTime? createdAt}) {
@@ -320,6 +337,18 @@ class _AiChatPageState extends State<AiChatPage> {
     });
   }
 
+  void _openOrcamentoAfterRelease(String text) {
+    if (autoOrcamentoOpenedForRelease) return;
+    if (!_isOrcamentoReleaseText(text)) return;
+
+    autoOrcamentoOpenedForRelease = true;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || isInspectionCompleted) return;
+      _openOrcamentoTable();
+    });
+  }
+
   void _listenToVistoriaCompletion(VistoriaSession session) {
     vistoriaCompletionSubscription?.cancel();
     vistoriaCompletionSubscription = VistoriaChatSessionService.instance
@@ -328,7 +357,10 @@ class _AiChatPageState extends State<AiChatPage> {
       (completionState) {
         if (!completionState.isCompleted || isInspectionCompleted) return;
 
-        _completeChatFromVistoriaUpdate(completionState.status);
+        _completeChatFromVistoriaUpdate(
+          completionState.status,
+          laudoPending: !completionState.hasAnalyticalReport,
+        );
       },
       onError: (error) {
         debugPrint('Erro ao escutar conclusão da vistoria: $error');
@@ -336,7 +368,10 @@ class _AiChatPageState extends State<AiChatPage> {
     );
   }
 
-  Future<void> _completeChatFromVistoriaUpdate(String status) async {
+  Future<void> _completeChatFromVistoriaUpdate(
+    String status, {
+    bool laudoPending = false,
+  }) async {
     vistoriaCompletionSubscription?.cancel();
     vistoriaCompletionSubscription = null;
 
@@ -351,6 +386,10 @@ class _AiChatPageState extends State<AiChatPage> {
     setState(() {
       isInspectionCompleted = true;
       completedInspectionStatus = status;
+      completedLaudoPending = laudoPending;
+      // No envio em massa o status muda antes do aviso do coordenador.
+      isBulkProcessing = false;
+      isAwaitingBulkSync = false;
       isAiTyping = false;
       isStartingRecording = false;
       hasText = false;
@@ -389,10 +428,10 @@ class _AiChatPageState extends State<AiChatPage> {
         messages
           ..clear()
           ..add(
-            ChatMessage(
+            const ChatMessage(
               type: ChatMessageType.ai,
-              text:
-                  'Não consegui preparar a sessão da vistoria. Detalhe: $e',
+              text: 'Não consegui preparar a sessão da vistoria. Verifique '
+                  'a conexão e tente novamente.',
             ),
           );
       });
@@ -416,6 +455,7 @@ class _AiChatPageState extends State<AiChatPage> {
       isLoadingSession = false;
       isInspectionCompleted = false;
       completedInspectionStatus = '';
+      completedLaudoPending = false;
       isAwaitingBulkSync = false;
       isBlockedOfflineGuidedHistory = false;
       isAiTyping = false;
@@ -483,9 +523,9 @@ class _AiChatPageState extends State<AiChatPage> {
           ChatMessage(
             type: ChatMessageType.ai,
             text:
-                'Beleza! Toque no botão "Enviar tudo de uma vez" aqui embaixo '
-                'pra juntar fotos, áudio, observações e orçamento e mandar '
-                'tudo de uma vez.',
+                'Certo. Toque no botão "Enviar tudo de uma vez" abaixo para '
+                'reunir fotos, áudio, observações e orçamento e enviar '
+                'tudo junto.',
             createdAt: DateTime.now(),
           ),
         );
@@ -544,7 +584,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  'Você tinha começado a montar um pacote pra $placa e ainda '
+                  'Você tinha começado a montar um pacote para $placa e ainda '
                   'não enviou. O que você quer fazer?',
                   textAlign: TextAlign.center,
                   style: const TextStyle(
@@ -558,7 +598,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 _VistoriaActionTile(
                   icon: Icons.upload_file_rounded,
                   title: 'Continuar enviando tudo de uma vez',
-                  subtitle: 'Volta pro botão de montar o pacote.',
+                  subtitle: 'Volta para o botão de montar o pacote.',
                   color: const Color(0xFF0057C0),
                   filled: true,
                   onTap: () =>
@@ -677,7 +717,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 _VistoriaActionTile(
                   icon: Icons.play_circle_fill_rounded,
                   title: 'Continuar agora',
-                  subtitle: 'Volta pro ponto exato onde você parou.',
+                  subtitle: 'Volta para o ponto exato onde você parou.',
                   color: const Color(0xFF0057C0),
                   filled: true,
                   onTap: () => Navigator.of(context)
@@ -806,7 +846,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 _VistoriaActionTile(
                   icon: Icons.schedule_rounded,
                   title: 'Continuar mais tarde',
-                  subtitle: 'Volta pra tela de vistorias por agora.',
+                  subtitle: 'Volta para a tela de vistorias por agora.',
                   color: const Color(0xFF0057C0),
                   onTap: () => Navigator.of(context)
                       .pop(ContinueVistoriaAction.continueLater),
@@ -864,7 +904,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 const SizedBox(height: 6),
                 const Text(
                   'A vistoria atual será marcada como abandonada. O '
-                  'histórico não é apagado -- só o analista pode cancelar o '
+                  'histórico não é apagado. Só o analista pode cancelar o '
                   'sinistro de verdade.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
@@ -1062,10 +1102,10 @@ class _AiChatPageState extends State<AiChatPage> {
         messages
           ..clear()
           ..add(
-            ChatMessage(
+            const ChatMessage(
               type: ChatMessageType.ai,
-              text:
-                  'Não foi possível iniciar a vistoria. Verifique se o veículo possui check-in. Detalhe: $e',
+              text: 'Não foi possível iniciar a vistoria. Verifique se o '
+                  'veículo possui check-in e tente novamente.',
             ),
           );
       });
@@ -1103,7 +1143,7 @@ class _AiChatPageState extends State<AiChatPage> {
             ChatMessage(
               type: ChatMessageType.ai,
               text: 'Esta vistoria foi iniciada no passo a passo, que '
-                  'depende de internet pra funcionar. Conecte-se para '
+                  'depende de internet para funcionar. Conecte-se para '
                   'continuar de onde parou.',
             ),
           );
@@ -1175,7 +1215,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  'O passo a passo precisa de internet. Offline, só dá pra '
+                  'O passo a passo precisa de internet. Offline, só é possível '
                   'continuar enviando tudo de uma vez.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
@@ -1329,9 +1369,9 @@ class _AiChatPageState extends State<AiChatPage> {
           ..add(
             const ChatMessage(
               type: ChatMessageType.ai,
-              text: 'A retificação precisa de internet pra funcionar. Por '
+              text: 'A retificação precisa de internet para funcionar. Por '
                   'ser um processo mais delicado, não tem um modo offline '
-                  'alternativo, conecte-se pra continuar.',
+                  'alternativo. Conecte-se para continuar.',
             ),
           );
       });
@@ -1424,9 +1464,10 @@ class _AiChatPageState extends State<AiChatPage> {
         messages
           ..clear()
           ..add(
-            ChatMessage(
+            const ChatMessage(
               type: ChatMessageType.ai,
-              text: 'Não foi possível iniciar a retificação. Detalhe: $e',
+              text: 'Não foi possível iniciar a retificação. Verifique a '
+                  'conexão e tente novamente.',
             ),
           );
       });
@@ -1527,6 +1568,7 @@ class _AiChatPageState extends State<AiChatPage> {
       });
 
       _openCameraAfterPhotoRelease(reply);
+      _openOrcamentoAfterRelease(reply);
       _scrollToBottom();
     } catch (e) {
       debugPrint('Erro ao enviar oi inicial para IA: $e');
@@ -1543,8 +1585,10 @@ class _AiChatPageState extends State<AiChatPage> {
     currentSession = session;
     isInspectionCompleted = false;
     completedInspectionStatus = '';
+    completedLaudoPending = false;
     cameraUnlocked = session.isRetificacao;
     cameraPulsing = false;
+    autoOrcamentoOpenedForRelease = false;
     _listenToVistoriaCompletion(session);
 
     final loadedMessages = <ChatMessage>[];
@@ -1726,7 +1770,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  'O passo a passo com o agente precisa de internet pra '
+                  'O passo a passo com o agente precisa de internet para '
                   'funcionar. Sem conexão, só é possível trabalhar '
                   'enviando tudo de uma vez.',
                   textAlign: TextAlign.center,
@@ -1750,7 +1794,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 _VistoriaActionTile(
                   icon: Icons.arrow_back_rounded,
                   title: 'Continuar mais tarde',
-                  subtitle: 'Volta pra tela principal e espera a internet.',
+                  subtitle: 'Volta para a tela principal e espera a internet.',
                   color: const Color(0xFF6B7280),
                   onTap: () => Navigator.of(dialogContext).pop(false),
                 ),
@@ -1795,7 +1839,7 @@ class _AiChatPageState extends State<AiChatPage> {
     if (!ArgosConnectivityService.instance.isOnline.value) {
       if (_offlineGuidedPromptShown) {
         _showSnack(
-          'Isso precisa de internet -- sua mensagem não foi enviada.',
+          'Isso precisa de internet. Sua mensagem não foi enviada.',
           backgroundColor: Colors.orange,
         );
       } else {
@@ -1830,12 +1874,14 @@ class _AiChatPageState extends State<AiChatPage> {
         contextoVistoriaAnterior: session.contextoVistoriaAnterior,
       );
 
-      if (isInspectionCompleted) return;
-
+      // A tela pode concluir antes da resposta chegar (status mudou pra
+      // análise); grava a resposta final no histórico mesmo assim.
       await VistoriaChatSessionService.instance.appendAiMessage(
         vistoriaDocId: session.docId,
         text: reply,
       );
+
+      if (isInspectionCompleted) return;
 
       if (!mounted) return;
 
@@ -1846,6 +1892,7 @@ class _AiChatPageState extends State<AiChatPage> {
       });
 
       _openCameraAfterPhotoRelease(reply);
+      _openOrcamentoAfterRelease(reply);
       _scrollToBottom();
     } on FirebaseFunctionsException catch (e) {
       debugPrint('ERRO CLOUD FUNCTION');
@@ -1855,8 +1902,8 @@ class _AiChatPageState extends State<AiChatPage> {
 
       if (!mounted) return;
 
-      final errorText =
-          'O assistente Argos está temporariamente indisponível.\nCódigo: ${e.code}';
+      const errorText = 'O assistente Argos está temporariamente '
+          'indisponível. Tente novamente em instantes.';
 
       await VistoriaChatSessionService.instance.appendAiMessage(
         vistoriaDocId: session.docId,
@@ -1867,7 +1914,7 @@ class _AiChatPageState extends State<AiChatPage> {
         isAiTyping = false;
 
         messages.add(
-          ChatMessage(
+          const ChatMessage(
             type: ChatMessageType.ai,
             text: errorText,
           ),
@@ -1956,7 +2003,8 @@ class _AiChatPageState extends State<AiChatPage> {
 
     _scrollToBottom();
 
-    var uploadedAnyPhoto = false;
+    var uploadedCount = 0;
+    final failedPaths = <String>{};
 
     for (final photo in photos) {
       try {
@@ -1989,15 +2037,37 @@ class _AiChatPageState extends State<AiChatPage> {
           },
         );
 
-        uploadedAnyPhoto = true;
+        uploadedCount++;
       } catch (e) {
+        failedPaths.add(photo.path);
         debugPrint('Erro ao salvar foto da vistoria no Storage: $e');
       }
     }
 
-    if (!uploadedAnyPhoto) return;
+    // Tira do chat as bolhas das fotos que não subiram.
+    if (failedPaths.isNotEmpty && mounted) {
+      setState(() {
+        messages.removeWhere(
+          (m) =>
+              m.type == ChatMessageType.photo &&
+              failedPaths.contains(m.imagePath),
+        );
+      });
 
-    await _analyzePhotosWithAgent(session: session, quantity: photos.length);
+      final failed = failedPaths.length;
+      _showSnack(
+        failed == photos.length
+            ? 'Não foi possível enviar as fotos. Verifique a conexão e '
+                'tente novamente.'
+            : 'Não foi possível enviar $failed foto${failed > 1 ? 's' : ''}. '
+                'Tire de novo para anexar.',
+        backgroundColor: Colors.redAccent,
+      );
+    }
+
+    if (uploadedCount == 0) return;
+
+    await _analyzePhotosWithAgent(session: session, quantity: uploadedCount);
   }
 
   /// Avisa o agente que a leva de fotos subiu e mostra a resposta dele no chat.
@@ -2072,6 +2142,7 @@ class _AiChatPageState extends State<AiChatPage> {
       isInspectionCompleted = true;
       completedInspectionStatus =
           VistoriaChatSessionService.statusEmAnaliseOperacional;
+      completedLaudoPending = true;
     });
   }
 
@@ -2129,6 +2200,18 @@ class _AiChatPageState extends State<AiChatPage> {
       return;
     }
 
+    // A sincronização em segundo plano já está enviando esta vistoria: o
+    // submitPackage retornaria sem fazer nada e o overlay ficaria preso se
+    // aquela tentativa falhasse. A tela troca sozinha quando ela concluir.
+    if (BulkSyncCoordinator.instance.syncingVistoriaIds.value
+        .contains(session.docId)) {
+      _showSnack(
+        'O envio desta vistoria já está em andamento. Aguarde a conclusão.',
+        backgroundColor: Colors.orange,
+      );
+      return;
+    }
+
     setState(() {
       isAwaitingBulkSync = false;
       isBulkProcessing = true;
@@ -2143,6 +2226,18 @@ class _AiChatPageState extends State<AiChatPage> {
         result: result,
         onStatus: (status) => bulkStatusText.value = status,
       );
+    } on BulkUploadIncompleteException catch (e) {
+      debugPrint('Pacote em massa incompleto: $e');
+
+      if (!mounted) return;
+
+      setState(() => isBulkProcessing = false);
+
+      _showSnack(
+        'Não foi possível enviar ${_describeFailedEvidence(e)}. O pacote '
+        'continua salvo; tente novamente.',
+        backgroundColor: Colors.redAccent,
+      );
     } catch (e) {
       debugPrint('Erro ao enviar pacote em massa: $e');
 
@@ -2154,6 +2249,103 @@ class _AiChatPageState extends State<AiChatPage> {
         'Não foi possível concluir o envio. Tente novamente.',
         backgroundColor: Colors.redAccent,
       );
+    }
+  }
+
+  /// Monta "2 fotos e 1 áudio" a partir das falhas do pacote em massa.
+  String _describeFailedEvidence(BulkUploadIncompleteException e) {
+    final parts = <String>[
+      if (e.failedPhotos > 0)
+        '${e.failedPhotos} foto${e.failedPhotos > 1 ? 's' : ''}',
+      if (e.failedAudios > 0)
+        '${e.failedAudios} áudio${e.failedAudios > 1 ? 's' : ''}',
+    ];
+
+    return parts.join(' e ');
+  }
+
+  Future<void> _openOrcamentoTable() async {
+    final session = currentSession;
+
+    if (isInspectionCompleted || session == null) return;
+
+    FocusScope.of(context).unfocus();
+
+    List<Map<String, dynamic>> rascunho = [];
+
+    try {
+      rascunho = await VistoriaChatSessionService.instance
+          .loadOrcamentoRascunho(vistoriaDocId: session.docId);
+    } catch (e) {
+      debugPrint('Erro ao carregar rascunho de orçamento: $e');
+    }
+
+    if (!mounted) return;
+
+    final itensIniciais = rascunho.map(OrcamentoItemDraft.fromMap).toList();
+
+    final result = await Navigator.of(context).push<List<Map<String, dynamic>>?>(
+      MaterialPageRoute(
+        builder: (_) => OrcamentoTablePage(
+          itensIniciais: itensIniciais,
+          modeloVeiculo: session.veiculo,
+        ),
+      ),
+    );
+
+    // Fechou sem enviar: libera pra tabela reabrir na próxima vez que o
+    // agente pedir.
+    if (result == null || result.isEmpty) {
+      autoOrcamentoOpenedForRelease = false;
+      return;
+    }
+    if (!mounted) return;
+
+    try {
+      await VistoriaChatSessionService.instance.submitOrcamento(
+        vistoriaDocId: session.docId,
+        itens: result,
+      );
+
+      // Se o mecânico pedir correção na confirmação final, o agente libera a
+      // tabela de novo — sem isso ela só abriria uma vez por sessão.
+      autoOrcamentoOpenedForRelease = false;
+
+      if (!mounted) return;
+
+      setState(() {
+        messages.add(
+          ChatMessage(
+            type: ChatMessageType.ai,
+            text: 'Orçamento enviado: ${result.length} '
+                'ite${result.length > 1 ? 'ns' : 'm'}, total de '
+                '${formatCurrencyBRL(somarItensOrcamento(result))}.',
+            createdAt: DateTime.now(),
+          ),
+        );
+      });
+
+      _scrollToBottom();
+
+      unawaited(_notifyOrcamentoSentInBackground(session.idvistoria));
+    } catch (e) {
+      debugPrint('Erro ao enviar orçamento: $e');
+
+      _showSnack(
+        'Não foi possível enviar o orçamento. Tente novamente.',
+        backgroundColor: Colors.redAccent,
+      );
+    }
+  }
+
+  Future<void> _notifyOrcamentoSentInBackground(String inspectionId) async {
+    try {
+      await ArgosAiService.instance.sendBackgroundMessage(
+        text: 'enviei o orçamento',
+        inspectionId: inspectionId,
+      );
+    } catch (e) {
+      debugPrint('Erro ao notificar envio de orçamento para IA: $e');
     }
   }
 
@@ -2197,10 +2389,7 @@ class _AiChatPageState extends State<AiChatPage> {
       final hasPermission = await audioRecorder.hasPermission();
 
       if (!hasPermission) {
-        _showSnack(
-          'Permissão de microfone necessária para gravar áudio.',
-          backgroundColor: Colors.orange,
-        );
+        if (mounted) await showMicrophonePermissionDialog(context);
         return;
       }
 
@@ -2445,6 +2634,7 @@ class _AiChatPageState extends State<AiChatPage> {
       });
 
       _openCameraAfterPhotoRelease(audioResult.reply);
+      _openOrcamentoAfterRelease(audioResult.reply);
       _scrollToBottom();
     } on FirebaseFunctionsException catch (e) {
       debugPrint('ERRO CLOUD FUNCTION AUDIO');
@@ -2475,8 +2665,8 @@ class _AiChatPageState extends State<AiChatPage> {
         messages.add(
           ChatMessage(
             type: ChatMessageType.ai,
-            text:
-                'Recebi o áudio, mas não consegui transcrever agora. Código: ${e.code}',
+            text: 'Recebi o áudio, mas não consegui transcrever agora. '
+                'Tente novamente em instantes.',
           ),
         );
 
@@ -2653,6 +2843,7 @@ class _AiChatPageState extends State<AiChatPage> {
                         child: _InspectionCompletedView(
                           session: currentSession!,
                           status: completedInspectionStatus,
+                          laudoPending: completedLaudoPending,
                           onBackToSelection:
                               _closeCurrentChatAndBackToSelection,
                         ),
@@ -2774,10 +2965,14 @@ class _InspectionCompletedView extends StatefulWidget {
   final String status;
   final VoidCallback onBackToSelection;
 
+  /// true se o laudo técnico ainda não foi gerado ao concluir.
+  final bool laudoPending;
+
   const _InspectionCompletedView({
     required this.session,
     required this.status,
     required this.onBackToSelection,
+    this.laudoPending = false,
   });
 
   @override
@@ -2907,7 +3102,7 @@ class _InspectionCompletedViewState extends State<_InspectionCompletedView>
           ),
           const SizedBox(height: 30),
           Text(
-            'Vistoria concluida',
+            'Vistoria concluída',
             textAlign: TextAlign.center,
             style: GoogleFonts.spaceGrotesk(
               color: const Color(0xFF0F172A),
@@ -2917,7 +3112,7 @@ class _InspectionCompletedViewState extends State<_InspectionCompletedView>
           ),
           const SizedBox(height: 10),
           Text(
-            'Aguarde a proxima etapa.',
+            'Aguarde a próxima etapa.',
             textAlign: TextAlign.center,
             style: const TextStyle(
               color: Color(0xFF414755),
@@ -2957,6 +3152,18 @@ class _InspectionCompletedViewState extends State<_InspectionCompletedView>
                       color: Color(0xFF64748B),
                       fontWeight: FontWeight.w700,
                       fontSize: 13,
+                    ),
+                  ),
+                ],
+                if (widget.laudoPending) ...[
+                  const SizedBox(height: 6),
+                  const Text(
+                    'O laudo técnico está sendo gerado.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Color(0xFF64748B),
+                      fontWeight: FontWeight.w600,
+                      fontSize: 12,
                     ),
                   ),
                 ],
@@ -4671,10 +4878,10 @@ class _ConvertingToOfflineBulkScreenState
           const SizedBox(height: 10),
           Text(
             widget.placa.isEmpty
-                ? 'Abandonando o passo a passo e preparando pra enviar '
+                ? 'Abandonando o passo a passo e preparando para enviar '
                     'tudo de uma vez. Isso pode levar alguns instantes.'
                 : 'Abandonando o passo a passo de ${widget.placa} e '
-                    'preparando pra enviar tudo de uma vez. Isso pode '
+                    'preparando para enviar tudo de uma vez. Isso pode '
                     'levar alguns instantes.',
             textAlign: TextAlign.center,
             style: const TextStyle(

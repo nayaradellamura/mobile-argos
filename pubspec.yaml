@@ -1,5 +1,5 @@
 name: argos_app
-description: "A new Flutter project."
+description: "Argos — vistoria digital de sinistros automotivos com assistente de IA para oficinas credenciadas."
 publish_to: 'none'
 
 version: 1.0.1+5

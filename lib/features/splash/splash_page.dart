@@ -91,7 +91,7 @@ class _SplashPageState extends State<SplashPage> {
                 if (!mounted) return;
                 setState(
                   () => _updateStatusText =
-                      'Atualização baixada — abra o app de novo pra aplicar',
+                      'Atualização baixada — abra o app de novo para aplicar',
                 );
               } catch (e) {
                 debugPrint('Erro ao baixar patch do Shorebird: $e');
@@ -101,7 +101,7 @@ class _SplashPageState extends State<SplashPage> {
             case UpdateStatus.restartRequired:
               setState(
                 () => _updateStatusText =
-                    'Atualização pronta — abra o app de novo pra aplicar',
+                    'Atualização pronta — abra o app de novo para aplicar',
               );
             case UpdateStatus.upToDate:
               setState(() => _updateStatusText = 'App atualizado');
