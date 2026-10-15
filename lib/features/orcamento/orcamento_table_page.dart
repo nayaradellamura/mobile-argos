@@ -214,11 +214,21 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
         return;
       }
 
+      // O mecânico pode já ter tocado no campo de valor enquanto a busca
+      // rodava: não escreve num campo em edição (o texto se misturava).
+      final preencheValor =
+          referencia.valorPeca > 0 && !item.valorFocus.hasFocus;
+      final preencheHoras =
+          referencia.horasMaoObra > 0 &&
+          !item.horasFocus.hasFocus &&
+          !item.maoObraEmValor;
+      if (!preencheValor && !preencheHoras) return;
+
       setState(() {
-        if (referencia.valorPeca > 0) {
+        if (preencheValor) {
           item.valorController.text = formatDecimalInput(referencia.valorPeca);
         }
-        if (referencia.horasMaoObra > 0) {
+        if (preencheHoras) {
           item.horasController.text = formatDecimalInput(
             referencia.horasMaoObra,
             casas: 1,
@@ -502,6 +512,10 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
     setState(() {
       _itens.add(item);
       _expandidoId = item.id;
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) item.pecaFocus.requestFocus();
     });
   }
 
@@ -801,6 +815,8 @@ class _EditableItem {
   final TextEditingController horasController;
   final TextEditingController valorMaoObraController;
   final FocusNode pecaFocus = FocusNode();
+  final FocusNode valorFocus = FocusNode();
+  final FocusNode horasFocus = FocusNode();
   String tipoIntervencao;
   String tipoServico;
   bool maoObraEmValor;
@@ -917,6 +933,8 @@ class _EditableItem {
     horasController.dispose();
     valorMaoObraController.dispose();
     pecaFocus.dispose();
+    valorFocus.dispose();
+    horasFocus.dispose();
   }
 }
 
@@ -1007,6 +1025,8 @@ class _OrcamentoHeader extends StatelessWidget {
               children: [
                 Text(
                   'Orçamento ($itemCount)',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: GoogleFonts.spaceGrotesk(
                     color: const Color(0xFF1F2937),
                     fontSize: 20,
@@ -1016,6 +1036,8 @@ class _OrcamentoHeader extends StatelessWidget {
                 const SizedBox(height: 2),
                 const Text(
                   'Revise os valores e ajuste o que precisar.',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: Color(0xFF6B7280),
                     fontSize: 12,
@@ -1033,17 +1055,10 @@ class _OrcamentoHeader extends StatelessWidget {
               color: const Color(0xFF0057C0),
             ),
           ),
-          TextButton.icon(
+          IconButton(
             onPressed: onConfigurarValorHora,
-            icon: const Icon(Icons.schedule_rounded, size: 18),
-            label: const Text('Valor da hora'),
-            style: TextButton.styleFrom(
-              foregroundColor: const Color(0xFF0057C0),
-              textStyle: const TextStyle(
-                fontWeight: FontWeight.w800,
-                fontSize: 12,
-              ),
-            ),
+            tooltip: 'Valor da hora',
+            icon: const Icon(Icons.schedule_rounded, color: Color(0xFF0057C0)),
           ),
         ],
       ),
@@ -1369,6 +1384,7 @@ class _OrcamentoItemCard extends StatelessWidget {
                 child: _NumberField(
                   label: 'Valor unitário (R\$)',
                   controller: item.valorController,
+                  focusNode: item.valorFocus,
                   onChanged: onChanged,
                   allowDecimal: true,
                 ),
@@ -1441,6 +1457,7 @@ class _OrcamentoItemCard extends StatelessWidget {
                   child: _NumberField(
                     label: 'Horas',
                     controller: item.horasController,
+                    focusNode: item.horasFocus,
                     onChanged: onChanged,
                     allowDecimal: true,
                   ),
@@ -1563,12 +1580,14 @@ class _NumberField extends StatelessWidget {
   final TextEditingController controller;
   final VoidCallback onChanged;
   final bool allowDecimal;
+  final FocusNode? focusNode;
 
   const _NumberField({
     required this.label,
     required this.controller,
     required this.onChanged,
     this.allowDecimal = false,
+    this.focusNode,
   });
 
   @override
@@ -1587,6 +1606,7 @@ class _NumberField extends StatelessWidget {
         const SizedBox(height: 2),
         TextField(
           controller: controller,
+          focusNode: focusNode,
           onChanged: (_) => onChanged(),
           keyboardType: TextInputType.numberWithOptions(decimal: allowDecimal),
           inputFormatters: [
