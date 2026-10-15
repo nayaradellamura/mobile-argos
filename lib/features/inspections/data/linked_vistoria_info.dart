@@ -240,7 +240,7 @@ class LinkedVistoriaInfo {
         normalized.contains('finalizado') ||
         normalized.contains('finalized')) return 'Finalizada';
     if (normalized.contains('analise') || normalized.contains('análise')) {
-      return 'Em analise';
+      return 'Em análise';
     }
 
     return 'Em andamento';

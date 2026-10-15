@@ -82,7 +82,7 @@ extension InspectionStatusX on InspectionStatus {
       case InspectionStatus.inProgress:
         return 'Em andamento';
       case InspectionStatus.submitted:
-        return 'Em analise';
+        return 'Em análise';
       case InspectionStatus.approved:
         return 'Aprovada';
       case InspectionStatus.rejected:
@@ -524,7 +524,7 @@ class InspectionCase {
       case InspectionLifecycleCategory.completed:
         return 'Finalizada';
       case InspectionLifecycleCategory.aiAnalysis:
-        return 'Em analise';
+        return 'Em análise';
       case InspectionLifecycleCategory.inProgress:
         if (_isExpired) return 'Expirada';
         if (_isAbandoned) return 'Abandonada';
