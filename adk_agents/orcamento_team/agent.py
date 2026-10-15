@@ -38,6 +38,7 @@ from .tools.precos_tool import (
     consultar_preco_referencia,
     verificar_faixa_preco,
 )
+from .tools.orcamento_foto_tool import ler_orcamento_das_fotos
 from .tools.valores_hora_tool import (
     carregar_valores_hora_oficina,
     salvar_valor_hora_oficina,
@@ -91,6 +92,36 @@ a orçar. Se ele disser que não, descarte e não insista.
 Airbag do motorista é exceção: só sugira/inclua se `severidade_geral` for
 "grave" — em severidade leve ou moderada não é uma peça plausível de
 colisão, não ofereça isso como sugestão proativa.
+
+No fim dessa mesma mensagem, ofereça em UMA frase curta o atalho do
+orçamento pronto, ex.: "Se você já tem o orçamento montado, pode mandar
+uma foto dele que eu leio os itens." É só uma opção: se o mecânico não
+falar nada sobre isso, siga normalmente com a lista de referência.
+
+## Passo 1A — orçamento pronto por foto (opcional)
+Só entra aqui se o mecânico disser que quer mandar o orçamento dele (foto
+do papel, do PDF ou da planilha na tela).
+1. Responda com a frase exata "Liberei a câmera para a foto do orçamento."
+   e PARE DE FALAR. Sem essa frase o botão da câmera não destrava.
+2. Quando chegar "Fotos enviadas", mande "Recebi. Vou ler o orçamento." e
+   chame `ler_orcamento_das_fotos` com o id da vistoria.
+3. Se `fotos_lidas` for 0 ou `legivel` for false: diga em uma frase que
+   não deu para ler e ofereça mandar outra foto ou seguir com a lista de
+   referência.
+4. Se leu: os itens dele substituem a lista de referência. Para cada item:
+   - `horas_mao_obra` vazio e `valor_mao_obra` preenchido: horas =
+     valor_mao_obra / valor da hora da oficina para o `tipo_servico`,
+     arredondado a 1 casa;
+   - os dois vazios: use as horas de `consultar_preco_referencia`.
+   Peça identificada na vistoria que não está no orçamento dele: pergunte
+   uma vez se deve incluir. Depois siga para o Passo 2 só para o valor da
+   hora (se faltar algum tipo) e para `salvar_rascunho_orcamento`, e
+   mostre a lista no formato do Passo 3. Os valores dele são os valores
+   do orçamento: não troque pelos de referência.
+5. No Passo 4, chame `verificar_faixa_preco` para TODOS os itens lidos da
+   foto (todos vieram de fora). Se `total_documento` veio preenchido e for
+   diferente do total calculado no Passo 5, avise em uma frase (pode haver
+   desconto ou taxa no documento) e use o total calculado.
 
 ## Passo 2 — preço de referência (silencioso)
 Para cada peça confirmada (da vistoria + sugestões aceitas + qualquer
@@ -228,6 +259,7 @@ orcamento_oficina_agent = LlmAgent(
         FunctionTool(calcular_orcamento_total),
         FunctionTool(carregar_valores_hora_oficina),
         FunctionTool(salvar_valor_hora_oficina),
+        FunctionTool(ler_orcamento_das_fotos),
         FunctionTool(enviar_laudo_cloud_function),
         AgentTool(agent=sugestor_pecas_associadas_agent),
     ],

@@ -135,6 +135,16 @@ function buildOrcamentoCampo({ vistoria, agentParameters }) {
  * Mesma fonte de dados que o InspectionCase do app mobile lê — ver
  * lib/features/inspections/data/inspection_case.dart no argos_app.
  */
+// Fotos que entram no laudo. Foto de orçamento pronto (lida pelo agente na
+// etapa de orçamento, em imagensOrcamentoIds) não é foto de dano.
+function fotosDeDano(vistoria) {
+  const idsOrcamento = new Set(
+    Array.isArray(vistoria?.imagensOrcamentoIds) ? vistoria.imagensOrcamentoIds : []
+  );
+  const images = Array.isArray(vistoria?.images) ? vistoria.images : [];
+  return images.filter((img) => !idsOrcamento.has(img?.imageId));
+}
+
 async function loadLaudoContext({ sinistroId, vistoriaId }) {
   const db = admin.firestore();
 
@@ -182,7 +192,7 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
   const credenciadoSnapshot = asObject(sinistro.credenciadoSnapshot);
   const seguradoraSnapshot = asObject(sinistro.seguradoraSnapshot);
 
-  const images = Array.isArray(vistoria.images) ? vistoria.images : [];
+  const images = fotosDeDano(vistoria);
   const chatmessages = Array.isArray(vistoria.chatmessages) ? vistoria.chatmessages : [];
 
   // Narração do mecânico e respostas da IA, na ordem em que aconteceram —
@@ -249,4 +259,4 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
 
 // buildOrcamentoCampo, normalizarItem e VALOR_HORA_LEGADO são exportados só
 // para os testes (test/data.test.js) — o servidor usa apenas loadLaudoContext.
-module.exports = { loadLaudoContext, buildOrcamentoCampo, normalizarItem, VALOR_HORA_LEGADO };
+module.exports = { loadLaudoContext, buildOrcamentoCampo, normalizarItem, fotosDeDano, VALOR_HORA_LEGADO };

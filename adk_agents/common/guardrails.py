@@ -82,6 +82,7 @@ _TERMOS_INTERNOS = [
     "verificar_faixa_preco",
     "calcular_orcamento_total",
     "carregar_valores_hora_oficina",
+    "ler_orcamento_das_fotos",
     "salvar_valor_hora_oficina",
     "enviar_laudo_cloud_function",
     "transfer_to_agent",

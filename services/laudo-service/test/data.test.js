@@ -16,7 +16,7 @@ Module._load = function (request, ...rest) {
   }
   return loadOriginal.call(this, request, ...rest);
 };
-const { buildOrcamentoCampo, normalizarItem, VALOR_HORA_LEGADO } = require("../lib/data");
+const { buildOrcamentoCampo, normalizarItem, fotosDeDano, VALOR_HORA_LEGADO } = require("../lib/data");
 Module._load = loadOriginal;
 
 const itemTabela = (peca, extra = {}) => ({
@@ -188,5 +188,20 @@ describe("buildOrcamentoCampo — itens e totais", () => {
     });
 
     assert.equal(campo.valorTotal, 150 + 90);
+  });
+});
+
+describe("fotosDeDano", () => {
+  test("tira do laudo as fotos de orçamento pronto", () => {
+    const vistoria = {
+      images: [{ imageId: "a" }, { imageId: "orc" }, { imageId: "b" }],
+      imagensOrcamentoIds: ["orc"],
+    };
+    assert.deepEqual(fotosDeDano(vistoria).map((i) => i.imageId), ["a", "b"]);
+  });
+
+  test("sem campo de orçamento, mantém todas", () => {
+    assert.equal(fotosDeDano({ images: [{ imageId: "a" }] }).length, 1);
+    assert.deepEqual(fotosDeDano({}), []);
   });
 });
