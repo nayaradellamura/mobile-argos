@@ -20,24 +20,43 @@ const MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.s
 
 const PROMPT = `
 Você recebe um orçamento de reparo de veículo feito por uma oficina (foto,
-print, PDF ou planilha). Transcreva os itens.
+print, manuscrito, PDF ou planilha). Transcreva os itens.
 
 Regras:
-- Um item por peça ou serviço. Não invente item, valor nem quantidade que
-  não esteja no documento.
+- Um item por peça. Não invente item, valor nem quantidade que não esteja
+  no documento.
 - valorPeca: valor UNITÁRIO da peça em reais, número sem "R$" (ex.: 550.0).
-  Se só houver o total da linha e a quantidade, divida. Serviço sem peça
-  (ex.: alinhamento, pintura) tem valorPeca 0.
-- Mão de obra: se vier em horas (ex.: "2,0 h", "1,5h", "1h30", coluna
-  "MO (h)"), preencha horasMaoObra (1h30 = 1.5) e deixe valorMaoObra null.
-  Se vier em reais (ex.: "R$ 420,00"), preencha valorMaoObra e deixe
-  horasMaoObra null. Sem mão de obra no item: os dois null.
+  Se só houver o total da linha e a quantidade, divida.
 - Números no formato brasileiro: vírgula é decimal e ponto é milhar
   ("1.234,50" = 1234.5).
-- tipoServico: um de funilaria, pintura, mecanica, eletrica.
+
+Mão de obra (leia com atenção, ela costuma vir separada das peças):
+- Muitos orçamentos têm a mão de obra em outra tabela ou seção ("Mão de
+  obra mecânica", "Serviços", "M.O."), com tempo, valor da hora e valor
+  total por serviço. Associe cada serviço à peça correspondente pela
+  descrição ("Substituir amortecedor" -> peça "Amortecedor dianteiro") e
+  preencha no item da peça:
+  - horasMaoObra: o tempo ("1h" = 1, "0,5h" = 0.5, "1h30" = 1.5);
+  - valorHora: o valor da hora informado para esse serviço;
+  - valorMaoObra: o valor total da mão de obra desse serviço.
+  Se o mesmo serviço tiver tempo E valor, preencha os três.
+- Serviço sem peça correspondente (ex.: pintura, alinhamento, funilaria
+  geral) vira um item próprio com valorPeca 0 e a mão de obra dele.
+- Mão de obra informada só como um valor total para o orçamento inteiro
+  (ex.: "Mão de obra: 700,00") vira UM item com peca "Mão de obra" (ou a
+  descrição do serviço, se houver), valorPeca 0 e valorMaoObra = esse valor.
+- Sem informação de mão de obra: horasMaoObra, valorHora e valorMaoObra
+  null.
+
+- tipoServico: um de funilaria, pintura, mecanica, eletrica (o tipo da mão
+  de obra do item; use a seção do documento quando houver, ex.: "Mão de
+  obra elétrica" -> eletrica).
 - tipoIntervencao: "substituicao", "reparo" ou "pintura".
 - legivel: false se o documento não for um orçamento ou estiver ilegível.
-- totalDocumento: o total geral do documento, se houver.
+- totalDocumento: o total final a pagar do documento (depois de descontos),
+  se houver.
+- observacao: descontos, taxas ou qualquer coisa que o mecânico precise
+  conferir, em uma frase; senão null.
 `.trim();
 
 const SCHEMA = {
@@ -54,6 +73,7 @@ const SCHEMA = {
           quantidade: { type: "number" },
           valorPeca: { type: "number" },
           horasMaoObra: { type: "number", nullable: true },
+          valorHora: { type: "number", nullable: true },
           valorMaoObra: { type: "number", nullable: true },
           tipoServico: { type: "string" },
         },
@@ -61,6 +81,7 @@ const SCHEMA = {
       },
     },
     totalDocumento: { type: "number", nullable: true },
+    observacao: { type: "string", nullable: true },
   },
   required: ["legivel", "itens"],
 };
@@ -124,12 +145,24 @@ function normalizarItens(bruto) {
     let valorMaoObra = numero(item.valorMaoObra);
     if (valorMaoObra !== null && (valorMaoObra < 0 || valorMaoObra >= 1e6)) valorMaoObra = null;
 
+    let valorHora = numero(item.valorHora);
+    if (valorHora !== null && (valorHora <= 0 || valorHora >= 1e5)) valorHora = null;
+    // Dois dos três (tempo, valor da hora, valor total) bastam: deduz o
+    // terceiro, para a tabela calcular horas x valor da hora.
+    if (valorHora === null && horas && valorMaoObra) {
+      valorHora = Math.round((valorMaoObra / horas) * 100) / 100;
+    }
+    if (horas === null && valorHora && valorMaoObra) {
+      horas = Math.round((valorMaoObra / valorHora) * 100) / 100;
+    }
+
     itens.push({
       peca: peca.slice(0, 120),
       tipoIntervencao: normalizarIntervencao(item.tipoIntervencao),
       quantidade,
       valorPeca: Math.round(valorPeca * 100) / 100,
       horasMaoObra: horas,
+      valorHora,
       valorMaoObra,
       tipoServico: normalizarTipo(item.tipoServico),
     });
@@ -204,10 +237,13 @@ async function extrairOrcamento({ client, model, tipo, buffer, mimeType }) {
   const bruto = JSON.parse(texto || "{}");
   const itens = normalizarItens(bruto);
 
+  const observacao = String(bruto.observacao || "").trim();
+
   return {
     itens,
     legivel: Boolean(bruto.legivel) && itens.length > 0,
     totalDocumento: numero(bruto.totalDocumento),
+    observacao: observacao ? observacao.slice(0, 300) : null,
   };
 }
 

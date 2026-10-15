@@ -51,6 +51,13 @@ class OrcamentoItemDraft {
   final double horasMaoObra;
   final String origem;
 
+  /// Mão de obra informada direto em reais (comum em orçamento de oficina),
+  /// em vez de horas x valor da hora. Gravada como 1 h ao valor informado,
+  /// para o total continuar sendo horas x valorHora no app, no agente e no
+  /// laudo-service.
+  final bool maoObraEmValor;
+  final double valorMaoObra;
+
   OrcamentoItemDraft({
     String? id,
     required this.peca,
@@ -60,10 +67,13 @@ class OrcamentoItemDraft {
     this.tipoServico = kTipoServicoPadrao,
     this.horasMaoObra = 0,
     this.origem = 'vistoria',
+    this.maoObraEmValor = false,
+    this.valorMaoObra = 0,
   }) : id = (id == null || id.isEmpty) ? _newItemId() : id;
 
   factory OrcamentoItemDraft.fromMap(Map<String, dynamic> map) {
     final tipoServico = map['tipoServico']?.toString() ?? '';
+    final emValor = map['maoObraEmValor'] == true;
 
     return OrcamentoItemDraft(
       id: map['id']?.toString(),
@@ -74,14 +84,17 @@ class OrcamentoItemDraft {
       tipoServico: kTiposServico.containsKey(tipoServico)
           ? tipoServico
           : kTipoServicoPadrao,
-      horasMaoObra: _toDouble(map['horasMaoObra']),
+      horasMaoObra: emValor ? 0 : _toDouble(map['horasMaoObra']),
       origem: map['origem']?.toString() ?? 'vistoria',
+      maoObraEmValor: emValor,
+      valorMaoObra: emValor ? _toDouble(map['valorMaoObra']) : 0,
     );
   }
 
   /// Mapa gravado no Firestore, com o valor da hora congelado no item.
   Map<String, dynamic> toMap({required double valorHora}) {
-    final valorMaoObra = horasMaoObra * valorHora;
+    final horas = maoObraEmValor ? (valorMaoObra > 0 ? 1.0 : 0.0) : horasMaoObra;
+    final hora = maoObraEmValor ? valorMaoObra : valorHora;
 
     return {
       'id': id,
@@ -90,16 +103,17 @@ class OrcamentoItemDraft {
       'quantidade': quantidade,
       'valorPeca': valorPeca,
       'tipoServico': tipoServico,
-      'horasMaoObra': horasMaoObra,
-      'valorHora': valorHora,
-      'valorMaoObra': valorMaoObra,
+      'horasMaoObra': horas,
+      'valorHora': hora,
+      'valorMaoObra': horas * hora,
       'valorTotal': valorTotalItem(
         valorPeca: valorPeca,
         quantidade: quantidade,
-        horasMaoObra: horasMaoObra,
-        valorHora: valorHora,
+        horasMaoObra: horas,
+        valorHora: hora,
       ),
       'origem': origem,
+      if (maoObraEmValor) 'maoObraEmValor': true,
     };
   }
 
@@ -150,6 +164,10 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
   final List<_EditableItem> _itens = [];
   Map<String, double> _valoresHora = {};
   bool _carregandoValoresHora = true;
+
+  /// Lista compacta (uma linha por item; toque abre o card para editar).
+  late bool _compacto = widget.itensIniciais.length > 4;
+  String? _expandidoId;
 
   @override
   void initState() {
@@ -231,7 +249,10 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
 
   Future<void> _configurarValoresHora({bool primeiraVez = false}) async {
     final tiposUsados = _itens
-        .where((item) => !item.isBlank && (item.horasMaoObra ?? 0) > 0)
+        .where((item) =>
+            !item.isBlank &&
+            !item.maoObraEmValor &&
+            (item.horasMaoObra ?? 0) > 0)
         .map((item) => item.tipoServico)
         .toSet();
 
@@ -412,32 +433,35 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
   }
 
   Future<void> _aplicarImportacao(OrcamentoArquivoResultado resultado) async {
-    var semValorHora = 0;
-
     final drafts = resultado.itens.map((item) {
-      var horas = item.horasMaoObra ?? 0;
-      final valorMaoObra = item.valorMaoObra;
+      final tipo = kTiposServico.containsKey(item.tipoServico)
+          ? item.tipoServico
+          : kTipoServicoPadrao;
+      final horas = item.horasMaoObra ?? 0;
+      final valorHoraDoc = item.valorHora;
+      final valorHoraOficina = _valoresHora[tipo];
 
-      // Documento com mão de obra em reais: converte para horas com o valor
-      // da hora da oficina, para o total continuar sendo horas x valor/hora.
-      if (horas == 0 && valorMaoObra != null && valorMaoObra > 0) {
-        final valorHora = _valoresHora[item.tipoServico] ?? 0;
-        if (valorHora > 0) {
-          horas = (valorMaoObra / valorHora * 10).round() / 10;
-        } else {
-          semValorHora++;
-        }
-      }
+      // Fica em horas só quando o documento traz horas e o valor da hora
+      // dele é o da oficina (ou não traz valor nenhum). Fora isso, vale o
+      // valor em reais do documento, para o total bater com o orçamento.
+      final usaHoras = horas > 0 &&
+          item.valorMaoObra == null &&
+          (valorHoraDoc == null ||
+              (valorHoraOficina != null &&
+                  (valorHoraDoc - valorHoraOficina).abs() < 0.01));
+
+      final valorMaoObra = item.valorMaoObra ??
+          (horas > 0 && valorHoraDoc != null ? horas * valorHoraDoc : 0);
 
       return OrcamentoItemDraft(
         peca: item.peca,
         tipoIntervencao: item.tipoIntervencao,
         quantidade: item.quantidade,
         valorPeca: item.valorPeca,
-        tipoServico: kTiposServico.containsKey(item.tipoServico)
-            ? item.tipoServico
-            : kTipoServicoPadrao,
-        horasMaoObra: horas,
+        tipoServico: tipo,
+        horasMaoObra: usaHoras ? horas : 0,
+        maoObraEmValor: !usaHoras && valorMaoObra > 0,
+        valorMaoObra: usaHoras ? 0 : valorMaoObra,
         origem: 'arquivo',
       );
     }).toList();
@@ -495,10 +519,9 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
 
     final avisos = <String>[
       '${drafts.length} itens importados. Confira os valores antes de salvar.',
-      if (semValorHora > 0)
-        'Configure o valor da hora para converter a mão de obra em reais.',
       if (resultado.totalDocumento != null)
         'Total no documento: ${formatCurrencyBRL(resultado.totalDocumento!)}.',
+      if ((resultado.observacao ?? '').isNotEmpty) resultado.observacao!,
     ];
     _mostrarAviso(avisos.join(' '), duracao: const Duration(seconds: 6));
   }
@@ -516,7 +539,10 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
   void _addBlankItem() {
     final item = _EditableItem.blank();
     _attachLookup(item);
-    setState(() => _itens.add(item));
+    setState(() {
+      _itens.add(item);
+      _expandidoId = item.id;
+    });
   }
 
   void _removeItem(int index) {
@@ -542,9 +568,20 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
   }
 
   bool _semValorHora(_EditableItem item) =>
-      (item.horasMaoObra ?? 0) > 0 && !_valoresHora.containsKey(item.tipoServico);
+      !item.maoObraEmValor &&
+      (item.horasMaoObra ?? 0) > 0 &&
+      !_valoresHora.containsKey(item.tipoServico);
 
   double _valorHora(String tipoServico) => _valoresHora[tipoServico] ?? 0;
+
+  double _maoObraDoItem(_EditableItem item) => item.maoObraEmValor
+      ? (item.valorMaoObra ?? 0)
+      : (item.horasMaoObra ?? 0) * _valorHora(item.tipoServico);
+
+  double? _totalDoItem(_EditableItem item) {
+    if (item.isBlank || _erroDoItem(item) != null) return null;
+    return (item.valorPeca ?? 0) * (item.quantidade ?? 1) + _maoObraDoItem(item);
+  }
 
   void _submit() {
     final itens = _itensPreenchidos;
@@ -574,8 +611,8 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
 
     for (final item in preenchidos) {
       totalPecas += (item.valorPeca ?? 0) * (item.quantidade ?? 1);
-      totalHoras += item.horasMaoObra ?? 0;
-      totalMaoObra += (item.horasMaoObra ?? 0) * _valorHora(item.tipoServico);
+      if (!item.maoObraEmValor) totalHoras += item.horasMaoObra ?? 0;
+      totalMaoObra += _maoObraDoItem(item);
     }
 
     final String submitText;
@@ -597,8 +634,13 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
           children: [
             _OrcamentoHeader(
               itemCount: preenchidos.length,
+              compacto: _compacto,
               onClose: _closePage,
               onConfigurarValorHora: _configurarValoresHora,
+              onAlternarVisualizacao: () => setState(() {
+                _compacto = !_compacto;
+                _expandidoId = null;
+              }),
             ),
             if (faltaValorHora)
               _ValorHoraBanner(onTap: _configurarValoresHora),
@@ -620,11 +662,25 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
 
                   final item = _itens[index];
 
+                  if (_compacto && item.id != _expandidoId) {
+                    return _OrcamentoItemLinha(
+                      item: item,
+                      maoObra: _maoObraDoItem(item),
+                      total: _totalDoItem(item),
+                      erro: _erroDoItem(item),
+                      onTap: () => setState(() => _expandidoId = item.id),
+                    );
+                  }
+
                   return _OrcamentoItemCard(
                     item: item,
                     valorHora: _valoresHora[item.tipoServico],
+                    total: _totalDoItem(item),
                     erro: _erroDoItem(item),
                     onChanged: () => setState(() {}),
+                    onRecolher: _compacto
+                        ? () => setState(() => _expandidoId = null)
+                        : null,
                     onRemove: _itens.length > 1
                         ? () => _removeItem(index)
                         : null,
@@ -654,7 +710,9 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
               _TotalRow(label: 'Peças', value: formatCurrencyBRL(totalPecas)),
               const SizedBox(height: 2),
               _TotalRow(
-                label: 'Mão de obra (${formatHoras(totalHoras)})',
+                label: totalHoras > 0
+                    ? 'Mão de obra (${formatHoras(totalHoras)})'
+                    : 'Mão de obra',
                 value: formatCurrencyBRL(totalMaoObra),
               ),
               const SizedBox(height: 4),
@@ -698,9 +756,11 @@ class _EditableItem {
   final TextEditingController quantidadeController;
   final TextEditingController valorController;
   final TextEditingController horasController;
+  final TextEditingController valorMaoObraController;
   final FocusNode pecaFocus = FocusNode();
   String tipoIntervencao;
   String tipoServico;
+  bool maoObraEmValor;
   final String origem;
   bool precoDeReferencia = false;
 
@@ -710,9 +770,11 @@ class _EditableItem {
     required this.quantidadeController,
     required this.valorController,
     required this.horasController,
+    required this.valorMaoObraController,
     required this.tipoIntervencao,
     required this.tipoServico,
     required this.origem,
+    this.maoObraEmValor = false,
   });
 
   factory _EditableItem.blank() {
@@ -722,6 +784,7 @@ class _EditableItem {
       quantidadeController: TextEditingController(text: '1'),
       valorController: TextEditingController(),
       horasController: TextEditingController(),
+      valorMaoObraController: TextEditingController(),
       tipoIntervencao: 'substituicao',
       tipoServico: kTipoServicoPadrao,
       origem: 'vistoria',
@@ -741,9 +804,15 @@ class _EditableItem {
             ? formatDecimalInput(draft.horasMaoObra, casas: 1)
             : '',
       ),
+      valorMaoObraController: TextEditingController(
+        text: draft.valorMaoObra > 0
+            ? formatDecimalInput(draft.valorMaoObra)
+            : '',
+      ),
       tipoIntervencao: draft.tipoIntervencao,
       tipoServico: draft.tipoServico,
       origem: draft.origem,
+      maoObraEmValor: draft.maoObraEmValor,
     );
   }
 
@@ -751,11 +820,14 @@ class _EditableItem {
   bool get isBlank =>
       pecaController.text.trim().isEmpty &&
       valorController.text.trim().isEmpty &&
-      horasController.text.trim().isEmpty;
+      horasController.text.trim().isEmpty &&
+      valorMaoObraController.text.trim().isEmpty;
 
   double? get valorPeca => parseValorDecimal(valorController.text);
 
   double? get horasMaoObra => parseValorDecimal(horasController.text);
+
+  double? get valorMaoObra => parseValorDecimal(valorMaoObraController.text);
 
   int? get quantidade {
     final value = int.tryParse(quantidadeController.text.trim());
@@ -766,6 +838,13 @@ class _EditableItem {
     if (pecaController.text.trim().isEmpty) return 'Informe o nome da peça.';
     if (quantidade == null) return 'Quantidade inválida.';
     if (valorPeca == null) return 'Valor da peça inválido.';
+    if (maoObraEmValor) {
+      if (valorMaoObra == null) return 'Valor da mão de obra inválido.';
+      if (valorPeca == 0 && valorMaoObra == 0) {
+        return 'Informe o valor da peça ou o da mão de obra.';
+      }
+      return null;
+    }
     if (horasMaoObra == null) return 'Horas de mão de obra inválidas.';
     if (valorPeca == 0 && horasMaoObra == 0) {
       return 'Informe o valor da peça ou as horas de mão de obra.';
@@ -781,8 +860,10 @@ class _EditableItem {
       quantidade: quantidade ?? 1,
       valorPeca: valorPeca ?? 0,
       tipoServico: tipoServico,
-      horasMaoObra: horasMaoObra ?? 0,
+      horasMaoObra: maoObraEmValor ? 0 : (horasMaoObra ?? 0),
       origem: origem,
+      maoObraEmValor: maoObraEmValor,
+      valorMaoObra: maoObraEmValor ? (valorMaoObra ?? 0) : 0,
     );
   }
 
@@ -791,6 +872,7 @@ class _EditableItem {
     quantidadeController.dispose();
     valorController.dispose();
     horasController.dispose();
+    valorMaoObraController.dispose();
     pecaFocus.dispose();
   }
 }
@@ -834,13 +916,17 @@ class _TotalRow extends StatelessWidget {
 
 class _OrcamentoHeader extends StatelessWidget {
   final int itemCount;
+  final bool compacto;
   final VoidCallback onClose;
   final VoidCallback onConfigurarValorHora;
+  final VoidCallback onAlternarVisualizacao;
 
   const _OrcamentoHeader({
     required this.itemCount,
+    required this.compacto,
     required this.onClose,
     required this.onConfigurarValorHora,
+    required this.onAlternarVisualizacao,
   });
 
   @override
@@ -891,6 +977,14 @@ class _OrcamentoHeader extends StatelessWidget {
                   ),
                 ),
               ],
+            ),
+          ),
+          IconButton(
+            onPressed: onAlternarVisualizacao,
+            tooltip: compacto ? 'Ver em cards' : 'Ver lista compacta',
+            icon: Icon(
+              compacto ? Icons.view_agenda_outlined : Icons.view_list_rounded,
+              color: const Color(0xFF0057C0),
             ),
           ),
           TextButton.icon(
@@ -1100,31 +1194,27 @@ class _ValoresHoraDialogState extends State<_ValoresHoraDialog> {
 class _OrcamentoItemCard extends StatelessWidget {
   final _EditableItem item;
   final double? valorHora;
+  final double? total;
   final String? erro;
   final VoidCallback onChanged;
+  final VoidCallback? onRecolher;
   final VoidCallback? onRemove;
 
   const _OrcamentoItemCard({
     required this.item,
     required this.valorHora,
+    required this.total,
     required this.erro,
     required this.onChanged,
+    this.onRecolher,
     this.onRemove,
   });
 
   @override
   Widget build(BuildContext context) {
     final isSugestao = item.origem == 'sugestao_aceita';
-
-    double? totalItem;
-    if (erro == null && !item.isBlank) {
-      totalItem = valorTotalItem(
-        valorPeca: item.valorPeca ?? 0,
-        quantidade: item.quantidade ?? 1,
-        horasMaoObra: item.horasMaoObra ?? 0,
-        valorHora: valorHora ?? 0,
-      );
-    }
+    final isArquivo = item.origem == 'arquivo';
+    final totalItem = total;
 
     return Container(
       padding: const EdgeInsets.all(14),
@@ -1167,14 +1257,26 @@ class _OrcamentoItemCard extends StatelessWidget {
                   ),
                   visualDensity: VisualDensity.compact,
                 ),
+              if (onRecolher != null)
+                IconButton(
+                  onPressed: onRecolher,
+                  tooltip: 'Recolher',
+                  icon: const Icon(
+                    Icons.expand_less_rounded,
+                    color: Color(0xFF0057C0),
+                    size: 22,
+                  ),
+                  visualDensity: VisualDensity.compact,
+                ),
             ],
           ),
-          if (isSugestao || item.precoDeReferencia) ...[
+          if (isSugestao || isArquivo || item.precoDeReferencia) ...[
             const SizedBox(height: 4),
             Wrap(
               spacing: 6,
               children: [
                 if (isSugestao) const _Tag('Sugerida pela IA'),
+                if (isArquivo) const _Tag('Lida do orçamento'),
                 if (item.precoDeReferencia) const _Tag('Preço de referência'),
               ],
             ),
@@ -1248,33 +1350,65 @@ class _OrcamentoItemCard extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              Expanded(
-                child: _NumberField(
-                  label: 'Horas',
-                  controller: item.horasController,
-                  onChanged: onChanged,
-                  allowDecimal: true,
-                ),
+              _ChoiceChip(
+                label: 'Em horas',
+                selected: !item.maoObraEmValor,
+                compact: true,
+                onTap: () {
+                  item.maoObraEmValor = false;
+                  onChanged();
+                },
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  valorHora != null
-                      ? '× ${formatCurrencyBRL(valorHora!)}/h'
-                      : 'Valor da hora não configurado',
-                  style: TextStyle(
-                    color: valorHora != null
-                        ? const Color(0xFF6B7280)
-                        : const Color(0xFFB45309),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
+              const SizedBox(width: 6),
+              _ChoiceChip(
+                label: 'Em reais',
+                selected: item.maoObraEmValor,
+                compact: true,
+                onTap: () {
+                  item.maoObraEmValor = true;
+                  onChanged();
+                },
               ),
             ],
           ),
+          const SizedBox(height: 8),
+          if (item.maoObraEmValor)
+            _NumberField(
+              label: 'Valor da mão de obra (R\$)',
+              controller: item.valorMaoObraController,
+              onChanged: onChanged,
+              allowDecimal: true,
+            )
+          else
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: _NumberField(
+                    label: 'Horas',
+                    controller: item.horasController,
+                    onChanged: onChanged,
+                    allowDecimal: true,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    valorHora != null
+                        ? '× ${formatCurrencyBRL(valorHora!)}/h'
+                        : 'Valor da hora não configurado',
+                    style: TextStyle(
+                      color: valorHora != null
+                          ? const Color(0xFF6B7280)
+                          : const Color(0xFFB45309),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           if (erro != null) ...[
             const SizedBox(height: 10),
             Text(
@@ -1513,6 +1647,107 @@ class _ImportarOrcamentoButton extends StatelessWidget {
                 ),
               ),
               Icon(Icons.chevron_right, color: Color(0xFF0057C0)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Item na lista compacta: uma linha com peça, valores e total. O toque abre
+/// o card completo desse item para editar.
+class _OrcamentoItemLinha extends StatelessWidget {
+  final _EditableItem item;
+  final double maoObra;
+  final double? total;
+  final String? erro;
+  final VoidCallback onTap;
+
+  const _OrcamentoItemLinha({
+    required this.item,
+    required this.maoObra,
+    required this.total,
+    required this.erro,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final nome = item.pecaController.text.trim();
+    final quantidade = item.quantidade ?? 1;
+    final valorPeca = item.valorPeca ?? 0;
+
+    final detalhes = <String>[
+      if (valorPeca > 0)
+        quantidade > 1
+            ? '$quantidade × ${formatCurrencyBRL(valorPeca)}'
+            : formatCurrencyBRL(valorPeca),
+      if (maoObra > 0) 'MO ${formatCurrencyBRL(maoObra)}',
+    ];
+
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: erro != null ? Colors.redAccent : const Color(0xFFE5F6FF),
+            ),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      nome.isEmpty ? 'Nova peça' : nome,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 14,
+                        color: nome.isEmpty
+                            ? const Color(0xFF9CA3AF)
+                            : const Color(0xFF1F2937),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      erro ?? (detalhes.isEmpty ? 'Sem valores' : detalhes.join(' · ')),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: erro != null
+                            ? Colors.redAccent
+                            : const Color(0xFF6B7280),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              if (total != null)
+                Text(
+                  formatCurrencyBRL(total!),
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 13,
+                    color: Color(0xFF1F2937),
+                  ),
+                )
+              else if (erro != null)
+                const Icon(Icons.error_outline, color: Colors.redAccent, size: 20),
+              const SizedBox(width: 4),
+              const Icon(Icons.chevron_right, color: Color(0xFF9CA3AF), size: 20),
             ],
           ),
         ),

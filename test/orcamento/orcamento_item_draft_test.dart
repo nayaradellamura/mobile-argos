@@ -138,5 +138,36 @@ void main() {
 
       expect(somarItensOrcamento(itens), closeTo(somaDosTotais, 1e-9));
     });
+      test('mão de obra em reais vira 1 h ao valor informado e volta igual', () {
+      final original = OrcamentoItemDraft(
+        peca: 'Pintura',
+        valorPeca: 0,
+        tipoServico: 'pintura',
+        maoObraEmValor: true,
+        valorMaoObra: 700,
+        origem: 'arquivo',
+      );
+
+      // O valor da hora da oficina é ignorado para esse item.
+      final map = original.toMap(valorHora: 90);
+
+      expect(map['horasMaoObra'], 1);
+      expect(map['valorHora'], 700);
+      expect(map['valorMaoObra'], 700);
+      expect(map['valorTotal'], 700);
+      expect(map['maoObraEmValor'], isTrue);
+      expect(somarItensOrcamento([map]), 700);
+
+      final copia = OrcamentoItemDraft.fromMap(map);
+      expect(copia.maoObraEmValor, isTrue);
+      expect(copia.valorMaoObra, 700);
+      expect(copia.horasMaoObra, 0);
+    });
+
+    test('item em horas não grava a marca de mão de obra em reais', () {
+      final map = OrcamentoItemDraft(peca: 'X', horasMaoObra: 2).toMap(valorHora: 50);
+      expect(map.containsKey('maoObraEmValor'), isFalse);
+      expect(map['valorMaoObra'], 100);
+    });
   });
 }
