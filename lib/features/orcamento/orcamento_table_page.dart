@@ -1,4 +1,7 @@
+import 'dart:typed_data';
+
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -10,6 +13,25 @@ import '../../services/valores_hora_service.dart';
 import 'orcamento_calculo.dart';
 
 int _idCounter = 0;
+
+enum _OrigemImportacao { camera, galeria, arquivo }
+
+const _extensoesArquivo = ['pdf', 'xlsx', 'csv', 'jpg', 'jpeg', 'png'];
+
+String _mimeDaExtensao(String? extensao) {
+  switch ((extensao ?? '').toLowerCase()) {
+    case 'pdf':
+      return 'application/pdf';
+    case 'xlsx':
+      return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    case 'csv':
+      return 'text/csv';
+    case 'png':
+      return 'image/png';
+    default:
+      return 'image/jpeg';
+  }
+}
 
 String _newItemId() =>
     'orc_${DateTime.now().microsecondsSinceEpoch}_${_idCounter++}';
@@ -243,10 +265,10 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
 
   bool get _podeImportar => (widget.vistoriaDocId ?? '').trim().isNotEmpty;
 
-  /// Atalho opcional: lê um orçamento pronto (foto ou print) com o Gemini e
-  /// preenche a tabela. O mecânico confere e corrige antes de salvar.
+  /// Atalho opcional: lê um orçamento pronto (foto, PDF, planilha ou CSV)
+  /// com o Gemini e preenche a tabela. O mecânico confere antes de salvar.
   Future<void> _importarOrcamento() async {
-    final source = await showModalBottomSheet<ImageSource>(
+    final origem = await showModalBottomSheet<_OrigemImportacao>(
       context: context,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
@@ -268,15 +290,20 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
                 leading: const Icon(Icons.photo_camera_outlined),
                 title: const Text('Tirar foto do orçamento'),
                 onTap: () =>
-                    Navigator.of(sheetContext).pop(ImageSource.camera),
+                    Navigator.of(sheetContext).pop(_OrigemImportacao.camera),
               ),
               ListTile(
                 leading: const Icon(Icons.photo_library_outlined),
                 title: const Text('Escolher imagem ou print'),
-                subtitle:
-                    const Text('Foto do papel, print do PDF ou da planilha'),
                 onTap: () =>
-                    Navigator.of(sheetContext).pop(ImageSource.gallery),
+                    Navigator.of(sheetContext).pop(_OrigemImportacao.galeria),
+              ),
+              ListTile(
+                leading: const Icon(Icons.description_outlined),
+                title: const Text('Escolher arquivo'),
+                subtitle: const Text('PDF, planilha (.xlsx) ou CSV'),
+                onTap: () =>
+                    Navigator.of(sheetContext).pop(_OrigemImportacao.arquivo),
               ),
             ],
           ),
@@ -284,25 +311,46 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
       ),
     );
 
-    if (source == null || !mounted) return;
+    if (origem == null || !mounted) return;
 
-    final XFile? arquivo;
+    final Uint8List bytes;
+    final String nomeArquivo;
+    final String mimeType;
     try {
-      arquivo = await ImagePicker().pickImage(
-        source: source,
-        imageQuality: 85,
-        maxWidth: 2400,
-      );
+      if (origem == _OrigemImportacao.arquivo) {
+        final arquivo = await FilePicker.pickFile(
+          type: FileType.custom,
+          allowedExtensions: _extensoesArquivo,
+        );
+        if (arquivo == null) return;
+        bytes = await arquivo.readAsBytes();
+        nomeArquivo = arquivo.name;
+        mimeType = _mimeDaExtensao(arquivo.extension);
+      } else {
+        final foto = await ImagePicker().pickImage(
+          source: origem == _OrigemImportacao.camera
+              ? ImageSource.camera
+              : ImageSource.gallery,
+          imageQuality: 85,
+          maxWidth: 2400,
+        );
+        if (foto == null) return;
+        bytes = await foto.readAsBytes();
+        nomeArquivo = foto.name.isEmpty ? 'orcamento.jpg' : foto.name;
+        mimeType = foto.mimeType ?? 'image/jpeg';
+      }
     } catch (e) {
-      debugPrint('Erro ao escolher imagem do orçamento: $e');
-      _mostrarAviso('Não foi possível abrir a câmera ou a galeria.');
+      debugPrint('Erro ao escolher o arquivo do orçamento: $e');
+      _mostrarAviso('Não foi possível abrir o arquivo.');
       return;
     }
 
-    if (arquivo == null || !mounted) return;
-
-    final bytes = await arquivo.readAsBytes();
     if (!mounted) return;
+
+    if (bytes.length > 15 * 1024 * 1024) {
+      _mostrarAviso('Arquivo grande demais (máximo 15 MB).');
+      return;
+    }
 
     showDialog<void>(
       context: context,
@@ -331,8 +379,8 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
       resultado = await OrcamentoArquivoService.instance.importar(
         vistoriaDocId: widget.vistoriaDocId!.trim(),
         bytes: bytes,
-        nomeArquivo: arquivo.name.isEmpty ? 'orcamento.jpg' : arquivo.name,
-        mimeType: arquivo.mimeType ?? 'image/jpeg',
+        nomeArquivo: nomeArquivo,
+        mimeType: mimeType,
       );
     } on FirebaseFunctionsException catch (e) {
       debugPrint('Erro ao importar orçamento: ${e.code} ${e.message}');
@@ -1457,8 +1505,8 @@ class _ImportarOrcamentoButton extends StatelessWidget {
                     ),
                     SizedBox(height: 2),
                     Text(
-                      'Opcional: foto ou print do orçamento da oficina. '
-                      'A IA preenche a tabela para você conferir.',
+                      'Opcional: foto, PDF, planilha ou CSV do orçamento da '
+                      'oficina. A IA preenche a tabela para você conferir.',
                       style: TextStyle(color: Color(0xFF475569), fontSize: 12),
                     ),
                   ],

@@ -2,7 +2,7 @@ name: argos_app
 description: "Argos — vistoria digital de sinistros automotivos com assistente de IA para oficinas credenciadas."
 publish_to: 'none'
 
-version: 1.0.1+5
+version: 1.0.2+6
 
 environment:
   sdk: ^3.11.3
@@ -37,6 +37,7 @@ dependencies:
   shorebird_code_push: ^2.0.6
   syncfusion_flutter_pdfviewer: ^34.2.9
   share_plus: ^13.3.0
+  file_picker: ^13.1.0
 
 dev_dependencies:
   flutter_test:
