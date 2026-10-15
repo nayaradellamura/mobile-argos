@@ -37,7 +37,14 @@
         {
           "rubric_id": "mensagem_curta",
           "rubric_content": {
-            "text_property": "A resposta tem no máximo 3 frases curtas."
+            "text_property": "A resposta tem no máximo 3 frases curtas, sem contar as linhas da lista de itens do orçamento."
+          },
+          "type": "FINAL_RESPONSE_QUALITY"
+        },
+        {
+          "rubric_id": "sem_detalhe_interno",
+          "rubric_content": {
+            "text_property": "A resposta não contém JSON, código, nomes de ferramentas, nomes de agentes nem ids internos."
           },
           "type": "FINAL_RESPONSE_QUALITY"
         }

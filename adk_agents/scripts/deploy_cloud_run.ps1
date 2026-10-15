@@ -62,6 +62,11 @@ if (-not $SessionServiceUri) {
     Write-Warning "Sem -SessionServiceUri: sessoes do agente ficam em memoria."
 }
 
+# Revisao que estava no ar antes deste deploy, para o comando de rollback.
+$revisaoAnterior = gcloud run services describe $ServiceName `
+    --project $Project --region $Region `
+    --format "value(status.traffic[0].revisionName)" 2>$null
+
 Write-Host "Deploy de $ServiceName ($Region) com modelo $Model..."
 
 # --no-allow-unauthenticated: so a Cloud Function (com identidade propria)
@@ -78,5 +83,9 @@ gcloud run deploy $ServiceName `
 
 if ($LASTEXITCODE -ne 0) { throw "gcloud run deploy falhou (codigo $LASTEXITCODE)." }
 
-Write-Host "Deploy concluido. Para voltar a revisao anterior:"
-Write-Host "  gcloud run services update-traffic $ServiceName --project $Project --region $Region --to-revisions argos-adk-00007-nrz=100"
+if ($revisaoAnterior) {
+    Write-Host "Deploy concluido. Para voltar a revisao anterior:"
+    Write-Host "  gcloud run services update-traffic $ServiceName --project $Project --region $Region --to-revisions $revisaoAnterior=100"
+} else {
+    Write-Host "Deploy concluido. Revisoes anteriores: gcloud run revisions list --service $ServiceName --project $Project --region $Region"
+}

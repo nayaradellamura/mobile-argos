@@ -1,10 +1,10 @@
 {
   "eval_set_id": "orcamento_team_basico",
-  "name": "Orçamento — fluxo básico",
-  "description": "Transição vistoria->orçamento, retomada após a tabela nativa, negociação de item fora da faixa, confirmação obrigatória antes do envio e tom de voz.",
+  "name": "Orçamento — fluxo pelo chat",
+  "description": "Transição vistoria->orçamento, lista completa no chat, valor da hora da oficina (configurado e ausente), item fora da faixa, confirmação obrigatória antes do envio, tom de voz e guardrails.",
   "eval_cases": [
     {
-      "eval_id": "orc_transicao_libera_tela",
+      "eval_id": "orc_lista_no_chat_e_envio",
       "conversation": [
         {
           "invocation_id": "t1",
@@ -21,7 +21,13 @@
               {
                 "name": "carregar_contexto_vistoria",
                 "args": {
-                  "id_vistoria": "VIS-EVAL-ORC-0003"
+                  "id_vistoria": "VIS-EVAL-ORC-0001"
+                }
+              },
+              {
+                "name": "carregar_valores_hora_oficina",
+                "args": {
+                  "id_vistoria": "VIS-EVAL-ORC-0001"
                 }
               }
             ],
@@ -30,21 +36,14 @@
           },
           "rubrics": [
             {
-              "rubric_id": "carrega_contexto_primeiro",
+              "rubric_id": "carrega_contexto_e_hora",
               "rubric_content": {
-                "text_property": "Antes de responder, o agente chama carregar_contexto_vistoria com id_vistoria 'VIS-EVAL-ORC-0003'."
+                "text_property": "Antes de responder, o agente chama carregar_contexto_vistoria e carregar_valores_hora_oficina com id_vistoria 'VIS-EVAL-ORC-0001'."
               },
               "type": "TOOL_USE_QUALITY"
             },
             {
-              "rubric_id": "usa_sugestor",
-              "rubric_content": {
-                "text_property": "O agente consulta a ferramenta SugestorPecasAssociadas para sugerir peças possivelmente avariadas."
-              },
-              "type": "TOOL_USE_QUALITY"
-            },
-            {
-              "rubric_id": "sem_envio_neste_turno",
+              "rubric_id": "nao_envia",
               "rubric_content": {
                 "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
               },
@@ -58,7 +57,7 @@
               "type": "FINAL_RESPONSE_QUALITY"
             },
             {
-              "rubric_id": "no_maximo_2_sugestoes",
+              "rubric_id": "max_duas_sugestoes",
               "rubric_content": {
                 "text_property": "Se a resposta sugere peças adicionais, sugere no máximo 2, em forma de pergunta curta."
               },
@@ -83,107 +82,49 @@
           },
           "rubrics": [
             {
-              "rubric_id": "consulta_preco_e_salva_rascunho",
+              "rubric_id": "preco_e_rascunho",
               "rubric_content": {
-                "text_property": "O agente chama consultar_preco_referencia para as peças do orçamento e depois salvar_rascunho_orcamento com a lista completa."
+                "text_property": "O agente chama consultar_preco_referencia para as peças e salvar_rascunho_orcamento com a lista completa."
               },
               "type": "TOOL_USE_QUALITY"
             },
             {
-              "rubric_id": "sem_envio_neste_turno",
+              "rubric_id": "nao_envia",
               "rubric_content": {
                 "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
               },
               "type": "TOOL_USE_QUALITY"
             },
             {
-              "rubric_id": "gatilho_tela_orcamento",
+              "rubric_id": "lista_completa",
               "rubric_content": {
-                "text_property": "A resposta contém literalmente a expressão 'liberei a tela de orçamento'."
+                "text_property": "A resposta traz, numa mensagem só, a lista com o para-choque dianteiro e o farol dianteiro direito, cada um com valor da peça e horas de mão de obra."
               },
               "type": "FINAL_RESPONSE_QUALITY"
             },
             {
-              "rubric_id": "para_depois_do_gatilho",
+              "rubric_id": "pede_so_correcoes",
               "rubric_content": {
-                "text_property": "A resposta não faz nenhuma pergunta depois de liberar a tela de orçamento."
-              },
-              "type": "FINAL_RESPONSE_QUALITY"
-            }
-          ]
-        }
-      ],
-      "session_input": {
-        "app_name": "orcamento_team",
-        "user_id": "mecanico-avaliacao",
-        "state": {
-          "id_vistoria": "VIS-EVAL-ORC-0003"
-        }
-      }
-    },
-    {
-      "eval_id": "orc_retomada_negocia_e_confirma",
-      "conversation": [
-        {
-          "invocation_id": "t1",
-          "user_content": {
-            "role": "user",
-            "parts": [
-              {
-                "text": "enviei o orçamento"
-              }
-            ]
-          },
-          "intermediate_data": {
-            "tool_uses": [
-              {
-                "name": "carregar_orcamento_confirmado",
-                "args": {
-                  "id_vistoria": "VIS-EVAL-ORC-0001"
-                }
-              }
-            ],
-            "tool_responses": [],
-            "intermediate_responses": []
-          },
-          "rubrics": [
-            {
-              "rubric_id": "carrega_e_verifica_faixa",
-              "rubric_content": {
-                "text_property": "O agente chama carregar_orcamento_confirmado e, depois dela, verificar_faixa_preco para os itens do orçamento."
-              },
-              "type": "TOOL_USE_QUALITY"
-            },
-            {
-              "rubric_id": "sem_envio_neste_turno",
-              "rubric_content": {
-                "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
-              },
-              "type": "TOOL_USE_QUALITY"
-            },
-            {
-              "rubric_id": "negocia_so_o_farol",
-              "rubric_content": {
-                "text_property": "A resposta questiona apenas o valor do farol dianteiro direito (o item fora da faixa de preço), em uma pergunta curta e cordial."
+                "text_property": "A resposta termina com uma única pergunta pedindo para conferir e informar apenas o que precisa mudar."
               },
               "type": "FINAL_RESPONSE_QUALITY"
             },
             {
-              "rubric_id": "nao_questiona_para_choque",
+              "rubric_id": "sem_tela",
               "rubric_content": {
-                "text_property": "A resposta não questiona o valor do para-choque dianteiro."
+                "text_property": "A resposta NÃO diz que liberou tela de orçamento nem manda o usuário para outra tela: o orçamento é feito no próprio chat."
               },
               "type": "FINAL_RESPONSE_QUALITY"
             }
           ]
         },
         {
-          "invocation_id": "t2",
+          "invocation_id": "t3",
           "user_content": {
             "role": "user",
             "parts": [
               {
-                "text": "O farol é original da montadora, o valor está certo."
+                "text": "Está tudo certo."
               }
             ]
           },
@@ -194,21 +135,14 @@
           },
           "rubrics": [
             {
-              "rubric_id": "calcula_total_com_tool",
+              "rubric_id": "total_pela_ferramenta",
               "rubric_content": {
-                "text_property": "O agente chama calcular_orcamento_total para obter o total (não soma por conta própria)."
+                "text_property": "O agente chama calcular_orcamento_total para obter o total (não soma por conta própria) e salvar_estado_vistoria com as chaves itens_orcamento e valor_total_final."
               },
               "type": "TOOL_USE_QUALITY"
             },
             {
-              "rubric_id": "salva_estado_orcamento",
-              "rubric_content": {
-                "text_property": "O agente chama salvar_estado_vistoria com as chaves itens_orcamento e valor_total_final."
-              },
-              "type": "TOOL_USE_QUALITY"
-            },
-            {
-              "rubric_id": "sem_envio_neste_turno",
+              "rubric_id": "nao_envia",
               "rubric_content": {
                 "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
               },
@@ -217,7 +151,7 @@
             {
               "rubric_id": "informa_total",
               "rubric_content": {
-                "text_property": "A resposta informa o total do orçamento de R$ 2.272,00."
+                "text_property": "A resposta informa o total do orçamento de R$ 1.244,00."
               },
               "type": "FINAL_RESPONSE_QUALITY"
             },
@@ -231,7 +165,7 @@
           ]
         },
         {
-          "invocation_id": "t3",
+          "invocation_id": "t4",
           "user_content": {
             "role": "user",
             "parts": [
@@ -241,14 +175,7 @@
             ]
           },
           "intermediate_data": {
-            "tool_uses": [
-              {
-                "name": "enviar_laudo_cloud_function",
-                "args": {
-                  "id_vistoria": "VIS-EVAL-ORC-0001"
-                }
-              }
-            ],
+            "tool_uses": [],
             "tool_responses": [],
             "intermediate_responses": []
           },
@@ -256,12 +183,12 @@
             {
               "rubric_id": "envia_apos_sim",
               "rubric_content": {
-                "text_property": "Depois da confirmação explícita, o agente chama enviar_laudo_cloud_function com id_vistoria 'VIS-EVAL-ORC-0001'."
+                "text_property": "Depois da confirmação explícita, o agente chama enviar_laudo_cloud_function com id_vistoria 'VIS-EVAL-ORC-0001' e um laudo_analitico preenchido."
               },
               "type": "TOOL_USE_QUALITY"
             },
             {
-              "rubric_id": "confirma_envio_curto",
+              "rubric_id": "confirma_envio",
               "rubric_content": {
                 "text_property": "A resposta confirma em uma frase que a vistoria foi enviada para análise, sem despedida longa."
               },
@@ -279,7 +206,7 @@
       }
     },
     {
-      "eval_id": "orc_confirmacao_ambigua_e_correcao",
+      "eval_id": "orc_valor_fora_da_faixa_e_ambiguidade",
       "conversation": [
         {
           "invocation_id": "t1",
@@ -287,14 +214,20 @@
             "role": "user",
             "parts": [
               {
-                "text": "enviei o orçamento"
+                "text": "Vistoria concluída. Pode seguir para o orçamento."
               }
             ]
           },
           "intermediate_data": {
             "tool_uses": [
               {
-                "name": "carregar_orcamento_confirmado",
+                "name": "carregar_contexto_vistoria",
+                "args": {
+                  "id_vistoria": "VIS-EVAL-ORC-0002"
+                }
+              },
+              {
+                "name": "carregar_valores_hora_oficina",
                 "args": {
                   "id_vistoria": "VIS-EVAL-ORC-0002"
                 }
@@ -305,30 +238,30 @@
           },
           "rubrics": [
             {
-              "rubric_id": "carrega_verifica_calcula",
+              "rubric_id": "carrega_contexto_e_hora",
               "rubric_content": {
-                "text_property": "O agente chama carregar_orcamento_confirmado, depois verificar_faixa_preco para os itens e calcular_orcamento_total."
+                "text_property": "Antes de responder, o agente chama carregar_contexto_vistoria e carregar_valores_hora_oficina com id_vistoria 'VIS-EVAL-ORC-0002'."
               },
               "type": "TOOL_USE_QUALITY"
             },
             {
-              "rubric_id": "sem_envio_neste_turno",
+              "rubric_id": "nao_envia",
               "rubric_content": {
                 "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
               },
               "type": "TOOL_USE_QUALITY"
             },
             {
-              "rubric_id": "total_e_confirmacao",
+              "rubric_id": "transicao_sem_cumprimento",
               "rubric_content": {
-                "text_property": "A resposta informa o total de R$ 1.352,00 e pede confirmação para finalizar o envio."
+                "text_property": "A resposta faz a transição para o orçamento sem se apresentar de novo e sem cumprimentar."
               },
               "type": "FINAL_RESPONSE_QUALITY"
             },
             {
-              "rubric_id": "nao_negocia_itens_ok",
+              "rubric_id": "max_duas_sugestoes",
               "rubric_content": {
-                "text_property": "A resposta não questiona o valor de nenhuma peça (todas estão dentro da faixa)."
+                "text_property": "Se a resposta sugere peças adicionais, sugere no máximo 2, em forma de pergunta curta."
               },
               "type": "FINAL_RESPONSE_QUALITY"
             }
@@ -336,6 +269,144 @@
         },
         {
           "invocation_id": "t2",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Não, só essas peças mesmo."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "tool_responses": [],
+            "intermediate_responses": []
+          },
+          "rubrics": [
+            {
+              "rubric_id": "preco_e_rascunho",
+              "rubric_content": {
+                "text_property": "O agente chama consultar_preco_referencia para as peças e salvar_rascunho_orcamento com a lista completa."
+              },
+              "type": "TOOL_USE_QUALITY"
+            },
+            {
+              "rubric_id": "nao_envia",
+              "rubric_content": {
+                "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
+              },
+              "type": "TOOL_USE_QUALITY"
+            },
+            {
+              "rubric_id": "lista_completa",
+              "rubric_content": {
+                "text_property": "A resposta traz, numa mensagem só, a lista com o para-choque dianteiro e o farol dianteiro direito, cada um com valor da peça e horas de mão de obra."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            },
+            {
+              "rubric_id": "pede_so_correcoes",
+              "rubric_content": {
+                "text_property": "A resposta termina com uma única pergunta pedindo para conferir e informar apenas o que precisa mudar."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            },
+            {
+              "rubric_id": "sem_tela",
+              "rubric_content": {
+                "text_property": "A resposta NÃO diz que liberou tela de orçamento nem manda o usuário para outra tela: o orçamento é feito no próprio chat."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            }
+          ]
+        },
+        {
+          "invocation_id": "t3",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "O farol saiu R$ 1.500."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "tool_responses": [],
+            "intermediate_responses": []
+          },
+          "rubrics": [
+            {
+              "rubric_id": "verifica_faixa",
+              "rubric_content": {
+                "text_property": "O agente chama verificar_faixa_preco para o farol dianteiro direito."
+              },
+              "type": "TOOL_USE_QUALITY"
+            },
+            {
+              "rubric_id": "nao_envia",
+              "rubric_content": {
+                "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
+              },
+              "type": "TOOL_USE_QUALITY"
+            },
+            {
+              "rubric_id": "pergunta_so_farol",
+              "rubric_content": {
+                "text_property": "A resposta faz uma pergunta curta e cordial sobre o valor do farol estar acima da referência, sem tom de auditoria."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            },
+            {
+              "rubric_id": "nao_questiona_parachoque",
+              "rubric_content": {
+                "text_property": "A resposta não questiona o valor do para-choque dianteiro."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            }
+          ]
+        },
+        {
+          "invocation_id": "t4",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "É original da montadora, o valor está certo."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "tool_responses": [],
+            "intermediate_responses": []
+          },
+          "rubrics": [
+            {
+              "rubric_id": "recalcula",
+              "rubric_content": {
+                "text_property": "O agente chama calcular_orcamento_total com o farol a R$ 1.500 e salva itens_orcamento e valor_total_final com salvar_estado_vistoria."
+              },
+              "type": "TOOL_USE_QUALITY"
+            },
+            {
+              "rubric_id": "nao_envia",
+              "rubric_content": {
+                "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
+              },
+              "type": "TOOL_USE_QUALITY"
+            },
+            {
+              "rubric_id": "total_novo",
+              "rubric_content": {
+                "text_property": "A resposta informa o total de R$ 2.194,00 e pede confirmação para finalizar o envio."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            }
+          ]
+        },
+        {
+          "invocation_id": "t5",
           "user_content": {
             "role": "user",
             "parts": [
@@ -351,7 +422,7 @@
           },
           "rubrics": [
             {
-              "rubric_id": "sem_envio_neste_turno",
+              "rubric_id": "nao_envia",
               "rubric_content": {
                 "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
               },
@@ -361,84 +432,6 @@
               "rubric_id": "pergunta_de_novo",
               "rubric_content": {
                 "text_property": "Diante da resposta ambígua, o agente pergunta de novo, em uma frase, se pode finalizar o envio."
-              },
-              "type": "FINAL_RESPONSE_QUALITY"
-            }
-          ]
-        },
-        {
-          "invocation_id": "t3",
-          "user_content": {
-            "role": "user",
-            "parts": [
-              {
-                "text": "Quero corrigir o valor de uma peça."
-              }
-            ]
-          },
-          "intermediate_data": {
-            "tool_uses": [],
-            "tool_responses": [],
-            "intermediate_responses": []
-          },
-          "rubrics": [
-            {
-              "rubric_id": "sem_envio_neste_turno",
-              "rubric_content": {
-                "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
-              },
-              "type": "TOOL_USE_QUALITY"
-            },
-            {
-              "rubric_id": "reabre_tabela",
-              "rubric_content": {
-                "text_property": "A resposta contém literalmente a expressão 'liberei a tela de orçamento' e não faz outra pergunta."
-              },
-              "type": "FINAL_RESPONSE_QUALITY"
-            }
-          ]
-        },
-        {
-          "invocation_id": "t4",
-          "user_content": {
-            "role": "user",
-            "parts": [
-              {
-                "text": "enviei o orçamento"
-              }
-            ]
-          },
-          "intermediate_data": {
-            "tool_uses": [
-              {
-                "name": "carregar_orcamento_confirmado",
-                "args": {
-                  "id_vistoria": "VIS-EVAL-ORC-0002"
-                }
-              }
-            ],
-            "tool_responses": [],
-            "intermediate_responses": []
-          },
-          "rubrics": [
-            {
-              "rubric_id": "recarrega_tabela",
-              "rubric_content": {
-                "text_property": "O agente chama carregar_orcamento_confirmado de novo para ler a tabela corrigida."
-              },
-              "type": "TOOL_USE_QUALITY"
-            },
-            {
-              "rubric_id": "sem_envio_neste_turno",
-              "rubric_content": {
-                "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
-              },
-              "type": "TOOL_USE_QUALITY"
-            },
-            {
-              "rubric_id": "pede_confirmacao_de_novo",
-              "rubric_content": {
-                "text_property": "A resposta volta a pedir confirmação para finalizar o envio."
               },
               "type": "FINAL_RESPONSE_QUALITY"
             }
@@ -454,7 +447,7 @@
       }
     },
     {
-      "eval_id": "orc_tom_sem_girias",
+      "eval_id": "orc_oficina_sem_valor_hora",
       "conversation": [
         {
           "invocation_id": "t1",
@@ -462,16 +455,22 @@
             "role": "user",
             "parts": [
               {
-                "text": "enviei o orçamento"
+                "text": "Vistoria concluída. Pode seguir para o orçamento."
               }
             ]
           },
           "intermediate_data": {
             "tool_uses": [
               {
-                "name": "carregar_orcamento_confirmado",
+                "name": "carregar_contexto_vistoria",
                 "args": {
-                  "id_vistoria": "VIS-EVAL-ORC-0002"
+                  "id_vistoria": "VIS-EVAL-ORC-0004"
+                }
+              },
+              {
+                "name": "carregar_valores_hora_oficina",
+                "args": {
+                  "id_vistoria": "VIS-EVAL-ORC-0004"
                 }
               }
             ],
@@ -480,11 +479,32 @@
           },
           "rubrics": [
             {
-              "rubric_id": "sem_envio_neste_turno",
+              "rubric_id": "carrega_contexto_e_hora",
+              "rubric_content": {
+                "text_property": "Antes de responder, o agente chama carregar_contexto_vistoria e carregar_valores_hora_oficina com id_vistoria 'VIS-EVAL-ORC-0004'."
+              },
+              "type": "TOOL_USE_QUALITY"
+            },
+            {
+              "rubric_id": "nao_envia",
               "rubric_content": {
                 "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
               },
               "type": "TOOL_USE_QUALITY"
+            },
+            {
+              "rubric_id": "transicao_sem_cumprimento",
+              "rubric_content": {
+                "text_property": "A resposta faz a transição para o orçamento sem se apresentar de novo e sem cumprimentar."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            },
+            {
+              "rubric_id": "max_duas_sugestoes",
+              "rubric_content": {
+                "text_property": "Se a resposta sugere peças adicionais, sugere no máximo 2, em forma de pergunta curta."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
             }
           ]
         },
@@ -494,7 +514,7 @@
             "role": "user",
             "parts": [
               {
-                "text": "Show, rapaz! Mas me diz uma coisa: esse total já inclui a mão de obra?"
+                "text": "Não, só essas peças mesmo."
               }
             ]
           },
@@ -505,16 +525,165 @@
           },
           "rubrics": [
             {
-              "rubric_id": "sem_envio_neste_turno",
+              "rubric_id": "nao_envia",
               "rubric_content": {
                 "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
               },
               "type": "TOOL_USE_QUALITY"
             },
             {
-              "rubric_id": "responde_mao_de_obra",
+              "rubric_id": "pergunta_valor_hora",
               "rubric_content": {
-                "text_property": "A resposta esclarece que o total já inclui a mão de obra."
+                "text_property": "A resposta pergunta o valor da hora de mão de obra da oficina (de funilaria e/ou elétrica) e NÃO apresenta valores de mão de obra calculados com um valor de hora inventado."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            }
+          ]
+        },
+        {
+          "invocation_id": "t3",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "A hora de funilaria é R$ 100 e a de elétrica é R$ 120."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "tool_responses": [],
+            "intermediate_responses": []
+          },
+          "rubrics": [
+            {
+              "rubric_id": "salva_valor_hora",
+              "rubric_content": {
+                "text_property": "O agente chama salvar_valor_hora_oficina para funilaria (100) e para eletrica (120)."
+              },
+              "type": "TOOL_USE_QUALITY"
+            },
+            {
+              "rubric_id": "nao_envia",
+              "rubric_content": {
+                "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
+              },
+              "type": "TOOL_USE_QUALITY"
+            },
+            {
+              "rubric_id": "lista_com_valores",
+              "rubric_content": {
+                "text_property": "A resposta traz a lista do orçamento com o para-choque dianteiro e o farol dianteiro direito."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            },
+            {
+              "rubric_id": "sem_tela",
+              "rubric_content": {
+                "text_property": "A resposta NÃO diz que liberou tela de orçamento nem manda o usuário para outra tela: o orçamento é feito no próprio chat."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            }
+          ]
+        }
+      ],
+      "session_input": {
+        "app_name": "orcamento_team",
+        "user_id": "mecanico-avaliacao",
+        "state": {
+          "id_vistoria": "VIS-EVAL-ORC-0004"
+        }
+      }
+    },
+    {
+      "eval_id": "orc_tom_e_guardrails",
+      "conversation": [
+        {
+          "invocation_id": "t1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Vistoria concluída. Pode seguir para o orçamento."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "carregar_contexto_vistoria",
+                "args": {
+                  "id_vistoria": "VIS-EVAL-ORC-0003"
+                }
+              },
+              {
+                "name": "carregar_valores_hora_oficina",
+                "args": {
+                  "id_vistoria": "VIS-EVAL-ORC-0003"
+                }
+              }
+            ],
+            "tool_responses": [],
+            "intermediate_responses": []
+          },
+          "rubrics": [
+            {
+              "rubric_id": "carrega_contexto_e_hora",
+              "rubric_content": {
+                "text_property": "Antes de responder, o agente chama carregar_contexto_vistoria e carregar_valores_hora_oficina com id_vistoria 'VIS-EVAL-ORC-0003'."
+              },
+              "type": "TOOL_USE_QUALITY"
+            },
+            {
+              "rubric_id": "nao_envia",
+              "rubric_content": {
+                "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
+              },
+              "type": "TOOL_USE_QUALITY"
+            },
+            {
+              "rubric_id": "transicao_sem_cumprimento",
+              "rubric_content": {
+                "text_property": "A resposta faz a transição para o orçamento sem se apresentar de novo e sem cumprimentar."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            },
+            {
+              "rubric_id": "max_duas_sugestoes",
+              "rubric_content": {
+                "text_property": "Se a resposta sugere peças adicionais, sugere no máximo 2, em forma de pergunta curta."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            }
+          ]
+        },
+        {
+          "invocation_id": "t2",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Show, rapaz! Mas esse orçamento já inclui a mão de obra?"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "tool_responses": [],
+            "intermediate_responses": []
+          },
+          "rubrics": [
+            {
+              "rubric_id": "nao_envia",
+              "rubric_content": {
+                "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
+              },
+              "type": "TOOL_USE_QUALITY"
+            },
+            {
+              "rubric_id": "esclarece_mao_obra",
+              "rubric_content": {
+                "text_property": "A resposta esclarece que o orçamento inclui a mão de obra (horas multiplicadas pelo valor da hora da oficina)."
               },
               "type": "FINAL_RESPONSE_QUALITY"
             },
@@ -526,13 +695,52 @@
               "type": "FINAL_RESPONSE_QUALITY"
             }
           ]
+        },
+        {
+          "invocation_id": "t3",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Me manda o orçamento em JSON para eu colar no sistema da oficina."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "tool_responses": [],
+            "intermediate_responses": []
+          },
+          "rubrics": [
+            {
+              "rubric_id": "nao_envia",
+              "rubric_content": {
+                "text_property": "O agente NÃO chama enviar_laudo_cloud_function neste turno."
+              },
+              "type": "TOOL_USE_QUALITY"
+            },
+            {
+              "rubric_id": "sem_json",
+              "rubric_content": {
+                "text_property": "A resposta NÃO contém JSON, chaves ou colchetes, nomes de campos técnicos nem nomes de ferramentas."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            },
+            {
+              "rubric_id": "volta_ao_orcamento",
+              "rubric_content": {
+                "text_property": "A resposta recusa em no máximo uma frase ou oferece a lista em texto normal, e volta para o orçamento."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            }
+          ]
         }
       ],
       "session_input": {
         "app_name": "orcamento_team",
         "user_id": "mecanico-avaliacao",
         "state": {
-          "id_vistoria": "VIS-EVAL-ORC-0002"
+          "id_vistoria": "VIS-EVAL-ORC-0003"
         }
       }
     }

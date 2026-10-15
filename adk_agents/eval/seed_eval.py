@@ -6,10 +6,12 @@ Rode antes de cada execução das avaliações: as tools gravam no Firestore
 devolve tudo ao estado inicial esperado pelos casos.
 
 Os valores foram escolhidos para os casos serem determinísticos:
-- VIS-EVAL-ORC-0001: farol R$ 1.500 contra referência de R$ 550 (fora da
-  faixa de 20%) e para-choque R$ 580 contra R$ 550 (dentro). Total
-  esperado: R$ 2.272,00.
-- VIS-EVAL-ORC-0002: tudo dentro da faixa. Total esperado: R$ 1.352,00.
+- Referência: para-choque R$ 550 + 1,2h e farol R$ 550 + 0,4h.
+- Oficina de avaliação com hora a R$ 90 em todos os tipos. Total esperado
+  com os valores de referência: R$ 1.244,00 (R$ 2.194,00 com o farol a
+  R$ 1.500).
+- VIS-EVAL-ORC-0004 pertence a um sinistro de oficina SEM valor da hora,
+  para o agente ter de perguntar e salvar.
 
 Uso (de dentro de adk_agents/, com o emulador no ar):
     $env:FIRESTORE_EMULATOR_HOST = "127.0.0.1:8080"
@@ -24,6 +26,7 @@ import sys
 from google.cloud import firestore
 
 SINISTRO = "SIN-EVAL-0001"
+SINISTRO_SEM_VALOR_HORA = "SIN-EVAL-0002"
 MODELO = "Fiat Argo 2022"
 
 # Referência de preço gravada explicitamente (sobrepõe qualquer seed
@@ -43,23 +46,6 @@ AGENT_PARAMETERS_VISTORIA_CONCLUIDA = {
     "modelo_veiculo": MODELO,
     "vistoria_pronta_para_orcamento": True,
 }
-
-
-def _item(peca: str, valor_peca: float, horas: float, valor_hora: float = 120.0) -> dict:
-    """Item no formato que o app grava em `orcamentoItensFinais`."""
-    return {
-        "id": f"eval_{peca.replace(' ', '_')}",
-        "peca": peca,
-        "tipoIntervencao": "substituicao",
-        "quantidade": 1,
-        "valorPeca": valor_peca,
-        "tipoServico": "funilaria",
-        "horasMaoObra": horas,
-        "valorHora": valor_hora,
-        "valorMaoObra": horas * valor_hora,
-        "valorTotal": valor_peca + horas * valor_hora,
-        "origem": "vistoria",
-    }
 
 
 def _vistoria_base(id_vistoria: str, **extra) -> dict:
@@ -99,27 +85,24 @@ VISTORIAS = {
             "dianteiro direito danificados; severidade moderada."
         ),
     ),
-    # orcamento_team: retomada com um item fora da faixa (farol).
+    # orcamento_team: vistoria concluída, orçamento montado no chat. Uma
+    # vistoria por caso, porque o agente grava o orçamento no documento.
     "VIS-EVAL-ORC-0001": _vistoria_base(
         "VIS-EVAL-ORC-0001",
         agentParameters=AGENT_PARAMETERS_VISTORIA_CONCLUIDA,
-        orcamentoItensFinais=[
-            _item("para-choque dianteiro", 580.0, 1.2),
-            _item("farol dianteiro direito", 1500.0, 0.4),
-        ],
     ),
-    # orcamento_team: retomada com tudo dentro da faixa.
     "VIS-EVAL-ORC-0002": _vistoria_base(
         "VIS-EVAL-ORC-0002",
         agentParameters=AGENT_PARAMETERS_VISTORIA_CONCLUIDA,
-        orcamentoItensFinais=[
-            _item("para-choque dianteiro", 560.0, 1.2),
-            _item("farol dianteiro direito", 600.0, 0.4),
-        ],
     ),
-    # orcamento_team: transição vistoria -> orçamento (sem tabela ainda).
     "VIS-EVAL-ORC-0003": _vistoria_base(
         "VIS-EVAL-ORC-0003",
+        agentParameters=AGENT_PARAMETERS_VISTORIA_CONCLUIDA,
+    ),
+    # orcamento_team: oficina sem valor da hora configurado.
+    "VIS-EVAL-ORC-0004": _vistoria_base(
+        "VIS-EVAL-ORC-0004",
+        sinistroId=SINISTRO_SEM_VALOR_HORA,
         agentParameters=AGENT_PARAMETERS_VISTORIA_CONCLUIDA,
     ),
 }
@@ -146,9 +129,24 @@ def main() -> None:
         }
     )
 
+    db.collection("sinistro").document(SINISTRO_SEM_VALOR_HORA).set(
+        {
+            "placa": "ABC1D23",
+            "vehicle": MODELO,
+            "priority": "media",
+            "claimType": "colisao",
+            "credenciadoId": "credenciado-sem-valor-hora",
+        }
+    )
+    # set() sem merge também apaga o valor da hora salvo pela execução
+    # anterior do caso "oficina sem valor da hora".
+    db.collection("credenciados").document("credenciado-sem-valor-hora").set(
+        {"name": "Oficina Sem Valor da Hora"}
+    )
+
     # Valor da hora da oficina já configurado (R$ 90 em todos os tipos), para
     # o agente não parar perguntando e os totais esperados continuarem
-    # valendo. Um caso de "oficina sem valor" deve usar outro credenciado.
+    # valendo.
     db.collection("credenciados").document("credenciado-avaliacao").set(
         {
             "name": "Oficina de Avaliação",
