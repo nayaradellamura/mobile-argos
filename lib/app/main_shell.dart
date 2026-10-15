@@ -227,7 +227,7 @@ class _MainShellState extends State<MainShell> {
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Notificação recebida para o sinistro $sinistroId.'),
+        content: const Text('Nova atualização em uma vistoria. Abrindo...'),
         backgroundColor: const Color(0xFF0057C0),
       ),
     );

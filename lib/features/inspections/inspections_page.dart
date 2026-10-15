@@ -535,18 +535,26 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
                             actionLabel: 'Limpar busca',
                             onAction: _closeSearch,
                           )
-                        : const _StateMessage(
+                        : _StateMessage(
                             icon: Icons.person_search_outlined,
                             title: 'Nenhuma vistoria sua',
                             message:
-                                'Você ainda não tem sinistros atribuídos. Toque em "Oficina" para ver todas as da oficina.',
+                                'Você ainda não tem sinistros atribuídos. Veja as vistorias da oficina para assumir uma.',
+                            actionLabel: 'Ver da oficina',
+                            onAction: () => setState(() => _onlyMine = false),
                           ))
                     : filteredInspections.isEmpty
                         ? _StateMessage(
                             icon: _selectedFilter.icon,
                             title: 'Nenhum item em ${_selectedFilter.label}',
                             message:
-                                'Não há vistorias nessa categoria no momento. Toque em outra categoria para alterar o filtro.',
+                                'Não há vistorias nessa categoria no momento.',
+                            actionLabel: _selectedFilter == InspectionFilter.all
+                                ? null
+                                : 'Ver todas',
+                            onAction: _selectedFilter == InspectionFilter.all
+                                ? null
+                                : () => _changeFilter(InspectionFilter.all),
                           )
                         : ListView.separated(
                             padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
@@ -686,7 +694,7 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
                             'Não foi possível carregar as vistorias atribuídas para esta oficina.',
                         actionLabel: 'Recarregar',
                         onAction: () {
-                          setState(() {});
+                          setState(() => _cachedInspectionStream = null);
                         },
                       ),
                     ),
@@ -1163,7 +1171,7 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                   child: ElevatedButton.icon(
                                     onPressed: _goToRetificacao,
                                     icon: const Icon(Icons.rate_review_outlined),
-                                    label: const Text('Iniciar Retificação'),
+                                    label: const Text('Iniciar retificação'),
                                     style: ElevatedButton.styleFrom(
                                       backgroundColor: Colors.deepOrange,
                                       foregroundColor: Colors.white,
@@ -1211,7 +1219,7 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                               : blockedByOffline
                                                   ? 'Check-in precisa de internet'
                                                   : isHumanAnalysis
-                                                      ? 'Vistoria em analise humana'
+                                                      ? 'Vistoria em análise'
                                                       : isAssignedToAnother
                                                       ? 'Vistoria vinculada a ${inspection.assignedToName}'
                                                       : hasCheckIn &&
@@ -1262,7 +1270,7 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                           : inspection.isPendingOfflineSync
                                               ? 'Aguardando sincronização...'
                                               : isHumanAnalysis
-                                              ? 'Vistoria em analise humana'
+                                              ? 'Vistoria em análise'
                                               : isAssignedToAnother
                                               ? 'Chat bloqueado para outro responsável'
                                               : 'Faça check-in para iniciar o Argos IA',
@@ -1782,7 +1790,7 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _SectionTitle(
-            title: 'Preview da vistoria',
+            title: 'Resumo da vistoria',
             icon: Icons.visibility_outlined,
           ),
           const SizedBox(height: 12),
@@ -4197,7 +4205,7 @@ class _HumanAnalysisNotice extends StatelessWidget {
           SizedBox(width: 8),
           Expanded(
             child: Text(
-              'Em analise humana. Aprovacao ou reprovacao depende da equipe responsavel.',
+              'Em análise. A aprovação depende da equipe da seguradora.',
               style: TextStyle(
                 color: Color(0xFF414755),
                 fontSize: 12,

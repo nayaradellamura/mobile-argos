@@ -621,6 +621,56 @@ class _AiChatPageState extends State<AiChatPage> {
     );
   }
 
+  /// Confirma a troca do envio em massa para o passo a passo, mostrando o
+  /// que já está montado no pacote.
+  Future<bool> _confirmDiscardBulkPackage(VistoriaSession session) async {
+    var fotos = 0;
+    var audios = 0;
+    var outros = 0;
+    for (final item in session.envioEmMassaRascunho.values) {
+      if (item is! Map || item['status'] == 'enviado') continue;
+      switch (item['tipo']?.toString()) {
+        case 'foto':
+          fotos++;
+        case 'audio':
+          audios++;
+        default:
+          outros++;
+      }
+    }
+
+    final partes = [
+      if (fotos > 0) '$fotos foto${fotos > 1 ? 's' : ''}',
+      if (audios > 0) '$audios áudio${audios > 1 ? 's' : ''}',
+      if (outros > 0) '$outros outro${outros > 1 ? 's' : ''} item${outros > 1 ? 'ns' : ''}',
+    ];
+    if (partes.isEmpty) return true;
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Descartar o pacote?'),
+        content: Text(
+          'O pacote em montagem tem ${partes.join(', ')}. Ao mudar para o '
+          'passo a passo, esse conteúdo não será enviado.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Manter o pacote'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: TextButton.styleFrom(foregroundColor: Colors.deepOrange),
+            child: const Text('Descartar e mudar'),
+          ),
+        ],
+      ),
+    );
+
+    return result ?? false;
+  }
+
   Future<ContinueVistoriaAction?> _askVistoriaAction(
     VistoriaSession session,
   ) {
@@ -835,7 +885,7 @@ class _AiChatPageState extends State<AiChatPage> {
                 const SizedBox(height: 20),
                 _VistoriaActionTile(
                   icon: Icons.restart_alt_rounded,
-                  title: 'Começar novo chat',
+                  title: 'Iniciar nova vistoria',
                   subtitle: 'Inicia uma vistoria nova para este veículo.',
                   color: const Color(0xFF0057C0),
                   filled: true,
@@ -976,7 +1026,15 @@ class _AiChatPageState extends State<AiChatPage> {
         if (!mounted) return;
 
         if (!alreadyExpired && openSession.isEmMassa) {
-          final resumeChoice = await _askResumeBulkMode(openSession);
+          var resumeChoice = await _askResumeBulkMode(openSession);
+
+          if (!mounted) return;
+
+          if (resumeChoice == ColetaModo.guiado &&
+              !await _confirmDiscardBulkPackage(openSession)) {
+            if (!mounted) return;
+            resumeChoice = ColetaModo.emMassa;
+          }
 
           if (!mounted) return;
 
@@ -1054,7 +1112,11 @@ class _AiChatPageState extends State<AiChatPage> {
             if (!mounted) return;
 
             if (!confirmed) {
-              await _handleContinueLater(fromDirectSinistro: fromDirectSinistro);
+              setState(() {
+                _loadSessionIntoChat(openSession);
+                isLoadingSession = false;
+              });
+              _scrollToBottom();
               return;
             }
 
@@ -1428,7 +1490,11 @@ class _AiChatPageState extends State<AiChatPage> {
             if (!mounted) return;
 
             if (!confirmed) {
-              await _handleContinueLater(fromDirectSinistro: true);
+              setState(() {
+                _loadSessionIntoChat(openSession);
+                isLoadingSession = false;
+              });
+              _scrollToBottom();
               return;
             }
 
@@ -1635,7 +1701,7 @@ class _AiChatPageState extends State<AiChatPage> {
         ChatMessage(
           type: ChatMessageType.ai,
           text:
-              'Vistoria ${session.idvistoria} iniciada para ${session.placa.isEmpty ? 'veículo sem placa' : session.placa}. Vamos começar.',
+              'Vistoria iniciada para ${session.placa.isEmpty ? 'o veículo sem placa' : 'a placa ${session.placa}'}. Vamos começar.',
           createdAt: DateTime.now(),
         ),
       );
@@ -1848,8 +1914,14 @@ class _AiChatPageState extends State<AiChatPage> {
       return;
     }
 
+    final userMessage = ChatMessage(
+      type: ChatMessageType.user,
+      text: text,
+      createdAt: DateTime.now(),
+    );
+
     setState(() {
-      messages.add(ChatMessage(type: ChatMessageType.user, text: text, createdAt: DateTime.now()));
+      messages.add(userMessage);
 
       messageController.clear();
       hasText = false;
@@ -1857,11 +1929,6 @@ class _AiChatPageState extends State<AiChatPage> {
     });
 
     _scrollToBottom();
-
-    await VistoriaChatSessionService.instance.appendUserMessage(
-      vistoriaDocId: session.docId,
-      text: text,
-    );
 
     try {
       if (isInspectionCompleted) return;
@@ -1872,6 +1939,14 @@ class _AiChatPageState extends State<AiChatPage> {
         isRetificacao: session.isRetificacao,
         ajustesNecessarios: session.ajustesNecessarios,
         contextoVistoriaAnterior: session.contextoVistoriaAnterior,
+      );
+
+      // Grava a mensagem do mecânico só depois que o Argos respondeu: se o
+      // envio falhar, ela volta para o campo de texto em vez de ficar no
+      // histórico sem resposta.
+      await VistoriaChatSessionService.instance.appendUserMessage(
+        vistoriaDocId: session.docId,
+        text: text,
       );
 
       // A tela pode concluir antes da resposta chegar (status mudou pra
@@ -1901,52 +1976,31 @@ class _AiChatPageState extends State<AiChatPage> {
       debugPrint('details: ${e.details}');
 
       if (!mounted) return;
-
-      const errorText = 'O assistente Argos está temporariamente '
-          'indisponível. Tente novamente em instantes.';
-
-      await VistoriaChatSessionService.instance.appendAiMessage(
-        vistoriaDocId: session.docId,
-        text: errorText,
-      );
-
-      setState(() {
-        isAiTyping = false;
-
-        messages.add(
-          const ChatMessage(
-            type: ChatMessageType.ai,
-            text: errorText,
-          ),
-        );
-      });
-
-      _scrollToBottom();
+      _devolverMensagemNaoEnviada(userMessage, text);
     } catch (e) {
       debugPrint('ERRO GERAL CHAT IA: $e');
 
       if (!mounted) return;
-
-      const errorText = 'Erro inesperado ao chamar o assistente.';
-
-      await VistoriaChatSessionService.instance.appendAiMessage(
-        vistoriaDocId: session.docId,
-        text: errorText,
-      );
-
-      setState(() {
-        isAiTyping = false;
-
-        messages.add(
-          const ChatMessage(
-            type: ChatMessageType.ai,
-            text: errorText,
-          ),
-        );
-      });
-
-      _scrollToBottom();
+      _devolverMensagemNaoEnviada(userMessage, text);
     }
+  }
+
+  /// O Argos não respondeu: tira a bolha, devolve o texto para o campo e
+  /// avisa. Nada é gravado no histórico da vistoria.
+  void _devolverMensagemNaoEnviada(ChatMessage userMessage, String text) {
+    setState(() {
+      isAiTyping = false;
+      messages.remove(userMessage);
+      if (messageController.text.trim().isEmpty) {
+        messageController.text = text;
+        hasText = true;
+      }
+    });
+
+    _showSnack(
+      'O Argos não respondeu agora. Sua mensagem voltou para o campo de '
+      'texto; toque em enviar para tentar de novo.',
+    );
   }
 
   Future<void> _openCamera() async {
@@ -3338,7 +3392,7 @@ class _SinistroSelectionViewState extends State<_SinistroSelectionView> {
                       ),
                       child: Text(
                         widget.options.isEmpty
-                            ? 'Nenhum veículo com check-in disponível para iniciar vistoria.'
+                            ? 'Nenhum veículo com check-in. Faça o check-in do sinistro na aba Vistorias para começar.'
                             : 'Nenhum veículo encontrado para essa busca.',
                         textAlign: TextAlign.center,
                         style: const TextStyle(
@@ -3640,8 +3694,8 @@ class _ChatHeader extends StatelessWidget {
     final placa = session?.placa.trim() ?? '';
 
     final subtitle = [
-      if (idvistoria.isNotEmpty) idvistoria,
       if (placa.isNotEmpty) placa,
+      if (idvistoria.isNotEmpty) idvistoria,
     ].join(' • ');
 
     return Container(
@@ -5171,12 +5225,25 @@ class _CameraReleaseButtonState extends State<_CameraReleaseButton>
         );
       },
       child: IconButton(
-        onPressed: widget.unlocked ? widget.onTap : null,
+        onPressed: widget.unlocked
+            ? widget.onTap
+            : () {
+                ScaffoldMessenger.of(context)
+                  ..hideCurrentSnackBar()
+                  ..showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'A câmera libera quando o Argos pedir as fotos.',
+                      ),
+                    ),
+                  );
+              },
         icon: Icon(
           widget.unlocked ? Icons.camera_alt : Icons.camera_alt_outlined,
         ),
-        color: widget.unlocked ? const Color(0xFF0057C0) : null,
-        disabledColor: const Color(0xFFB5C3D6),
+        color: widget.unlocked
+            ? const Color(0xFF0057C0)
+            : const Color(0xFFB5C3D6),
         tooltip: widget.unlocked
             ? 'Anexar fotos'
             : 'A câmera libera quando o assistente pedir as fotos',

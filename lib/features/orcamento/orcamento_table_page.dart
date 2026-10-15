@@ -71,7 +71,9 @@ class OrcamentoItemDraft {
 
   /// Mapa gravado no Firestore, com o valor da hora congelado no item.
   Map<String, dynamic> toMap({required double valorHora}) {
-    final horas = maoObraEmValor ? (valorMaoObra > 0 ? 1.0 : 0.0) : horasMaoObra;
+    final horas = maoObraEmValor
+        ? (valorMaoObra > 0 ? 1.0 : 0.0)
+        : horasMaoObra;
     final hora = maoObraEmValor ? valorMaoObra : valorHora;
 
     return {
@@ -217,8 +219,10 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
           item.valorController.text = formatDecimalInput(referencia.valorPeca);
         }
         if (referencia.horasMaoObra > 0) {
-          item.horasController.text =
-              formatDecimalInput(referencia.horasMaoObra, casas: 1);
+          item.horasController.text = formatDecimalInput(
+            referencia.horasMaoObra,
+            casas: 1,
+          );
         }
         item.precoDeReferencia = true;
       });
@@ -227,10 +231,12 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
 
   Future<void> _configurarValoresHora({bool primeiraVez = false}) async {
     final tiposUsados = _itens
-        .where((item) =>
-            !item.isBlank &&
-            !item.maoObraEmValor &&
-            (item.horasMaoObra ?? 0) > 0)
+        .where(
+          (item) =>
+              !item.isBlank &&
+              !item.maoObraEmValor &&
+              (item.horasMaoObra ?? 0) > 0,
+        )
         .map((item) => item.tipoServico)
         .toSet();
 
@@ -288,14 +294,14 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
               ListTile(
                 leading: const Icon(Icons.photo_camera_outlined),
                 title: const Text('Tirar foto do orçamento'),
-                onTap: () =>
-                    Navigator.of(sheetContext).pop(ImageSource.camera),
+                onTap: () => Navigator.of(sheetContext).pop(ImageSource.camera),
               ),
               ListTile(
                 leading: const Icon(Icons.photo_library_outlined),
                 title: const Text('Escolher imagem ou print'),
-                subtitle:
-                    const Text('Foto do papel, print do PDF ou da planilha'),
+                subtitle: const Text(
+                  'Foto do papel, print do PDF ou da planilha',
+                ),
                 onTap: () =>
                     Navigator.of(sheetContext).pop(ImageSource.gallery),
               ),
@@ -396,13 +402,15 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
       // Fica em horas só quando o documento traz horas e o valor da hora
       // dele é o da oficina (ou não traz valor nenhum). Fora isso, vale o
       // valor em reais do documento, para o total bater com o orçamento.
-      final usaHoras = horas > 0 &&
+      final usaHoras =
+          horas > 0 &&
           item.valorMaoObra == null &&
           (valorHoraDoc == null ||
               (valorHoraOficina != null &&
                   (valorHoraDoc - valorHoraOficina).abs() < 0.01));
 
-      final valorMaoObra = item.valorMaoObra ??
+      final valorMaoObra =
+          item.valorMaoObra ??
           (horas > 0 && valorHoraDoc != null ? horas * valorHoraDoc : 0);
 
       return OrcamentoItemDraft(
@@ -499,12 +507,81 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
 
   void _removeItem(int index) {
     final removed = _itens.removeAt(index);
-    removed.dispose();
     setState(() {});
+
+    final nome = removed.pecaController.text.trim();
+    final messenger = ScaffoldMessenger.of(context)..hideCurrentSnackBar();
+    var desfeito = false;
+
+    messenger
+        .showSnackBar(
+          SnackBar(
+            content: Text(
+              nome.isEmpty ? 'Item excluído.' : '"$nome" excluído.',
+            ),
+            action: SnackBarAction(
+              label: 'Desfazer',
+              onPressed: () {
+                if (!mounted) return;
+                desfeito = true;
+                setState(() {
+                  _itens.insert(index.clamp(0, _itens.length), removed);
+                });
+              },
+            ),
+          ),
+        )
+        .closed
+        .then((_) {
+          if (!desfeito) removed.dispose();
+        });
   }
 
-  void _closePage() {
-    Navigator.of(context).pop<List<Map<String, dynamic>>?>(null);
+  /// Fecha a tela; se já houver itens, confirma antes de descartar.
+  Future<void> _closePage() async {
+    if (await _confirmarDescarte() && mounted) {
+      Navigator.of(context).pop<List<Map<String, dynamic>>?>(null);
+    }
+  }
+
+  Future<bool> _confirmarDescarte() async {
+    final quantidade = _itensPreenchidos.length;
+    if (quantidade == 0) return true;
+
+    final descartar = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Sair sem salvar?'),
+        content: Text(
+          quantidade == 1
+              ? 'O item da tabela não será salvo.'
+              : 'Os $quantidade itens da tabela não serão salvos.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Continuar editando'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
+            child: const Text('Sair sem salvar'),
+          ),
+        ],
+      ),
+    );
+
+    return descartar ?? false;
+  }
+
+  /// Na lista compacta, abre o primeiro item com erro.
+  void _abrirPrimeiroErro() {
+    for (final item in _itens) {
+      if (_erroDoItem(item) != null) {
+        setState(() => _expandidoId = item.id);
+        return;
+      }
+    }
   }
 
   List<_EditableItem> get _itensPreenchidos =>
@@ -515,7 +592,7 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
     return item.erroValidacao ??
         (_semValorHora(item)
             ? 'Configure o valor da hora de '
-                '${tipoServicoLabel(item.tipoServico).toLowerCase()}.'
+                  '${tipoServicoLabel(item.tipoServico).toLowerCase()}.'
             : null);
   }
 
@@ -532,7 +609,8 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
 
   double? _totalDoItem(_EditableItem item) {
     if (item.isBlank || _erroDoItem(item) != null) return null;
-    return (item.valorPeca ?? 0) * (item.quantidade ?? 1) + _maoObraDoItem(item);
+    return (item.valorPeca ?? 0) * (item.quantidade ?? 1) +
+        _maoObraDoItem(item);
   }
 
   void _submit() {
@@ -569,132 +647,145 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
 
     final String submitText;
     if (canSubmit) {
-      submitText = '${widget.submitLabel} (${preenchidos.length} '
+      submitText =
+          '${widget.submitLabel} (${preenchidos.length} '
           'ite${preenchidos.length > 1 ? 'ns' : 'm'})';
     } else if (preenchidos.isEmpty) {
       submitText = 'Adicione pelo menos 1 peça';
     } else if (_carregandoValoresHora) {
       submitText = 'Carregando valores da oficina...';
     } else {
-      submitText = 'Corrija os itens destacados';
+      submitText = comErro == 1 ? 'Corrija 1 item' : 'Corrija $comErro itens';
     }
 
-    return Scaffold(
-      backgroundColor: const Color(0xFFF3FBFF),
-      body: SafeArea(
-        child: Column(
-          children: [
-            _OrcamentoHeader(
-              itemCount: preenchidos.length,
-              compacto: _compacto,
-              onClose: _closePage,
-              onConfigurarValorHora: _configurarValoresHora,
-              onAlternarVisualizacao: () => setState(() {
-                _compacto = !_compacto;
-                _expandidoId = null;
-              }),
-            ),
-            if (faltaValorHora)
-              _ValorHoraBanner(onTap: _configurarValoresHora),
-            Expanded(
-              child: ListView.separated(
-                padding: const EdgeInsets.fromLTRB(18, 18, 18, 100),
-                itemCount: _itens.length + 1 + (_podeImportar ? 1 : 0),
-                separatorBuilder: (_, __) => const SizedBox(height: 12),
-                itemBuilder: (context, rawIndex) {
-                  if (_podeImportar && rawIndex == 0) {
-                    return _ImportarOrcamentoButton(onTap: _importarOrcamento);
-                  }
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _closePage();
+      },
+      child: Scaffold(
+        backgroundColor: const Color(0xFFF3FBFF),
+        body: SafeArea(
+          child: Column(
+            children: [
+              _OrcamentoHeader(
+                itemCount: preenchidos.length,
+                compacto: _compacto,
+                onClose: _closePage,
+                onConfigurarValorHora: _configurarValoresHora,
+                onAlternarVisualizacao: () => setState(() {
+                  _compacto = !_compacto;
+                  _expandidoId = null;
+                }),
+              ),
+              if (faltaValorHora)
+                _ValorHoraBanner(onTap: _configurarValoresHora),
+              Expanded(
+                child: ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(18, 18, 18, 100),
+                  itemCount: _itens.length + 1 + (_podeImportar ? 1 : 0),
+                  separatorBuilder: (_, __) => const SizedBox(height: 12),
+                  itemBuilder: (context, rawIndex) {
+                    if (_podeImportar && rawIndex == 0) {
+                      return _ImportarOrcamentoButton(
+                        onTap: _importarOrcamento,
+                      );
+                    }
 
-                  final index = rawIndex - (_podeImportar ? 1 : 0);
+                    final index = rawIndex - (_podeImportar ? 1 : 0);
 
-                  if (index == _itens.length) {
-                    return _AddItemButton(onTap: _addBlankItem);
-                  }
+                    if (index == _itens.length) {
+                      return _AddItemButton(onTap: _addBlankItem);
+                    }
 
-                  final item = _itens[index];
+                    final item = _itens[index];
 
-                  if (_compacto && item.id != _expandidoId) {
-                    return _OrcamentoItemLinha(
+                    if (_compacto && item.id != _expandidoId) {
+                      return _OrcamentoItemLinha(
+                        item: item,
+                        maoObra: _maoObraDoItem(item),
+                        total: _totalDoItem(item),
+                        erro: _erroDoItem(item),
+                        onTap: () => setState(() => _expandidoId = item.id),
+                      );
+                    }
+
+                    return _OrcamentoItemCard(
                       item: item,
-                      maoObra: _maoObraDoItem(item),
+                      valorHora: _valoresHora[item.tipoServico],
                       total: _totalDoItem(item),
                       erro: _erroDoItem(item),
-                      onTap: () => setState(() => _expandidoId = item.id),
+                      onChanged: () => setState(() {}),
+                      onRecolher: _compacto
+                          ? () => setState(() => _expandidoId = null)
+                          : null,
+                      onRemove: _itens.length > 1
+                          ? () => _removeItem(index)
+                          : null,
                     );
-                  }
-
-                  return _OrcamentoItemCard(
-                    item: item,
-                    valorHora: _valoresHora[item.tipoServico],
-                    total: _totalDoItem(item),
-                    erro: _erroDoItem(item),
-                    onChanged: () => setState(() {}),
-                    onRecolher: _compacto
-                        ? () => setState(() => _expandidoId = null)
-                        : null,
-                    onRemove: _itens.length > 1
-                        ? () => _removeItem(index)
-                        : null,
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
-      bottomNavigationBar: SafeArea(
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(18, 12, 18, 16),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(.06),
-                blurRadius: 18,
-                offset: const Offset(0, -6),
-              ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _TotalRow(label: 'Peças', value: formatCurrencyBRL(totalPecas)),
-              const SizedBox(height: 2),
-              _TotalRow(
-                label: totalHoras > 0
-                    ? 'Mão de obra (${formatHoras(totalHoras)})'
-                    : 'Mão de obra',
-                value: formatCurrencyBRL(totalMaoObra),
-              ),
-              const SizedBox(height: 4),
-              _TotalRow(
-                label: 'Total',
-                value: formatCurrencyBRL(totalPecas + totalMaoObra),
-                destaque: true,
-              ),
-              const SizedBox(height: 10),
-              SizedBox(
-                width: double.infinity,
-                height: 54,
-                child: ElevatedButton.icon(
-                  onPressed: canSubmit ? _submit : null,
-                  icon: Icon(
-                    canSubmit ? Icons.check_circle : Icons.lock_outline,
-                  ),
-                  label: Text(submitText),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF0057C0),
-                    foregroundColor: Colors.white,
-                    disabledBackgroundColor: const Color(0xFFE5F6FF),
-                    disabledForegroundColor: const Color(0xFF94A3B8),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(18),
-                    ),
-                  ),
+                  },
                 ),
               ),
             ],
+          ),
+        ),
+        bottomNavigationBar: SafeArea(
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(18, 12, 18, 16),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(.06),
+                  blurRadius: 18,
+                  offset: const Offset(0, -6),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _TotalRow(label: 'Peças', value: formatCurrencyBRL(totalPecas)),
+                const SizedBox(height: 2),
+                _TotalRow(
+                  label: totalHoras > 0
+                      ? 'Mão de obra (${formatHoras(totalHoras)})'
+                      : 'Mão de obra',
+                  value: formatCurrencyBRL(totalMaoObra),
+                ),
+                const SizedBox(height: 4),
+                _TotalRow(
+                  label: 'Total',
+                  value: formatCurrencyBRL(totalPecas + totalMaoObra),
+                  destaque: true,
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  height: 54,
+                  child: ElevatedButton.icon(
+                    onPressed: canSubmit
+                        ? _submit
+                        : (comErro > 0 && _compacto
+                              ? _abrirPrimeiroErro
+                              : null),
+                    icon: Icon(
+                      canSubmit ? Icons.check_circle : Icons.lock_outline,
+                    ),
+                    label: Text(submitText),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0057C0),
+                      foregroundColor: Colors.white,
+                      disabledBackgroundColor: const Color(0xFFE5F6FF),
+                      disabledForegroundColor: const Color(0xFF94A3B8),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -899,10 +990,13 @@ class _OrcamentoHeader extends StatelessWidget {
             child: InkWell(
               onTap: onClose,
               borderRadius: BorderRadius.circular(16),
-              child: const SizedBox(
-                width: 44,
-                height: 44,
-                child: Icon(Icons.close, color: Color(0xFF0057C0)),
+              child: const Tooltip(
+                message: 'Fechar',
+                child: SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: Icon(Icons.close, color: Color(0xFF0057C0)),
+                ),
               ),
             ),
           ),
@@ -1043,8 +1137,10 @@ class _ValoresHoraDialogState extends State<_ValoresHoraDialog> {
       final value = parseValorDecimal(entry.value.text);
 
       if (value == null) {
-        setState(() => _erro =
-            'Valor inválido em ${tipoServicoLabel(entry.key).toLowerCase()}.');
+        setState(
+          () => _erro =
+              'Valor inválido em ${tipoServicoLabel(entry.key).toLowerCase()}.',
+        );
         return;
       }
 
@@ -1052,7 +1148,9 @@ class _ValoresHoraDialogState extends State<_ValoresHoraDialog> {
     }
 
     if (valores.isEmpty) {
-      setState(() => _erro = 'Informe o valor de pelo menos um tipo de serviço.');
+      setState(
+        () => _erro = 'Informe o valor de pelo menos um tipo de serviço.',
+      );
       return;
     }
 
@@ -1082,24 +1180,26 @@ class _ValoresHoraDialogState extends State<_ValoresHoraDialog> {
             Text(
               widget.primeiraVez
                   ? 'Antes de montar o orçamento, informe quanto a oficina '
-                      'cobra por hora em cada tipo de serviço. Os valores '
-                      'ficam salvos para os próximos orçamentos.'
+                        'cobra por hora em cada tipo de serviço. Os valores '
+                        'ficam salvos para os próximos orçamentos.'
                   : 'Os valores ficam salvos para os próximos orçamentos. '
-                      'Orçamentos já enviados não mudam.',
+                        'Orçamentos já enviados não mudam.',
               style: const TextStyle(color: Color(0xFF6B7280), fontSize: 12),
             ),
             const SizedBox(height: 12),
             for (final entry in kTiposServico.entries) ...[
               TextField(
                 controller: _controllers[entry.key],
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
                 inputFormatters: [
                   FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
                 ],
                 decoration: InputDecoration(
                   labelText: '${entry.value} (R\$/hora)',
-                  helperText: widget.tiposDestacados.contains(entry.key) &&
+                  helperText:
+                      widget.tiposDestacados.contains(entry.key) &&
                           !widget.valoresAtuais.containsKey(entry.key)
                       ? 'Usado neste orçamento'
                       : null,
@@ -1202,6 +1302,7 @@ class _OrcamentoItemCard extends StatelessWidget {
               if (onRemove != null)
                 IconButton(
                   onPressed: onRemove,
+                  tooltip: 'Excluir item',
                   icon: const Icon(
                     Icons.delete_outline,
                     color: Colors.redAccent,
@@ -1531,9 +1632,7 @@ class _AddItemButton extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: 16),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(20),
-            border: Border.all(
-              color: const Color(0xFF0057C0).withOpacity(.35),
-            ),
+            border: Border.all(color: const Color(0xFF0057C0).withOpacity(.35)),
           ),
           alignment: Alignment.center,
           child: const Row(
@@ -1672,7 +1771,10 @@ class _OrcamentoItemLinha extends StatelessWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      erro ?? (detalhes.isEmpty ? 'Sem valores' : detalhes.join(' · ')),
+                      erro ??
+                          (detalhes.isEmpty
+                              ? 'Sem valores'
+                              : detalhes.join(' · ')),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
@@ -1697,9 +1799,17 @@ class _OrcamentoItemLinha extends StatelessWidget {
                   ),
                 )
               else if (erro != null)
-                const Icon(Icons.error_outline, color: Colors.redAccent, size: 20),
+                const Icon(
+                  Icons.error_outline,
+                  color: Colors.redAccent,
+                  size: 20,
+                ),
               const SizedBox(width: 4),
-              const Icon(Icons.chevron_right, color: Color(0xFF9CA3AF), size: 20),
+              const Icon(
+                Icons.chevron_right,
+                color: Color(0xFF9CA3AF),
+                size: 20,
+              ),
             ],
           ),
         ),
