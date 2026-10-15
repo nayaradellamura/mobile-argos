@@ -2691,3 +2691,132 @@ exports.dailyDigest = onSchedule(
     await sendTelegramMessage(lines.join("\n"));
   }
 );
+
+// ── Orçamento pronto por arquivo ───────────────────────────────────────────
+//
+// Botão "Importar orçamento" da tabela de orçamento do app: o mecânico manda
+// foto, print, PDF, planilha (xlsx) ou CSV do orçamento que já tem, o app
+// sobe em `vistorias/{id}/orcamento/` e chama esta função. Os itens voltam
+// para a tabela para conferência — esta função não grava orçamento nenhum,
+// só registra o que foi lido (auditoria) em `orcamentoImportado`.
+const orcamentoArquivo = require("./orcamento_arquivo");
+
+exports.extrairOrcamentoArquivo = onCall(
+  {
+    region: "us-central1",
+    timeoutSeconds: 120,
+    memory: "1GiB",
+  },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Usuário precisa estar autenticado.");
+    }
+
+    const data = request.data || {};
+    const idvistoria = str(data.idvistoria);
+    const storagePath = str(data.storagePath);
+    const mimeType = str(data.mimeType);
+    const nomeArquivo = str(data.nomeArquivo);
+
+    const prefixo = `vistorias/${idvistoria}/orcamento/`;
+    if (
+      !idvistoria ||
+      idvistoria.includes("/") ||
+      !storagePath.startsWith(prefixo) ||
+      storagePath.includes("..") ||
+      storagePath.length === prefixo.length
+    ) {
+      throw new HttpsError("invalid-argument", "Arquivo inválido para esta vistoria.");
+    }
+
+    const tipo = orcamentoArquivo.tipoDoArquivo(mimeType, nomeArquivo || storagePath);
+    if (tipo === "xls") {
+      throw new HttpsError(
+        "invalid-argument",
+        "Planilha no formato antigo (.xls). Salve como .xlsx ou .csv e envie de novo."
+      );
+    }
+    if (!tipo) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Formato não suportado. Envie foto, PDF, planilha (.xlsx) ou CSV."
+      );
+    }
+
+    const db = admin.firestore();
+    const vistoriaRef = db.collection("vistorias").doc(idvistoria);
+    const vistoriaSnap = await vistoriaRef.get();
+    if (!vistoriaSnap.exists) {
+      throw new HttpsError("not-found", "Vistoria não encontrada.");
+    }
+
+    const vistoria = vistoriaSnap.data() || {};
+    const sinistroId = str(vistoria.sinistroId);
+    const sinistroSnap = sinistroId
+      ? await db.collection("sinistro").doc(sinistroId).get()
+      : null;
+
+    await assertCanAccessVistoria({
+      uid: request.auth.uid,
+      email: request.auth.token?.email,
+      vistoria,
+      sinistro: sinistroSnap?.exists ? sinistroSnap.data() || {} : {},
+      logContext: { callable: "extrairOrcamentoArquivo", idvistoria },
+    });
+
+    // Bucket fixo do projeto (mesmo motivo do áudio: não aceitar bucket do app).
+    const file = admin
+      .storage()
+      .bucket(`${FIREBASE_PROJECT_ID}.firebasestorage.app`)
+      .file(storagePath);
+
+    const [existe] = await file.exists();
+    if (!existe) throw new HttpsError("not-found", "Arquivo não encontrado.");
+
+    const [metadata] = await file.getMetadata();
+    if (Number(metadata.size || 0) > orcamentoArquivo.MAX_BYTES) {
+      throw new HttpsError("invalid-argument", "Arquivo grande demais (máximo 15 MB).");
+    }
+
+    const [buffer] = await file.download();
+
+    let resultado;
+    try {
+      resultado = await orcamentoArquivo.extrairOrcamento({
+        client: getGenAIClient(),
+        model: GEMINI_REVIEW_MODEL,
+        tipo,
+        buffer,
+        mimeType: mimeType || metadata.contentType,
+      });
+    } catch (e) {
+      console.error("Falha ao ler orçamento por arquivo:", { idvistoria, tipo, erro: e.message });
+      throw new HttpsError("internal", "Não foi possível ler o arquivo agora. Tente de novo.");
+    }
+
+    await vistoriaRef.set(
+      {
+        orcamentoImportado: {
+          origem: "arquivo",
+          tipo,
+          storagePath,
+          itens: resultado.itens,
+          totalDocumento: resultado.totalDocumento,
+          legivel: resultado.legivel,
+          lidoPor: request.auth.uid,
+          lidoEm: admin.firestore.FieldValue.serverTimestamp(),
+        },
+      },
+      { merge: true }
+    );
+
+    console.log("Orçamento por arquivo lido:", {
+      idvistoria,
+      tipo,
+      itens: resultado.itens.length,
+      legivel: resultado.legivel,
+    });
+
+    return resultado;
+  }
+);

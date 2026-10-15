@@ -2289,6 +2289,7 @@ class _AiChatPageState extends State<AiChatPage> {
         builder: (_) => OrcamentoTablePage(
           itensIniciais: itensIniciais,
           modeloVeiculo: session.veiculo,
+          vistoriaDocId: session.docId,
         ),
       ),
     );

@@ -1,7 +1,10 @@
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:image_picker/image_picker.dart';
 
+import '../../services/orcamento_arquivo_service.dart';
 import '../../services/tabela_precos_service.dart';
 import '../../services/valores_hora_service.dart';
 import 'orcamento_calculo.dart';
@@ -105,11 +108,16 @@ class OrcamentoTablePage extends StatefulWidget {
 
   final String submitLabel;
 
+  /// Id do documento da vistoria. Com ele, a tela oferece importar um
+  /// orçamento pronto (foto/print) lido pelo Gemini.
+  final String? vistoriaDocId;
+
   const OrcamentoTablePage({
     super.key,
     this.itensIniciais = const [],
     this.modeloVeiculo = '',
     this.submitLabel = 'Enviar orçamento',
+    this.vistoriaDocId,
   });
 
   @override
@@ -233,6 +241,230 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
     }
   }
 
+  bool get _podeImportar => (widget.vistoriaDocId ?? '').trim().isNotEmpty;
+
+  /// Atalho opcional: lê um orçamento pronto (foto ou print) com o Gemini e
+  /// preenche a tabela. O mecânico confere e corrige antes de salvar.
+  Future<void> _importarOrcamento() async {
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(8, 16, 8, 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Text(
+                  'Importar orçamento pronto',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_camera_outlined),
+                title: const Text('Tirar foto do orçamento'),
+                onTap: () =>
+                    Navigator.of(sheetContext).pop(ImageSource.camera),
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('Escolher imagem ou print'),
+                subtitle:
+                    const Text('Foto do papel, print do PDF ou da planilha'),
+                onTap: () =>
+                    Navigator.of(sheetContext).pop(ImageSource.gallery),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (source == null || !mounted) return;
+
+    final XFile? arquivo;
+    try {
+      arquivo = await ImagePicker().pickImage(
+        source: source,
+        imageQuality: 85,
+        maxWidth: 2400,
+      );
+    } catch (e) {
+      debugPrint('Erro ao escolher imagem do orçamento: $e');
+      _mostrarAviso('Não foi possível abrir a câmera ou a galeria.');
+      return;
+    }
+
+    if (arquivo == null || !mounted) return;
+
+    final bytes = await arquivo.readAsBytes();
+    if (!mounted) return;
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const PopScope(
+        canPop: false,
+        child: AlertDialog(
+          content: Row(
+            children: [
+              SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2.5),
+              ),
+              SizedBox(width: 16),
+              Expanded(child: Text('Lendo o orçamento...')),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    OrcamentoArquivoResultado? resultado;
+    String? erro;
+    try {
+      resultado = await OrcamentoArquivoService.instance.importar(
+        vistoriaDocId: widget.vistoriaDocId!.trim(),
+        bytes: bytes,
+        nomeArquivo: arquivo.name.isEmpty ? 'orcamento.jpg' : arquivo.name,
+        mimeType: arquivo.mimeType ?? 'image/jpeg',
+      );
+    } on FirebaseFunctionsException catch (e) {
+      debugPrint('Erro ao importar orçamento: ${e.code} ${e.message}');
+      erro = e.code == 'invalid-argument' && (e.message ?? '').isNotEmpty
+          ? e.message
+          : 'Não foi possível ler o orçamento agora. Tente de novo.';
+    } catch (e) {
+      debugPrint('Erro ao importar orçamento: $e');
+      erro = 'Não foi possível enviar o arquivo. Verifique a conexão.';
+    }
+
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+
+    if (erro != null) {
+      _mostrarAviso(erro);
+      return;
+    }
+
+    if (resultado == null || !resultado.legivel || resultado.itens.isEmpty) {
+      _mostrarAviso(
+        'Não deu para ler os itens. Tente uma foto mais nítida, com o '
+        'orçamento inteiro e bem iluminado.',
+      );
+      return;
+    }
+
+    await _aplicarImportacao(resultado);
+  }
+
+  Future<void> _aplicarImportacao(OrcamentoArquivoResultado resultado) async {
+    var semValorHora = 0;
+
+    final drafts = resultado.itens.map((item) {
+      var horas = item.horasMaoObra ?? 0;
+      final valorMaoObra = item.valorMaoObra;
+
+      // Documento com mão de obra em reais: converte para horas com o valor
+      // da hora da oficina, para o total continuar sendo horas x valor/hora.
+      if (horas == 0 && valorMaoObra != null && valorMaoObra > 0) {
+        final valorHora = _valoresHora[item.tipoServico] ?? 0;
+        if (valorHora > 0) {
+          horas = (valorMaoObra / valorHora * 10).round() / 10;
+        } else {
+          semValorHora++;
+        }
+      }
+
+      return OrcamentoItemDraft(
+        peca: item.peca,
+        tipoIntervencao: item.tipoIntervencao,
+        quantidade: item.quantidade,
+        valorPeca: item.valorPeca,
+        tipoServico: kTiposServico.containsKey(item.tipoServico)
+            ? item.tipoServico
+            : kTipoServicoPadrao,
+        horasMaoObra: horas,
+        origem: 'arquivo',
+      );
+    }).toList();
+
+    var substituir = true;
+    if (_itensPreenchidos.isNotEmpty) {
+      final escolha = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text('${drafts.length} itens lidos'),
+          content: const Text(
+            'Quer substituir os itens da tabela pelos do orçamento ou '
+            'adicionar ao final?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancelar'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Adicionar'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Substituir'),
+            ),
+          ],
+        ),
+      );
+      if (escolha == null || !mounted) return;
+      substituir = escolha;
+    }
+
+    setState(() {
+      if (substituir) {
+        for (final item in _itens) {
+          item.dispose();
+        }
+        _itens.clear();
+      } else {
+        _itens.removeWhere((item) {
+          if (!item.isBlank) return false;
+          item.dispose();
+          return true;
+        });
+      }
+
+      for (final draft in drafts) {
+        final item = _EditableItem.fromDraft(draft);
+        _attachLookup(item);
+        _itens.add(item);
+      }
+    });
+
+    final avisos = <String>[
+      '${drafts.length} itens importados. Confira os valores antes de salvar.',
+      if (semValorHora > 0)
+        'Configure o valor da hora para converter a mão de obra em reais.',
+      if (resultado.totalDocumento != null)
+        'Total no documento: ${formatCurrencyBRL(resultado.totalDocumento!)}.',
+    ];
+    _mostrarAviso(avisos.join(' '), duracao: const Duration(seconds: 6));
+  }
+
+  void _mostrarAviso(String texto, {Duration? duracao}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(texto),
+        duration: duracao ?? const Duration(seconds: 4),
+      ),
+    );
+  }
+
   void _addBlankItem() {
     final item = _EditableItem.blank();
     _attachLookup(item);
@@ -325,9 +557,15 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
             Expanded(
               child: ListView.separated(
                 padding: const EdgeInsets.fromLTRB(18, 18, 18, 100),
-                itemCount: _itens.length + 1,
+                itemCount: _itens.length + 1 + (_podeImportar ? 1 : 0),
                 separatorBuilder: (_, __) => const SizedBox(height: 12),
-                itemBuilder: (context, index) {
+                itemBuilder: (context, rawIndex) {
+                  if (_podeImportar && rawIndex == 0) {
+                    return _ImportarOrcamentoButton(onTap: _importarOrcamento);
+                  }
+
+                  final index = rawIndex - (_podeImportar ? 1 : 0);
+
                   if (index == _itens.length) {
                     return _AddItemButton(onTap: _addBlankItem);
                   }
@@ -1177,6 +1415,56 @@ class _AddItemButton extends StatelessWidget {
                   fontSize: 13,
                 ),
               ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Atalho opcional para preencher a tabela a partir de um orçamento pronto.
+class _ImportarOrcamentoButton extends StatelessWidget {
+  final VoidCallback onTap;
+
+  const _ImportarOrcamentoButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: const Color(0xFFE5F6FF),
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          child: Row(
+            children: [
+              Icon(Icons.document_scanner_outlined, color: Color(0xFF0057C0)),
+              SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Importar orçamento pronto',
+                      style: TextStyle(
+                        color: Color(0xFF0057C0),
+                        fontWeight: FontWeight.w800,
+                        fontSize: 14,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Opcional: foto ou print do orçamento da oficina. '
+                      'A IA preenche a tabela para você conferir.',
+                      style: TextStyle(color: Color(0xFF475569), fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right, color: Color(0xFF0057C0)),
             ],
           ),
         ),

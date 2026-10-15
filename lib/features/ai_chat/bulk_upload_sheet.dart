@@ -496,6 +496,7 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
               .toList(),
           modeloVeiculo: modelo,
           submitLabel: 'Salvar orçamento',
+          vistoriaDocId: widget.vistoriaDocId,
         ),
       ),
     );

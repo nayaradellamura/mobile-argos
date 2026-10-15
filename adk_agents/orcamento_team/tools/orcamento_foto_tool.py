@@ -38,9 +38,12 @@ Regras:
 - valor_peca: valor UNITÁRIO da peça em reais, número sem "R$" (ex.: 550.0).
   Se só houver o total da linha e a quantidade, divida. Serviço sem peça
   (ex.: alinhamento) tem valor_peca 0.
-- horas_mao_obra: horas de mão de obra do item, se aparecer; senão null.
-- valor_mao_obra: valor em reais da mão de obra do item, se aparecer em
-  vez das horas; senão null.
+- Mão de obra: se vier em horas (ex.: "2,0 h", "1,5h", "1h30"), preencha
+  horas_mao_obra (1h30 = 1.5) e deixe valor_mao_obra null. Se vier em
+  reais (ex.: "R$ 420,00"), preencha valor_mao_obra e deixe horas_mao_obra
+  null. Sem mão de obra no item: os dois null.
+- Números no formato brasileiro: vírgula é decimal e ponto é milhar
+  ("1.234,50" = 1234.5).
 - tipo_servico: um de funilaria, pintura, mecanica, eletrica (o que melhor
   descreve a mão de obra do item).
 - tipo_intervencao: "troca", "reparo" ou "pintura".
