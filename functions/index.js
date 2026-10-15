@@ -484,7 +484,7 @@ function getTasksClient() {
   return cachedTasksClient;
 }
 
-async function enqueuePdfGeneration({ serviceUrl, serviceUrlParam, statusField, taskKind, sinistroId, vistoriaId }) {
+async function enqueuePdfGeneration({ serviceUrl, serviceUrlParam, statusField, taskKind, sinistroId, vistoriaId, taskSuffix = "" }) {
   if (!serviceUrl) {
     // Sem a URL o PDF nunca vai sair. Em vez de so logar (ninguem ve), grava
     // status "erro" no proprio sinistro pra ficar visivel no app/painel.
@@ -530,7 +530,7 @@ async function enqueuePdfGeneration({ serviceUrl, serviceUrlParam, statusField, 
     // Nome deterministico: se o mesmo sinistro/vistoria disparar duas vezes
     // (ex: retry do proprio Firestore trigger), o Cloud Tasks rejeita a
     // segunda com ALREADY_EXISTS em vez de gerar o documento duplicado.
-    name: `${queuePath}/tasks/${taskKind}-${sinistroId}-${vistoriaId}`,
+    name: `${queuePath}/tasks/${taskKind}-${sinistroId}-${vistoriaId}${taskSuffix}`,
   };
 
   try {
@@ -2818,5 +2818,78 @@ exports.extrairOrcamentoArquivo = onCall(
     });
 
     return resultado;
+  }
+);
+
+// ── Relatório para o cliente final ─────────────────────────────────────────
+//
+// Botão "Relatório para o cliente" no histórico da vistoria. Gera um PDF com
+// o visual da Argos (veículo, danos, fotos, orçamento e próximos passos) no
+// laudo-service, pela mesma fila do laudo. O app acompanha
+// `sinistro.relatorioCliente` até ficar "pronto" e abre o PDF.
+function relatorioClienteServiceUrl() {
+  const laudoUrl = LAUDO_SERVICE_URL.value();
+  if (!laudoUrl) return "";
+  try {
+    return `${new URL(laudoUrl).origin}/gerar-relatorio-cliente`;
+  } catch (_) {
+    return "";
+  }
+}
+
+exports.gerarRelatorioCliente = onCall(
+  { region: "us-central1", timeoutSeconds: 60 },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Usuário precisa estar autenticado.");
+    }
+
+    const sinistroId = str(request.data?.sinistroId);
+    const vistoriaId = str(request.data?.vistoriaId);
+    if (!sinistroId || !vistoriaId || sinistroId.includes("/") || vistoriaId.includes("/")) {
+      throw new HttpsError("invalid-argument", "sinistroId e vistoriaId são obrigatórios.");
+    }
+
+    const db = admin.firestore();
+    const [sinistroSnap, vistoriaSnap] = await Promise.all([
+      db.collection("sinistro").doc(sinistroId).get(),
+      db.collection("vistorias").doc(vistoriaId).get(),
+    ]);
+    if (!sinistroSnap.exists || !vistoriaSnap.exists) {
+      throw new HttpsError("not-found", "Vistoria não encontrada.");
+    }
+
+    await assertCanAccessVistoria({
+      uid: request.auth.uid,
+      email: request.auth.token?.email,
+      vistoria: vistoriaSnap.data() || {},
+      sinistro: sinistroSnap.data() || {},
+      logContext: { callable: "gerarRelatorioCliente", vistoriaId },
+    });
+
+    await db.collection("sinistro").doc(sinistroId).set(
+      {
+        relatorioCliente: {
+          status: "gerando",
+          vistoriaId,
+          solicitadoEm: admin.firestore.FieldValue.serverTimestamp(),
+          erro: admin.firestore.FieldValue.delete(),
+        },
+      },
+      { merge: true }
+    );
+
+    await enqueuePdfGeneration({
+      serviceUrl: relatorioClienteServiceUrl(),
+      serviceUrlParam: "LAUDO_SERVICE_URL",
+      statusField: "relatorioCliente",
+      taskKind: "relatorio",
+      sinistroId,
+      vistoriaId,
+      // Pode ser gerado várias vezes (orçamento muda); nome único por pedido.
+      taskSuffix: `-${Date.now()}`,
+    });
+
+    return { status: "gerando" };
   }
 );

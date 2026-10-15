@@ -5,6 +5,8 @@ const puppeteer = require("puppeteer");
 
 const TEMPLATE_PATH = path.join(__dirname, "..", "templates", "laudo.html");
 const ORCAMENTO_TEMPLATE_PATH = path.join(__dirname, "..", "templates", "orcamento-aprovado.html");
+const RELATORIO_CLIENTE_TEMPLATE_PATH = path.join(__dirname, "..", "templates", "relatorio-cliente.html");
+const MAX_FOTOS_RELATORIO = 9;
 const LOGO_PATH = path.join(__dirname, "..", "assets", "argos_icon.png");
 
 const SEVERITY_COLORS = {
@@ -89,7 +91,25 @@ async function renderOrcamentoAprovadoPdf({ context }) {
   return renderHtmlToPdf(html);
 }
 
-async function renderHtmlToPdf(html) {
+/**
+ * Relatório para o cliente final: veículo, danos, fotos, orçamento e
+ * próximos passos, sem dados internos de auditoria nem documento do cliente.
+ */
+async function renderRelatorioClientePdf({ context, etapas }) {
+  const html = getTemplate(RELATORIO_CLIENTE_TEMPLATE_PATH)({
+    ...context,
+    clienteDocumento: undefined,
+    transcricao: undefined,
+    fotosRelatorio: (context.fotos || []).filter((f) => f.url).slice(0, MAX_FOTOS_RELATORIO),
+    etapas,
+    dataEmissao: dataEmissaoAgora(),
+    logoDataUri: getLogoDataUri(),
+  });
+
+  return renderHtmlToPdf(html, { numerarPaginas: false });
+}
+
+async function renderHtmlToPdf(html, { numerarPaginas = true } = {}) {
   const browser = await puppeteer.launch({
     headless: true,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
@@ -106,8 +126,8 @@ async function renderHtmlToPdf(html) {
     const pdfBuffer = await page.pdf({
       format: "A4",
       printBackground: true,
-      margin: { top: "1cm", bottom: "0", left: "0", right: "0" },
-      displayHeaderFooter: true,
+      margin: { top: numerarPaginas ? "1cm" : "0", bottom: "0", left: "0", right: "0" },
+      displayHeaderFooter: numerarPaginas,
       headerTemplate: `
         <div style="width:100%; font-family:Arial,Helvetica,sans-serif; font-size:9px; color:#8a97a3; padding:0 40px; box-sizing:border-box; display:flex; justify-content:flex-end;">
           <span class="pageNumber"></span>
@@ -122,4 +142,4 @@ async function renderHtmlToPdf(html) {
   }
 }
 
-module.exports = { renderLaudoPdf, renderOrcamentoAprovadoPdf };
+module.exports = { renderLaudoPdf, renderOrcamentoAprovadoPdf, renderRelatorioClientePdf };

@@ -44,4 +44,8 @@ async function uploadOrcamentoAprovadoPdf({ vistoriaId, pdfBuffer }) {
   return uploadPdf({ vistoriaId, pdfBuffer, nomeDocumento: "Orçamento Aprovado" });
 }
 
-module.exports = { uploadLaudoPdf, uploadOrcamentoAprovadoPdf };
+async function uploadRelatorioClientePdf({ vistoriaId, pdfBuffer }) {
+  return uploadPdf({ vistoriaId, pdfBuffer, nomeDocumento: "Relatório do Reparo" });
+}
+
+module.exports = { uploadLaudoPdf, uploadOrcamentoAprovadoPdf, uploadRelatorioClientePdf };

@@ -145,6 +145,40 @@ function fotosDeDano(vistoria) {
   return images.filter((img) => !idsOrcamento.has(img?.imageId));
 }
 
+// Danos que a vistoria registrou (agentParameters.danos_externos e
+// danos_estruturais), como lista de textos sem repetição.
+function listaDeDanos(agentParameters) {
+  const vistos = new Set();
+  const danos = [];
+  for (const campo of ["danos_externos", "danos_estruturais"]) {
+    const valor = agentParameters?.[campo];
+    const itens = Array.isArray(valor) ? valor : str(valor).split(/[;,\n]/);
+    for (const item of itens) {
+      const texto = (typeof item === "object" && item ? str(item.peca || item.nome || item.descricao) : str(item)).trim();
+      const chave = texto.toLowerCase();
+      if (texto && !vistos.has(chave)) {
+        vistos.add(chave);
+        danos.push(texto.charAt(0).toUpperCase() + texto.slice(1));
+      }
+    }
+  }
+  return danos.slice(0, 30);
+}
+
+// Etapas mostradas ao cliente, com a atual destacada pelo status da vistoria.
+function etapasRelatorio(statusVistoria) {
+  const status = str(statusVistoria).toUpperCase();
+  let atual = 1;
+  if (status.includes("ANALISE")) atual = 2;
+  if (status.includes("APROVAD") || status === "FINALIZADA") atual = 3;
+
+  return [
+    { numero: 1, titulo: "Vistoria e orçamento", descricao: "A oficina registrou os danos e montou o orçamento do reparo." },
+    { numero: 2, titulo: "Análise da seguradora", descricao: "A seguradora confere a vistoria e aprova os valores." },
+    { numero: 3, titulo: "Reparo", descricao: "Com a aprovação, a oficina agenda e executa o conserto." },
+  ].map((etapa) => ({ ...etapa, atual: etapa.numero === atual }));
+}
+
 async function loadLaudoContext({ sinistroId, vistoriaId }) {
   const db = admin.firestore();
 
@@ -254,9 +288,20 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
     transcricao,
 
     orcamentoCampo,
+
+    statusVistoria: str(vistoria.status),
+    danosIdentificados: listaDeDanos(agentParameters),
   };
 }
 
 // buildOrcamentoCampo, normalizarItem e VALOR_HORA_LEGADO são exportados só
 // para os testes (test/data.test.js) — o servidor usa apenas loadLaudoContext.
-module.exports = { loadLaudoContext, buildOrcamentoCampo, normalizarItem, fotosDeDano, VALOR_HORA_LEGADO };
+module.exports = {
+  loadLaudoContext,
+  buildOrcamentoCampo,
+  normalizarItem,
+  fotosDeDano,
+  listaDeDanos,
+  etapasRelatorio,
+  VALOR_HORA_LEGADO,
+};
