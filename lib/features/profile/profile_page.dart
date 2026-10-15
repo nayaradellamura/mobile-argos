@@ -1141,7 +1141,7 @@ class _ProfilePageState extends State<ProfilePage> {
               ),
               const SizedBox(height: 6),
               Text(
-                widget.user.email ?? 'Email não informado',
+                widget.user.email ?? 'E-mail não informado',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: Color(0xFF414755)),
               ),

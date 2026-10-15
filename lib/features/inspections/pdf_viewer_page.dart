@@ -129,7 +129,7 @@ class _PdfViewerPageState extends State<PdfViewerPage> {
           else
             IconButton(
               tooltip: 'Salvar ou compartilhar PDF',
-              icon: const Icon(Icons.ios_share_outlined),
+              icon: const Icon(Icons.share_outlined),
               onPressed: _compartilhar,
             ),
         ],
@@ -147,6 +147,12 @@ class _PdfViewerPageState extends State<PdfViewerPage> {
                       'Não foi possível carregar o PDF. Verifique sua conexão e tente novamente.',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Colors.black54),
+                    ),
+                    const SizedBox(height: 16),
+                    OutlinedButton.icon(
+                      onPressed: () => setState(() => _erro = null),
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Tentar novamente'),
                     ),
                   ],
                 ),

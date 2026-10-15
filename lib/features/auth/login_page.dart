@@ -1059,7 +1059,7 @@ class _LoginPageState extends State<LoginPage> {
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'Entre com e-mail e senha ou utilize SSO Google',
+                          'Entre com e-mail e senha ou com sua conta Google',
                           textAlign: TextAlign.center,
                           style: TextStyle(color: Color(0xFF414755)),
                         ),
