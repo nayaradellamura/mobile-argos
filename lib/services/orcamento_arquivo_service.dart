@@ -4,15 +4,16 @@ import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 
 /// Item lido de um orçamento pronto (foto, PDF, planilha ou CSV) pela
-/// Cloud Function `extrairOrcamentoArquivo`. A mão de obra pode vir em horas
-/// ou em reais, conforme o documento; quem converte para horas é a tabela,
-/// que conhece o valor da hora da oficina.
+/// Cloud Function `extrairOrcamentoArquivo`. A mão de obra vem como o
+/// documento traz: horas, valor da hora e/ou valor total em reais; a tabela
+/// decide se usa horas x valor da hora da oficina ou o valor em reais.
 class OrcamentoArquivoItem {
   final String peca;
   final String tipoIntervencao;
   final int quantidade;
   final double valorPeca;
   final double? horasMaoObra;
+  final double? valorHora;
   final double? valorMaoObra;
   final String tipoServico;
 
@@ -22,6 +23,7 @@ class OrcamentoArquivoItem {
     required this.quantidade,
     required this.valorPeca,
     required this.horasMaoObra,
+    this.valorHora,
     required this.valorMaoObra,
     required this.tipoServico,
   });
@@ -37,6 +39,7 @@ class OrcamentoArquivoItem {
           : 1,
       valorPeca: toDouble(map['valorPeca']) ?? 0,
       horasMaoObra: toDouble(map['horasMaoObra']),
+      valorHora: toDouble(map['valorHora']),
       valorMaoObra: toDouble(map['valorMaoObra']),
       tipoServico: map['tipoServico']?.toString() ?? 'funilaria',
     );
@@ -48,10 +51,14 @@ class OrcamentoArquivoResultado {
   final bool legivel;
   final double? totalDocumento;
 
+  /// Desconto, taxa ou outro ponto do documento para o mecânico conferir.
+  final String? observacao;
+
   const OrcamentoArquivoResultado({
     required this.itens,
     required this.legivel,
     required this.totalDocumento,
+    this.observacao,
   });
 }
 
@@ -106,6 +113,7 @@ class OrcamentoArquivoService {
       itens: itens,
       legivel: data['legivel'] == true,
       totalDocumento: (data['totalDocumento'] as num?)?.toDouble(),
+      observacao: data['observacao']?.toString(),
     );
   }
 }

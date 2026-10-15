@@ -42,6 +42,7 @@ describe("normalizarItens", () => {
       quantidade: 1,
       valorPeca: 890,
       horasMaoObra: 0.5,
+      valorHora: null,
       valorMaoObra: null,
       tipoServico: "eletrica",
     });
@@ -49,6 +50,17 @@ describe("normalizarItens", () => {
     assert.equal(itens[1].valorMaoObra, 350);
     assert.equal(itens[1].tipoServico, "funilaria");
     assert.equal(itens[1].tipoIntervencao, "pintura");
+  });
+
+  test("deduz horas ou valor da hora a partir dos outros dois", () => {
+    const [semHoras, semValorHora] = normalizarItens({
+      itens: [
+        { peca: "Amortecedor", quantidade: 2, valorPeca: 387.53, valorHora: 36.96, valorMaoObra: 36.96, tipoServico: "mecanica" },
+        { peca: "Filtro", quantidade: 1, valorPeca: 61.66, horasMaoObra: 0.5, valorMaoObra: 18.48, tipoServico: "mecanica" },
+      ],
+    });
+    assert.equal(semHoras.horasMaoObra, 1);
+    assert.equal(semValorHora.valorHora, 36.96);
   });
 
   test("entrada vazia", () => {
