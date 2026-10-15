@@ -204,9 +204,13 @@ class _AiChatPageState extends State<AiChatPage> {
   bool _isPhotoReleaseText(String value) {
     final normalized = _normalizeMessage(value);
 
-    return normalized.contains('identificação recebida') &&
-        normalized.contains('liberei') &&
-        normalized.contains('fotos dos danos externos');
+    // "liberei a câmera" é o gatilho do agente ADK para qualquer leva de
+    // fotos (identificação, danos externos, estruturais); a outra frase é a
+    // do playbook antigo, mantida para históricos já gravados.
+    return normalized.contains('liberei a câmera') ||
+        (normalized.contains('identificação recebida') &&
+            normalized.contains('liberei') &&
+            normalized.contains('fotos dos danos externos'));
   }
 
   ChatMessage _aiMessageFromText(String text, {DateTime? createdAt}) {
