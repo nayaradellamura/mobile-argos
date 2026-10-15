@@ -8,9 +8,9 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import '../../services/bulk_sync_coordinator.dart';
+import '../../services/ibge_http_client.dart';
 import '../../services/session_context_service.dart';
 import '../../services/vistoria_chat_session_service.dart';
 
@@ -156,7 +156,14 @@ class _ProfilePageState extends State<ProfilePage> {
     });
 
     try {
-      await Future.wait([_loadCredenciados(), _loadBrazilianCities()]);
+      // Cidades vêm de uma API externa (IBGE): se falhar, o perfil carrega do
+      // mesmo jeito e só a busca de cidade fica indisponível.
+      await Future.wait([
+        _loadCredenciados(),
+        _loadBrazilianCities().catchError((Object e) {
+          debugPrint('Erro ao carregar cidades do IBGE: $e');
+        }),
+      ]);
 
       await _loadProfileData();
 
@@ -227,7 +234,7 @@ class _ProfilePageState extends State<ProfilePage> {
       'https://servicodados.ibge.gov.br/api/v1/localidades/municipios',
     );
 
-    final response = await http.get(uri);
+    final response = await IbgeHttpClient.get(uri);
 
     if (response.statusCode != 200) {
       throw Exception('Erro ao buscar cidades do IBGE.');
