@@ -377,19 +377,28 @@ class _MainShellState extends State<MainShell> {
   @override
   Widget build(BuildContext context) {
     if (isLoadingProfile) {
-      return const SizedBox.expand();
+      return const Scaffold(
+        backgroundColor: Color(0xFFF3FBFF),
+        body: Center(child: CircularProgressIndicator()),
+      );
     }
 
     _selectedIndexNotifier.value = selectedIndex;
 
+    // Com o teclado aberto a barra de navegação ficava em cima dele e
+    // sobrava pouco espaço para a conversa no chat.
+    final tecladoAberto = MediaQuery.viewInsetsOf(context).bottom > 0;
+
     return Scaffold(
       backgroundColor: const Color(0xFFF3FBFF),
       body: IndexedStack(index: selectedIndex, children: pages),
-      bottomNavigationBar: _ArgosBottomNav(
-        currentIndex: selectedIndex,
-        completionRequired: profileCompletionRequired,
-        onTap: _handleNavTap,
-      ),
+      bottomNavigationBar: tecladoAberto
+          ? null
+          : _ArgosBottomNav(
+              currentIndex: selectedIndex,
+              completionRequired: profileCompletionRequired,
+              onTap: _handleNavTap,
+            ),
     );
   }
 }
