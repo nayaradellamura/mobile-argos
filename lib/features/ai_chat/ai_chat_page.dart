@@ -1026,7 +1026,12 @@ class _AiChatPageState extends State<AiChatPage> {
         if (!mounted) return;
 
         if (!alreadyExpired && openSession.isEmMassa) {
-          var resumeChoice = await _askResumeBulkMode(openSession);
+          // Pacote vazio: não há o que decidir, segue no envio em massa.
+          final temPacote = openSession.envioEmMassaRascunho.values
+              .any((item) => item is Map && item['status'] != 'enviado');
+          var resumeChoice = temPacote
+              ? await _askResumeBulkMode(openSession)
+              : ColetaModo.emMassa;
 
           if (!mounted) return;
 
@@ -5138,11 +5143,13 @@ class _TextComposer extends StatelessWidget {
                 ? _RoundActionButton(
                     key: const ValueKey('send'),
                     icon: Icons.send,
+                    tooltip: 'Enviar mensagem',
                     onTap: onSendTap,
                   )
                 : _RoundActionButton(
                     key: const ValueKey('mic'),
                     icon: Icons.mic,
+                    tooltip: 'Gravar áudio',
                     onTap: onMicTap,
                     isLoading: isStartingRecording,
                   ),
@@ -5246,7 +5253,7 @@ class _CameraReleaseButtonState extends State<_CameraReleaseButton>
             : const Color(0xFFB5C3D6),
         tooltip: widget.unlocked
             ? 'Anexar fotos'
-            : 'A câmera libera quando o assistente pedir as fotos',
+            : 'Câmera travada: libera quando o Argos pedir as fotos',
       ),
     );
   }
@@ -5306,7 +5313,11 @@ class _RecordingComposer extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          _RoundActionButton(icon: Icons.send, onTap: onSend),
+          _RoundActionButton(
+            icon: Icons.send,
+            tooltip: 'Enviar áudio',
+            onTap: onSend,
+          ),
         ],
       ),
     );
@@ -5316,18 +5327,27 @@ class _RecordingComposer extends StatelessWidget {
 /// Botão circular de ação (enviar, cancelar, etc.) usado nas barras de composição.
 class _RoundActionButton extends StatelessWidget {
   final IconData icon;
+  final String tooltip;
   final VoidCallback onTap;
   final bool isLoading;
 
   const _RoundActionButton({
     super.key,
     required this.icon,
+    required this.tooltip,
     required this.onTap,
     this.isLoading = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: _buildButton(),
+    );
+  }
+
+  Widget _buildButton() {
     return Material(
       color: const Color(0xFF0057C0),
       shape: const CircleBorder(),

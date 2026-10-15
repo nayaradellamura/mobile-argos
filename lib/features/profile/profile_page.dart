@@ -1371,7 +1371,7 @@ class _StatusBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final providerLabel = provider == 'google'
-        ? 'Google SSO'
+        ? 'Conta Google'
         : provider == 'password'
         ? 'E-mail e senha'
         : 'Acesso Argos';
