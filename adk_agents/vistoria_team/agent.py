@@ -23,6 +23,11 @@ from google.adk.tools.agent_tool import AgentTool
 
 from common.config import modelo_conversa
 from common.callbacks import tratar_erro_de_tool
+from common.guardrails import (
+    bloquear_entrada_fora_do_escopo,
+    com_limites,
+    filtrar_resposta,
+)
 from common.firestore_tools import (
     carregar_contexto_vistoria,
     marcar_fotos_analisadas,
@@ -96,21 +101,22 @@ diga ao mecânico que está consultando um manual.
 ## Passo 4 — fotos (uma leva de cada vez)
 Para cada leva (identificação → danos externos → danos estruturais, só se
 aplicável):
-1. Avise que vai liberar a câmera para aquela leva e PARE DE FALAR
-   imediatamente.
+1. Libere a câmera para aquela leva com a frase exata abaixo e PARE DE
+   FALAR imediatamente.
 
-   ATENÇÃO — CONTRATO COM O APP, não é estilo: ao liberar a leva de DANOS
-   EXTERNOS, escreva EXATAMENTE esta frase, sem trocar, traduzir nem
-   reescrever nenhuma palavra:
+   ATENÇÃO — CONTRATO COM O APP, não é estilo: o botão da câmera só destrava
+   quando a mensagem contém literalmente "Liberei a câmera". "Vou liberar a
+   câmera", "a câmera está liberada" ou qualquer outra paráfrase deixam o
+   botão travado e a vistoria para. Use EXATAMENTE estas frases, no
+   passado, sem trocar nenhuma palavra:
 
-   "Identificação recebida. Liberei a câmera para as fotos dos danos externos."
+   - Identificação: "Liberei a câmera para as fotos de identificação do veículo."
+   - Danos externos: "Identificação recebida. Liberei a câmera para as fotos dos danos externos."
+   - Danos estruturais: "Liberei a câmera para as fotos dos danos estruturais."
 
-   O app procura literalmente os trechos "identificação recebida",
-   "liberei" e "fotos dos danos externos" nessa mesma mensagem para abrir a
-   câmera sozinho (`_isPhotoReleaseText`). Qualquer paráfrase faz a câmera
-   não abrir, e sem câmera não entra foto nenhuma na vistoria. Para as
-   outras levas (identificação e estruturais), pode usar suas próprias
-   palavras normalmente.
+   Pode acrescentar UMA frase curta antes, dizendo o que fotografar (ex.:
+   "Preciso da placa e do hodômetro."), mas a frase de liberação vem por
+   último e nada de pergunta depois dela.
 2. Só continue quando receber a confirmação de envio daquela leva
    (mensagem do tipo "Fotos de X enviadas").
 3. Assim que a leva chegar, ANTES de chamar qualquer ferramenta, mande uma
@@ -166,7 +172,9 @@ root_agent = LlmAgent(
         "coleta o relato do mecânico, guia a captura de fotos e confere, "
         "na hora, se o relato bate com o que as fotos mostram."
     ),
-    instruction=INSTRUCTION,
+    instruction=com_limites(INSTRUCTION),
+    before_model_callback=bloquear_entrada_fora_do_escopo,
+    after_model_callback=filtrar_resposta,
     tools=[
         FunctionTool(carregar_contexto_vistoria),
         FunctionTool(salvar_estado_vistoria),

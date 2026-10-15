@@ -21,6 +21,11 @@ from google.adk.tools.agent_tool import AgentTool
 
 from common.config import modelo_conversa
 from common.callbacks import tratar_erro_de_tool
+from common.guardrails import (
+    bloquear_entrada_fora_do_escopo,
+    com_limites,
+    filtrar_resposta,
+)
 from common.firestore_tools import (
     carregar_contexto_vistoria,
     salvar_estado_vistoria,
@@ -210,7 +215,9 @@ orcamento_oficina_agent = LlmAgent(
         "preço de referência de uma vez só no chat, e negocia apenas os "
         "valores que o mecânico alterou para fora da faixa esperada."
     ),
-    instruction=INSTRUCTION,
+    instruction=com_limites(INSTRUCTION),
+    before_model_callback=bloquear_entrada_fora_do_escopo,
+    after_model_callback=filtrar_resposta,
     on_tool_error_callback=tratar_erro_de_tool,
     tools=[
         FunctionTool(carregar_contexto_vistoria),
