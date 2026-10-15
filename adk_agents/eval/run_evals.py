@@ -34,8 +34,12 @@ def _carregar_env() -> None:
 async def _avaliar(time: str, runs: int) -> None:
     from google.adk.evaluation.agent_evaluator import AgentEvaluator
 
+    # O orçamento é sub-agente da vistoria (não tem root_agent próprio):
+    # carrega a árvore da vistoria e seleciona o agente pelo nome.
+    agent_name = "OrcamentoOficinaAgent" if time == "orcamento_team" else None
     await AgentEvaluator.evaluate(
-        agent_module=f"{time}.agent",
+        agent_module="vistoria_team.agent",
+        agent_name=agent_name,
         eval_dataset_file_path_or_dir=os.path.join(ADK_AGENTS_DIR, time, "eval"),
         num_runs=runs,
         print_detailed_results=True,
@@ -44,7 +48,7 @@ async def _avaliar(time: str, runs: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("times", nargs="*", default=list(TIMES), choices=TIMES)
+    parser.add_argument("times", nargs="*", choices=TIMES)
     parser.add_argument("--runs", type=int, default=2, help="execuções por caso (default 2)")
     args = parser.parse_args()
 
@@ -59,7 +63,7 @@ def main() -> None:
         sys.exit("Defina GOOGLE_API_KEY (AI Studio) ou configure Vertex AI.")
 
     falhas = []
-    for time in args.times:
+    for time in args.times or TIMES:
         print(f"\n=== Avaliando {time} ===")
         try:
             asyncio.run(_avaliar(time, args.runs))
