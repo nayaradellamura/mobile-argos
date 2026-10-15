@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'dart:ui';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
@@ -1056,6 +1057,11 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                               if (inspection.laudoTecnicoStatus.isNotEmpty) ...[
                                 const SizedBox(height: 14),
                                 _LaudoTecnicoCard(inspection: inspection),
+                              ],
+                              if (inspection.vistoriaAtualId.trim().isNotEmpty &&
+                                  !inspection.isPendingOfflineSync) ...[
+                                const SizedBox(height: 14),
+                                _RelatorioClienteCard(inspection: inspection),
                               ],
                               const SizedBox(height: 14),
                               _SectionCard(
@@ -5842,6 +5848,149 @@ class _FastPersonAvatar extends StatelessWidget {
                 );
               },
             ),
+    );
+  }
+}
+
+/// Relatório em PDF para o cliente final (veículo, danos, fotos, orçamento e
+/// próximos passos), com o visual da Argos. Gerado no servidor a cada toque,
+/// porque o orçamento pode ter mudado desde a última vez.
+class _RelatorioClienteCard extends StatefulWidget {
+  final InspectionCase inspection;
+
+  const _RelatorioClienteCard({required this.inspection});
+
+  @override
+  State<_RelatorioClienteCard> createState() => _RelatorioClienteCardState();
+}
+
+class _RelatorioClienteCardState extends State<_RelatorioClienteCard> {
+  bool _gerando = false;
+
+  Future<void> _gerar() async {
+    final sinistroId = widget.inspection.id;
+    final vistoriaId = widget.inspection.vistoriaAtualId.trim();
+    final sinistroRef =
+        FirebaseFirestore.instance.collection('sinistro').doc(sinistroId);
+
+    setState(() => _gerando = true);
+
+    try {
+      await FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable('gerarRelatorioCliente')
+          .call<Map<String, dynamic>>({
+        'sinistroId': sinistroId,
+        'vistoriaId': vistoriaId,
+      });
+
+      // A função marca "gerando"; espera o laudo-service trocar para
+      // "pronto" (ou "erro").
+      final snapshot = await sinistroRef
+          .snapshots()
+          .map((doc) => doc.data()?['relatorioCliente'])
+          .where((r) => r is Map && r['status'] != 'gerando')
+          .first
+          .timeout(const Duration(seconds: 90));
+
+      if (!mounted) return;
+
+      final relatorio = Map<String, dynamic>.from(snapshot as Map);
+      final url = relatorio['url']?.toString() ?? '';
+
+      if (relatorio['status'] != 'pronto' || url.isEmpty) {
+        throw Exception('relatório não gerado');
+      }
+
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => PdfViewerPage(url: url, title: 'Relatório do reparo'),
+        ),
+      );
+    } catch (e) {
+      debugPrint('Erro ao gerar relatório do cliente: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Não foi possível gerar o relatório agora. Tente de novo em instantes.',
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _gerando = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const color = Color(0xFF0057C0);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: color.withOpacity(.06),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: color.withOpacity(.18)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.ios_share_rounded, size: 20, color: color),
+              const SizedBox(width: 8),
+              Text(
+                'Relatório para o cliente',
+                style: GoogleFonts.spaceGrotesk(
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'PDF com o veículo, os danos, as fotos e o orçamento, pronto '
+            'para enviar ao cliente.',
+            style: TextStyle(
+              color: Color(0xFF414755),
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _gerando ? null : _gerar,
+              icon: _gerando
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.picture_as_pdf_outlined, size: 18),
+              label: Text(_gerando ? 'Gerando relatório...' : 'Gerar relatório (PDF)'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: color,
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: color.withOpacity(.6),
+                disabledForegroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

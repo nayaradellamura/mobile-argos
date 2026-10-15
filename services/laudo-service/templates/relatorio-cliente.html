@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<title>Relatório do reparo — {{veiculoPlaca}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet" />
+<style>
+  /* Relatório para o cliente final: linguagem simples, sem dados internos de
+     auditoria (consistência, transcrição, CPF). Mesma paleta do app. */
+  :root {
+    --azul: #0057C0;
+    --azul-claro: #E5F6FF;
+    --fundo: #F3FBFF;
+    --texto: #1F2937;
+    --cinza: #6B7280;
+    --borda: #DCE8F5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Inter", Arial, Helvetica, sans-serif;
+    color: var(--texto);
+    font-size: 10pt;
+    line-height: 1.5;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  h1, h2, .num { font-family: "Space Grotesk", Arial, sans-serif; }
+
+  .hero {
+    background: linear-gradient(135deg, #0057C0 0%, #0A73E8 100%);
+    color: #fff;
+    padding: 30px 40px 34px;
+  }
+  .hero .top { display: flex; justify-content: space-between; align-items: center; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand img { width: 42px; height: 42px; border-radius: 10px; background: #fff; }
+  .brand .nome { font-family: "Space Grotesk", Arial, sans-serif; font-size: 18pt; font-weight: 700; letter-spacing: .02em; }
+  .brand .sub { font-size: 8.5pt; opacity: .85; }
+  .hero .emissao { text-align: right; font-size: 8.5pt; opacity: .9; }
+  .hero h1 { font-size: 22pt; margin: 26px 0 4px; font-weight: 700; }
+  .hero .lead { font-size: 10.5pt; opacity: .92; margin: 0; }
+
+  .veiculo {
+    margin: -22px 40px 0;
+    background: #fff;
+    border-radius: 18px;
+    box-shadow: 0 8px 24px rgba(0, 87, 192, .12);
+    padding: 18px 22px;
+    display: grid;
+    grid-template-columns: 1.6fr 1fr 1fr 1fr;
+    gap: 14px;
+  }
+  .campo .rotulo { color: var(--cinza); font-size: 7.5pt; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; }
+  .campo .valor { font-size: 11pt; font-weight: 700; margin-top: 2px; }
+  .placa {
+    display: inline-block;
+    border: 2px solid var(--texto);
+    border-radius: 6px;
+    padding: 1px 8px;
+    font-family: "Space Grotesk", Arial, sans-serif;
+    letter-spacing: .08em;
+  }
+
+  .conteudo { padding: 8px 40px 30px; }
+  h2 {
+    font-size: 12.5pt;
+    color: var(--azul);
+    margin: 26px 0 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+  h2::before {
+    content: "";
+    width: 6px;
+    height: 18px;
+    border-radius: 3px;
+    background: var(--azul);
+  }
+
+  .caixa {
+    background: var(--fundo);
+    border: 1px solid var(--borda);
+    border-radius: 14px;
+    padding: 14px 16px;
+    break-inside: avoid;
+  }
+  .oficina { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 24px; }
+
+  .danos { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    background: var(--azul-claro);
+    color: var(--azul);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 9pt;
+    font-weight: 700;
+  }
+
+  .fotos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .foto {
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--borda);
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .foto img { width: 100%; height: 140px; object-fit: cover; display: block; }
+  .foto .legenda { font-size: 8pt; color: var(--cinza); padding: 4px 8px; }
+
+  table.itens { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 9.5pt; }
+  table.itens th {
+    text-align: left;
+    color: var(--cinza);
+    font-size: 7.5pt;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    padding: 0 10px 8px;
+    border-bottom: 2px solid var(--borda);
+  }
+  table.itens td { padding: 9px 10px; border-bottom: 1px solid var(--borda); }
+  table.itens tr { break-inside: avoid; page-break-inside: avoid; }
+  table.itens td.num, table.itens th.num { text-align: right; white-space: nowrap; }
+  table.itens td.peca { font-weight: 600; }
+
+  .totais {
+    margin-top: 14px;
+    margin-left: auto;
+    width: 300px;
+    break-inside: avoid;
+  }
+  .totais .linha { display: flex; justify-content: space-between; padding: 4px 0; color: var(--cinza); }
+  .totais .total {
+    margin-top: 6px;
+    background: var(--azul);
+    color: #fff;
+    border-radius: 12px;
+    padding: 10px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 700;
+  }
+  .totais .total .num { font-size: 15pt; }
+
+  .passos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; break-inside: avoid; }
+  .passo { background: var(--fundo); border: 1px solid var(--borda); border-radius: 14px; padding: 12px 14px; }
+  .passo .n {
+    width: 24px; height: 24px; border-radius: 50%;
+    background: var(--azul); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 9pt; margin-bottom: 6px;
+  }
+  .passo.atual { border-color: var(--azul); background: var(--azul-claro); }
+  .passo .t { font-weight: 700; }
+  .passo .d { color: var(--cinza); font-size: 8.5pt; }
+
+  .rodape {
+    margin-top: 28px;
+    padding-top: 12px;
+    border-top: 1px solid var(--borda);
+    color: var(--cinza);
+    font-size: 8pt;
+    display: flex;
+    justify-content: space-between;
+    gap: 20px;
+  }
+  .vazio { color: var(--cinza); font-style: italic; }
+</style>
+</head>
+<body>
+  <div class="hero">
+    <div class="top">
+      <div class="brand">
+        <img src="{{logoDataUri}}" alt="Argos" />
+        <div>
+          <div class="nome">ARGOS</div>
+          <div class="sub">Vistoria digital</div>
+        </div>
+      </div>
+      <div class="emissao">
+        Emitido em {{dataEmissao}}<br />
+        Protocolo {{protocolo}}
+      </div>
+    </div>
+    <h1>Relatório do reparo</h1>
+    <p class="lead">
+      {{#if clienteNome}}{{clienteNome}}, este{{else}}Este{{/if}} é o resumo da vistoria do seu veículo e do orçamento de reparo preparado pela oficina.
+    </p>
+  </div>
+
+  <div class="veiculo">
+    <div class="campo">
+      <div class="rotulo">Veículo</div>
+      <div class="valor">{{#if veiculoModelo}}{{veiculoModelo}}{{else}}Não informado{{/if}}</div>
+    </div>
+    <div class="campo">
+      <div class="rotulo">Placa</div>
+      <div class="valor">{{#if veiculoPlaca}}<span class="placa">{{veiculoPlaca}}</span>{{else}}—{{/if}}</div>
+    </div>
+    <div class="campo">
+      <div class="rotulo">Ano</div>
+      <div class="valor">{{#if veiculoAno}}{{veiculoAno}}{{else}}—{{/if}}</div>
+    </div>
+    <div class="campo">
+      <div class="rotulo">Cor</div>
+      <div class="valor">{{#if veiculoCor}}{{veiculoCor}}{{else}}—{{/if}}</div>
+    </div>
+  </div>
+
+  <div class="conteudo">
+    <h2>Oficina responsável</h2>
+    <div class="caixa oficina">
+      <div class="campo">
+        <div class="rotulo">Oficina</div>
+        <div class="valor">{{#if oficinaNome}}{{oficinaNome}}{{else}}Não informada{{/if}}</div>
+      </div>
+      <div class="campo">
+        <div class="rotulo">Cidade</div>
+        <div class="valor">{{#if oficinaCidade}}{{oficinaCidade}}{{else}}—{{/if}}</div>
+      </div>
+      {{#if oficinaEndereco}}
+      <div class="campo">
+        <div class="rotulo">Endereço</div>
+        <div class="valor">{{oficinaEndereco}}</div>
+      </div>
+      {{/if}}
+      <div class="campo">
+        <div class="rotulo">Mecânico responsável</div>
+        <div class="valor">{{mecanicoNome}}</div>
+      </div>
+    </div>
+
+    <h2>O que foi identificado</h2>
+    <div class="caixa">
+      {{#if danosDescritos}}<p style="margin:0 0 10px">{{danosDescritos}}</p>{{/if}}
+      {{#if danosIdentificados.length}}
+      <div class="danos">
+        {{#each danosIdentificados}}<span class="chip">{{this}}</span>{{/each}}
+      </div>
+      {{else}}
+      {{#unless danosDescritos}}<span class="vazio">Os danos estão detalhados no orçamento abaixo.</span>{{/unless}}
+      {{/if}}
+    </div>
+
+    {{#if fotosRelatorio.length}}
+    <h2>Fotos da vistoria</h2>
+    <div class="fotos">
+      {{#each fotosRelatorio}}
+      <div class="foto">
+        <img src="{{url}}" alt="Foto {{numero}}" />
+        <div class="legenda">Foto {{numero}}</div>
+      </div>
+      {{/each}}
+    </div>
+    {{/if}}
+
+    <h2>Orçamento do reparo</h2>
+    {{#if orcamentoCampo.itens.length}}
+    <table class="itens">
+      <thead>
+        <tr>
+          <th>Peça ou serviço</th>
+          <th class="num">Qtd.</th>
+          <th class="num">Peças</th>
+          <th class="num">Mão de obra</th>
+          <th class="num">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{#each orcamentoCampo.itens}}
+        <tr>
+          <td class="peca">{{peca}}</td>
+          <td class="num">{{quantidade}}</td>
+          <td class="num">R$ {{currency valorPecas}}</td>
+          <td class="num">R$ {{currency valorMaoObra}}</td>
+          <td class="num"><strong>R$ {{currency valorTotal}}</strong></td>
+        </tr>
+        {{/each}}
+      </tbody>
+    </table>
+    <div class="totais">
+      <div class="linha"><span>Peças</span><span>R$ {{currency orcamentoCampo.valorPecas}}</span></div>
+      <div class="linha"><span>Mão de obra</span><span>R$ {{currency orcamentoCampo.valorMaoObra}}</span></div>
+      <div class="total"><span>Total</span><span class="num">R$ {{currency orcamentoCampo.valorTotal}}</span></div>
+    </div>
+    {{else}}
+    <div class="caixa vazio">O orçamento ainda não foi preenchido pela oficina.</div>
+    {{/if}}
+
+    <h2>Próximos passos</h2>
+    <div class="passos">
+      {{#each etapas}}
+      <div class="passo{{#if atual}} atual{{/if}}">
+        <div class="n">{{numero}}</div>
+        <div class="t">{{titulo}}</div>
+        <div class="d">{{descricao}}</div>
+      </div>
+      {{/each}}
+    </div>
+
+    <div class="rodape">
+      <span>Valores sujeitos à análise e aprovação da seguradora{{#if seguradoraNome}} ({{seguradoraNome}}){{/if}}. Dúvidas sobre o reparo: fale com a oficina.</span>
+      <span style="white-space:nowrap">Gerado pelo Argos</span>
+    </div>
+  </div>
+</body>
+</html>
