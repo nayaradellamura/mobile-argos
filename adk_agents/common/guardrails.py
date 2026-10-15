@@ -83,6 +83,8 @@ _TERMOS_INTERNOS = [
     "calcular_orcamento_total",
     "carregar_valores_hora_oficina",
     "ler_orcamento_das_fotos",
+    "carregar_contexto_retificacao",
+    "registrar_resposta_ajuste",
     "salvar_valor_hora_oficina",
     "enviar_laudo_cloud_function",
     "transfer_to_agent",
@@ -92,6 +94,7 @@ _TERMOS_INTERNOS = [
     "AnalistaDanosVisao",
     "VerificadorConsistencia",
     "SugestorPecasAssociadas",
+    "RetificacaoVistoriaAgent",
     # chaves de estado e infraestrutura
     "id_vistoria",
     "image_ids_da_leva",

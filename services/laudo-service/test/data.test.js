@@ -16,7 +16,7 @@ Module._load = function (request, ...rest) {
   }
   return loadOriginal.call(this, request, ...rest);
 };
-const { buildOrcamentoCampo, normalizarItem, fotosDeDano, VALOR_HORA_LEGADO } = require("../lib/data");
+const { buildOrcamentoCampo, normalizarItem, fotosDeDano, dadosRetificacao, VALOR_HORA_LEGADO } = require("../lib/data");
 Module._load = loadOriginal;
 
 const itemTabela = (peca, extra = {}) => ({
@@ -203,5 +203,25 @@ describe("fotosDeDano", () => {
   test("sem campo de orçamento, mantém todas", () => {
     assert.equal(fotosDeDano({ images: [{ imageId: "a" }] }).length, 1);
     assert.deepEqual(fotosDeDano({}), []);
+  });
+});
+
+describe("dadosRetificacao", () => {
+  test("só para retificação, com respostas em ordem", () => {
+    assert.equal(dadosRetificacao({ tipoVistoria: "ORIGINAL" }), null);
+
+    const r = dadosRetificacao({
+      tipoVistoria: "RETIFICACAO",
+      vistoriaOrigemId: "VIS-1",
+      ajustesNecessarios: "Foto do chassi; hodômetro",
+      respostasRetificacao: {
+        2: { numero: 2, ajuste: "Hodômetro", status: "nao_aplicavel", resposta: "Já informado." },
+        1: { numero: 1, ajuste: "Foto do chassi", status: "resolvido", resposta: "Foto legível." },
+      },
+    });
+    assert.equal(r.vistoriaOrigemId, "VIS-1");
+    assert.deepEqual(r.respostas.map((x) => x.numero), [1, 2]);
+    assert.equal(r.respostas[0].statusLabel, "Resolvido");
+    assert.equal(r.respostas[1].statusLabel, "Não se aplica");
   });
 });

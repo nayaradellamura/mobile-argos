@@ -193,7 +193,8 @@ class ComLimitesTest(unittest.TestCase):
         from vistoria_team.agent import root_agent
 
         orcamento = root_agent.find_agent("OrcamentoOficinaAgent")
-        for agente in (root_agent, orcamento):
+        retificacao = root_agent.find_agent("RetificacaoVistoriaAgent")
+        for agente in (root_agent, orcamento, retificacao):
             with self.subTest(agente=agente.name):
                 self.assertIs(agente.after_model_callback, filtrar_resposta)
                 self.assertIs(

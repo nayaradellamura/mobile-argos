@@ -165,6 +165,30 @@ function listaDeDanos(agentParameters) {
   return danos.slice(0, 30);
 }
 
+// Ajustes pedidos pelo analista e o que foi feito em cada um, quando a
+// vistoria é uma retificação (ver retificacao_tool.py nos agentes ADK).
+function dadosRetificacao(vistoria) {
+  if (str(vistoria?.tipoVistoria).toUpperCase() !== "RETIFICACAO") return null;
+
+  const STATUS = { resolvido: "Resolvido", nao_aplicavel: "Não se aplica", pendente: "Pendente" };
+  const respostas = Object.values(asObject(vistoria.respostasRetificacao))
+    .filter((r) => r && typeof r === "object")
+    .map((r) => ({
+      numero: Number(r.numero) || 0,
+      ajuste: str(r.ajuste),
+      status: str(r.status),
+      statusLabel: STATUS[str(r.status)] || str(r.status),
+      resposta: str(r.resposta),
+    }))
+    .sort((a, b) => a.numero - b.numero);
+
+  return {
+    vistoriaOrigemId: str(vistoria.vistoriaOrigemId),
+    ajustesNecessarios: str(vistoria.ajustesNecessarios),
+    respostas,
+  };
+}
+
 // Etapas mostradas ao cliente, com a atual destacada pelo status da vistoria.
 function etapasRelatorio(statusVistoria) {
   const status = str(statusVistoria).toUpperCase();
@@ -291,6 +315,8 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
 
     statusVistoria: str(vistoria.status),
     danosIdentificados: listaDeDanos(agentParameters),
+
+    retificacao: dadosRetificacao(vistoria),
   };
 }
 
@@ -303,5 +329,6 @@ module.exports = {
   fotosDeDano,
   listaDeDanos,
   etapasRelatorio,
+  dadosRetificacao,
   VALOR_HORA_LEGADO,
 };

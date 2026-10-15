@@ -36,6 +36,7 @@ from common.firestore_tools import (
 )
 from orcamento_team.agent import orcamento_oficina_agent
 
+from .retificacao_agent import retificacao_vistoria_agent
 from .sub_agents.analista_danos_visao import analista_danos_visao_agent
 from .sub_agents.verificador_consistencia import verificador_consistencia_agent
 from .tools.fotos_tool import carregar_fotos_para_analise
@@ -66,10 +67,10 @@ informar o id da vistoria, nunca invente um) para saber o que já existe
 (placa, veículo, relato inicial, se é uma retificação). Nunca pergunte de
 novo o que essa ferramenta já trouxe.
 
-Se `tipo_vistoria` for uma retificação (tem `ajustes_necessarios`
-preenchido), sua prioridade é resolver exatamente os pontos ali listados,
-usando `contexto_vistoria_anterior` como pano de fundo — não recomece a
-vistoria do zero.
+Se `tipo_vistoria` for "RETIFICACAO" (vistoria devolvida pelo analista
+para ajustes), NÃO conduza a vistoria: transfira imediatamente, sem
+escrever nada, para o `RetificacaoVistoriaAgent`. Ele cuida só dos
+ajustes pedidos e já aproveita os dados da vistoria original.
 
 ## Passo 1 — cumprimento
 Cumprimente rápido, confirmando a placa (`placa_veiculo`). Uma frase.
@@ -185,5 +186,5 @@ root_agent = LlmAgent(
         AgentTool(agent=analista_danos_visao_agent),
         AgentTool(agent=verificador_consistencia_agent),
     ],
-    sub_agents=[orcamento_oficina_agent],
+    sub_agents=[orcamento_oficina_agent, retificacao_vistoria_agent],
 )

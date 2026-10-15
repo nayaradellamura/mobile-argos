@@ -178,7 +178,13 @@ Descrição inicial do sinistro: ${context.danosDescritos || "não informada"}
 Observações registradas: ${context.observacoes || "nenhuma"}
 ${orcamentoTexto}
 Total de fotos enviadas: ${context.fotos.length}
-
+${context.retificacao ? `
+Esta vistoria é uma RETIFICAÇÃO da vistoria ${context.retificacao.vistoriaOrigemId}, devolvida pelo analista.
+Ajustes pedidos: ${context.retificacao.ajustesNecessarios || "não informados"}
+O que o mecânico fez em cada ajuste:
+${context.retificacao.respostas.map((r) => `- ${r.numero}. ${r.ajuste}: ${r.statusLabel}. ${r.resposta}`).join("\n") || "(nada registrado)"}
+As fotos incluem as da vistoria original e as novas, enviadas para os ajustes. Avalie se os ajustes foram atendidos.
+` : ""}
 Transcrição da vistoria (mecânico + IA):
 ${transcricaoTexto || "(sem mensagens registradas)"}
 `.trim();

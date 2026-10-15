@@ -181,6 +181,17 @@
     <h2 class="section-title">Resumo</h2>
     <div class="summary-box">{{resumoExecutivo}}</div>
 
+    {{#if retificacao}}
+    <h2 class="section-title">Retificação</h2>
+    <div class="summary-box">
+      <p style="margin:0 0 6px"><strong>Vistoria de origem:</strong> {{retificacao.vistoriaOrigemId}}</p>
+      <p style="margin:0 0 6px"><strong>Ajustes pedidos pelo analista:</strong> {{retificacao.ajustesNecessarios}}</p>
+      {{#each retificacao.respostas}}
+      <p style="margin:6px 0 0"><strong>{{numero}}. {{ajuste}}</strong> — {{statusLabel}}. {{resposta}}</p>
+      {{/each}}
+    </div>
+    {{/if}}
+
     <h2 class="section-title">Classificação de Severidade</h2>
     <div class="severity-block">
       <span class="severity-badge">{{classificacaoContran}}</span>
