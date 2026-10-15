@@ -149,7 +149,15 @@ async function loadCallerUserDoc({ db, uid, email }) {
 // sinistroId gravado na vistoria, ou o próprio id da chamada), nunca de um
 // sinistroId solto mandado pelo app, senão dá pra parear uma vistoria alheia
 // com um sinistro da própria oficina.
+//
+// DESLIGADO por decisão do grupo (2026-10-15): enquanto a regra de acesso
+// por usuário não for revista, as callables voltam a atender qualquer
+// usuário autenticado, como antes. Para religar, troque para true.
+const VERIFICAR_ACESSO_POR_OFICINA = false;
+
 async function assertCanAccessVistoria({ uid, email, vistoria = {}, sinistro = {}, logContext = {} }) {
+  if (!VERIFICAR_ACESSO_POR_OFICINA) return;
+
   const db = admin.firestore();
   const logInfo = { uid, ...logContext };
 
