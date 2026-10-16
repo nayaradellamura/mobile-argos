@@ -2919,3 +2919,32 @@ exports.gerarRelatorioCliente = onCall(
     return { status: "gerando" };
   }
 );
+
+// ── Ouvir mensagens do Argos (teste) ───────────────────────────────────────
+//
+// Opção oculta no perfil: com ela ligada, cada mensagem do Argos no chat
+// ganha um botão de ouvir. O app manda o texto; volta o MP3 em base64.
+const falaArgos = require("./fala_argos");
+
+exports.falarMensagemArgos = onCall(
+  { region: "us-central1", timeoutSeconds: 30 },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Usuário precisa estar autenticado.");
+    }
+
+    const texto = str(request.data?.texto);
+    if (!texto) throw new HttpsError("invalid-argument", "Texto vazio.");
+    if (texto.length > falaArgos.MAX_CARACTERES * 2) {
+      throw new HttpsError("invalid-argument", "Mensagem longa demais para ouvir.");
+    }
+
+    try {
+      const audio = await falaArgos.sintetizar({ texto, projectId: FIREBASE_PROJECT_ID });
+      return { audio, mimeType: "audio/mpeg" };
+    } catch (e) {
+      console.error("Falha ao sintetizar fala:", e.message);
+      throw new HttpsError("internal", "Não foi possível gerar o áudio agora.");
+    }
+  }
+);

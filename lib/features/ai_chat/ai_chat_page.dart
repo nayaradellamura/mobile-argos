@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:math';
 
 import 'package:audioplayers/audioplayers.dart';
@@ -14,6 +16,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 
 import '../../services/argos_ai_service.dart';
+import '../../services/preferencias_service.dart';
 import '../../services/argos_connectivity_service.dart';
 import '../../services/bulk_sync_coordinator.dart';
 import '../../services/user_audio_storage_service.dart';
@@ -195,6 +198,13 @@ class _AiChatPageState extends State<AiChatPage> {
   void initState() {
     super.initState();
 
+    PreferenciasService.instance.ouvirMensagensArgos
+        .addListener(_onPreferenciasChanged);
+    PreferenciasService.instance.carregar();
+    _falaPlayer.onPlayerComplete.listen((_) {
+      if (mounted) setState(() => _falaTexto = null);
+    });
+
     messageController.addListener(() {
       final currentHasText = messageController.text.trim().isNotEmpty;
 
@@ -224,6 +234,9 @@ class _AiChatPageState extends State<AiChatPage> {
 
   @override
   void dispose() {
+    PreferenciasService.instance.ouvirMensagensArgos
+        .removeListener(_onPreferenciasChanged);
+    _falaPlayer.dispose();
     widget.selectedTabIndexListenable
         ?.removeListener(_onSelectedTabIndexChanged);
     ArgosConnectivityService.instance.isOnline.removeListener(
@@ -2200,6 +2213,58 @@ class _AiChatPageState extends State<AiChatPage> {
     _mostrarRespostaDoArgos(reply.isEmpty ? fallback : reply);
   }
 
+  // ── Ouvir mensagens do Argos (teste, ver PreferenciasService) ──────────
+  final AudioPlayer _falaPlayer = AudioPlayer();
+  final Map<String, Uint8List> _falaCache = {};
+  String? _falaTexto;
+  bool _falaCarregando = false;
+
+  void _onPreferenciasChanged() {
+    if (!mounted) return;
+    if (!PreferenciasService.instance.ouvirMensagensArgos.value) {
+      _falaPlayer.stop();
+      _falaTexto = null;
+    }
+    setState(() {});
+  }
+
+  /// Toca a mensagem em voz; se ela já estiver tocando, para.
+  Future<void> _alternarFala(String texto) async {
+    if (_falaTexto == texto) {
+      await _falaPlayer.stop();
+      if (mounted) setState(() => _falaTexto = null);
+      return;
+    }
+
+    await _falaPlayer.stop();
+    setState(() {
+      _falaTexto = texto;
+      _falaCarregando = true;
+    });
+
+    try {
+      var audio = _falaCache[texto];
+      if (audio == null) {
+        final result = await FirebaseFunctions.instanceFor(region: 'us-central1')
+            .httpsCallable('falarMensagemArgos')
+            .call<Map<String, dynamic>>({'texto': texto});
+        audio = base64Decode(result.data['audio'].toString());
+        _falaCache[texto] = audio;
+      }
+
+      if (!mounted || _falaTexto != texto) return;
+      await _falaPlayer.play(BytesSource(audio, mimeType: 'audio/mpeg'));
+    } catch (e) {
+      debugPrint('Erro ao ouvir mensagem: $e');
+      if (mounted) {
+        setState(() => _falaTexto = null);
+        _showSnack('Não foi possível tocar a mensagem agora.');
+      }
+    } finally {
+      if (mounted) setState(() => _falaCarregando = false);
+    }
+  }
+
   /// Mostra uma resposta do Argos no chat e aplica os gatilhos de câmera e
   /// orçamento que ela possa trazer.
   void _mostrarRespostaDoArgos(String texto) {
@@ -3033,6 +3098,17 @@ class _AiChatPageState extends State<AiChatPage> {
                               padding: const EdgeInsets.only(bottom: 16),
                               child: _ChatBubble(
                                 message: message,
+                                acaoOuvir: message.type == ChatMessageType.ai &&
+                                        PreferenciasService.instance
+                                            .ouvirMensagensArgos.value
+                                    ? _BotaoOuvir(
+                                        tocando: _falaTexto == message.text,
+                                        carregando: _falaCarregando &&
+                                            _falaTexto == message.text,
+                                        onTap: () =>
+                                            _alternarFala(message.text),
+                                      )
+                                    : null,
                                 onOpenCamera:
                                     isCameraReleaseMessage ? _openCamera : null,
                                 onChooseColetaModo: message.isColetaModoPrompt &&
@@ -3898,10 +3974,14 @@ class _ChatBubble extends StatelessWidget {
   /// Não-nulo apenas na bolha da pergunta bifurcada, pra renderizar os botões inline.
   final void Function(ColetaModo)? onChooseColetaModo;
 
+  /// Botão de ouvir a mensagem (opção de teste ligada no perfil).
+  final Widget? acaoOuvir;
+
   const _ChatBubble({
     required this.message,
     this.onOpenCamera,
     this.onChooseColetaModo,
+    this.acaoOuvir,
   });
 
   @override
@@ -3912,6 +3992,7 @@ class _ChatBubble extends StatelessWidget {
           text: message.text,
           boldLineIndexes: message.boldLineIndexes,
           createdAt: message.createdAt,
+          acaoOuvir: acaoOuvir,
           onOpenCamera: onOpenCamera,
           isColetaModoPrompt: message.isColetaModoPrompt,
           selectedColetaModo: message.selectedColetaModo,
@@ -3952,11 +4033,13 @@ class _AiBubble extends StatelessWidget {
   final bool isColetaModoPrompt;
   final ColetaModo? selectedColetaModo;
   final void Function(ColetaModo)? onChooseColetaModo;
+  final Widget? acaoOuvir;
 
   const _AiBubble({
     required this.text,
     this.boldLineIndexes = const [],
     this.createdAt,
+    this.acaoOuvir,
     this.onOpenCamera,
     this.isColetaModoPrompt = false,
     this.selectedColetaModo,
@@ -4062,16 +4145,19 @@ class _AiBubble extends StatelessWidget {
                   ),
                 ],
                 const SizedBox(height: 6),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: Text(
-                    _formatMessageTime(createdAt),
-                    style: TextStyle(
-                      color: const Color(0xFF414755).withOpacity(.60),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
+                Row(
+                  children: [
+                    if (acaoOuvir != null) acaoOuvir!,
+                    const Spacer(),
+                    Text(
+                      _formatMessageTime(createdAt),
+                      style: TextStyle(
+                        color: const Color(0xFF414755).withOpacity(.60),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
-                  ),
+                  ],
                 ),
               ],
             ),
@@ -5623,6 +5709,59 @@ class _TypingBubbleState extends State<_TypingBubble>
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Botão pequeno de ouvir/parar a mensagem do Argos (opção de teste).
+class _BotaoOuvir extends StatelessWidget {
+  final bool tocando;
+  final bool carregando;
+  final VoidCallback onTap;
+
+  const _BotaoOuvir({
+    required this.tocando,
+    required this.carregando,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tocando ? 'Parar' : 'Ouvir mensagem',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (carregando)
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else
+                Icon(
+                  tocando ? Icons.stop_circle_rounded : Icons.volume_up_rounded,
+                  size: 18,
+                  color: const Color(0xFF0057C0),
+                ),
+              const SizedBox(width: 4),
+              Text(
+                tocando ? 'Parar' : 'Ouvir',
+                style: const TextStyle(
+                  color: Color(0xFF0057C0),
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
