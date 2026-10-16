@@ -2047,13 +2047,20 @@ class _AiChatPageState extends State<AiChatPage> {
 
     if (photos == null || photos.isEmpty) return;
 
+    await _enviarFotos(session, photos.map((p) => p.path).toList());
+  }
+
+  /// Sobe as fotos, mostra cada uma no chat e avisa o Argos das que subiram.
+  /// As que falharem continuam no aparelho e podem ser reenviadas pelo aviso,
+  /// sem precisar fotografar de novo.
+  Future<void> _enviarFotos(VistoriaSession session, List<String> paths) async {
     setState(() {
-      for (final photo in photos) {
+      for (final path in paths) {
         messages.add(
           ChatMessage(
             type: ChatMessageType.photo,
             text: 'Foto anexada à vistoria',
-            imagePath: photo.path,
+            imagePath: path,
             createdAt: DateTime.now(),
           ),
         );
@@ -2063,20 +2070,20 @@ class _AiChatPageState extends State<AiChatPage> {
     _scrollToBottom();
 
     var uploadedCount = 0;
-    final failedPaths = <String>{};
+    final failedPaths = <String>[];
 
-    for (final photo in photos) {
+    for (final path in paths) {
       try {
         final uploadedImage =
             await VistoriaChatSessionService.instance.uploadImageFile(
           vistoriaDocId: session.docId,
-          imagePath: photo.path,
+          imagePath: path,
         );
 
         await VistoriaChatSessionService.instance.appendImageEvidence(
           vistoriaDocId: session.docId,
           imageUrl: uploadedImage.downloadUrl,
-          imagePath: photo.path,
+          imagePath: path,
           imageId: uploadedImage.imageId,
           storagePath: uploadedImage.storagePath,
           fileName: uploadedImage.fileName,
@@ -2098,7 +2105,7 @@ class _AiChatPageState extends State<AiChatPage> {
 
         uploadedCount++;
       } catch (e) {
-        failedPaths.add(photo.path);
+        failedPaths.add(path);
         debugPrint('Erro ao salvar foto da vistoria no Storage: $e');
       }
     }
@@ -2114,14 +2121,28 @@ class _AiChatPageState extends State<AiChatPage> {
       });
 
       final failed = failedPaths.length;
-      _showSnack(
-        failed == photos.length
-            ? 'Não foi possível enviar as fotos. Verifique a conexão e '
-                'tente novamente.'
-            : 'Não foi possível enviar $failed foto${failed > 1 ? 's' : ''}. '
-                'Tire de novo para anexar.',
-        backgroundColor: Colors.redAccent,
-      );
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            duration: const Duration(seconds: 12),
+            backgroundColor: Colors.redAccent,
+            content: Text(
+              failed == paths.length
+                  ? 'Não foi possível enviar as fotos. Verifique a conexão.'
+                  : 'Não foi possível enviar $failed '
+                      'foto${failed > 1 ? 's' : ''}.',
+            ),
+            action: SnackBarAction(
+              label: 'Reenviar',
+              textColor: Colors.white,
+              onPressed: () {
+                if (!mounted || isInspectionCompleted) return;
+                unawaited(_enviarFotos(session, failedPaths));
+              },
+            ),
+          ),
+        );
     }
 
     if (uploadedCount == 0) return;
@@ -3367,8 +3388,8 @@ class _SinistroSelectionViewState extends State<_SinistroSelectionView> {
                         },
                         borderRadius: BorderRadius.circular(12),
                         child: SizedBox(
-                          width: 36,
-                          height: 36,
+                          width: 44,
+                          height: 44,
                           child: Icon(
                             _isSearching ? Icons.close : Icons.search,
                             color: _isSearching
@@ -3951,6 +3972,7 @@ class _AiBubble extends StatelessWidget {
                   _ColetaModoChoiceButton(
                     icon: Icons.chat_bubble_rounded,
                     label: 'Passo a passo',
+                    subtitle: 'O Argos pergunta e libera a câmera em cada etapa.',
                     selected: selectedColetaModo == ColetaModo.guiado,
                     onTap: selectedColetaModo == null &&
                             onChooseColetaModo != null
@@ -3961,6 +3983,8 @@ class _AiBubble extends StatelessWidget {
                   _ColetaModoChoiceButton(
                     icon: Icons.upload_file_rounded,
                     label: 'Enviar tudo de uma vez',
+                    subtitle:
+                        'Você junta fotos, áudios e orçamento e envia no fim. Funciona sem internet.',
                     selected: selectedColetaModo == ColetaModo.emMassa,
                     onTap: selectedColetaModo == null &&
                             onChooseColetaModo != null
@@ -4011,6 +4035,7 @@ class _AiBubble extends StatelessWidget {
 class _ColetaModoChoiceButton extends StatelessWidget {
   final IconData icon;
   final String label;
+  final String? subtitle;
   final bool selected;
 
   /// Null quando a pergunta já foi respondida; o botão vira só-leitura.
@@ -4019,6 +4044,7 @@ class _ColetaModoChoiceButton extends StatelessWidget {
   const _ColetaModoChoiceButton({
     required this.icon,
     required this.label,
+    this.subtitle,
     this.selected = false,
     required this.onTap,
   });
@@ -4052,12 +4078,29 @@ class _ColetaModoChoiceButton extends StatelessWidget {
             children: [
               Icon(icon, color: foreground, size: 16),
               const SizedBox(width: 8),
-              Text(
-                label,
-                style: TextStyle(
-                  color: foreground,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 13,
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      label,
+                      style: TextStyle(
+                        color: foreground,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                      ),
+                    ),
+                    if (subtitle != null && !answered)
+                      Text(
+                        subtitle!,
+                        style: TextStyle(
+                          color: foreground.withOpacity(.85),
+                          fontWeight: FontWeight.w500,
+                          fontSize: 11.5,
+                        ),
+                      ),
+                  ],
                 ),
               ),
               if (showsAsChosen) ...[
