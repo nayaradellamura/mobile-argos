@@ -1145,6 +1145,9 @@ class VistoriaChatSessionService {
     }, SetOptions(merge: true));
   }
 
+  // Desempata ids de fotos que sobem em paralelo no mesmo instante.
+  int _seqImagem = 0;
+
   // Sobe uma foto pro Storage e retorna seus metadados de evidência.
   Future<UploadedImageEvidence> uploadImageFile({
     required String vistoriaDocId,
@@ -1157,7 +1160,10 @@ class VistoriaChatSessionService {
     }
 
     final bytes = await file.length();
-    final imageId = 'img_${DateTime.now().millisecondsSinceEpoch}';
+    // O app sobe as fotos de uma leva em paralelo: só o timestamp em ms
+    // poderia repetir, e o Storage recusa sobrescrever (regra `create`).
+    final imageId =
+        'img_${DateTime.now().millisecondsSinceEpoch}_${_seqImagem++}';
     final fileName = '$imageId.jpg';
     final storagePath = 'vistorias/$vistoriaDocId/images/$fileName';
 
