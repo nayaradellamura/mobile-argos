@@ -1206,7 +1206,10 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                       'Relatório do reparo para mandar ao dono do veículo.',
                                 ),
                                 const SizedBox(height: 10),
-                                _RelatorioClienteCard(inspection: inspection),
+                                _RelatorioClienteCard(
+                                  sinistroId: inspection.id,
+                                  vistoriaDocId: inspection.vistoriaAtualId.trim(),
+                                ),
                               ],
                               const SizedBox(height: 14),
                               _SectionCard(
@@ -1807,8 +1810,8 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
           Row(
             children: [
               // Chat sempre aparece (no "Tudo de uma vez" ele traz a
-              // resposta do Argos ao pacote); Orçamento, nos dois modos,
-              // quando a vistoria tem itens.
+              // resposta do Argos ao pacote). O orçamento tem card próprio
+              // logo abaixo, junto do relatório para o cliente.
               Expanded(
                 child: _PreviewSelectorTile(
                   icon: Icons.chat_bubble_outline,
@@ -1821,23 +1824,6 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
                 ),
               ),
               const SizedBox(width: 8),
-              if (vistoria.orcamentoItems.isNotEmpty) ...[
-                Expanded(
-                  child: _PreviewSelectorTile(
-                    icon: Icons.request_quote_outlined,
-                    label: 'Orçamento',
-                    value: '${vistoria.orcamentoItems.length}',
-                    isSelected:
-                        _selectedSection == _HistoryPreviewSection.orcamento,
-                    onTap: () {
-                      setState(
-                        () => _selectedSection = _HistoryPreviewSection.orcamento,
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(width: 8),
-              ],
               Expanded(
                 child: _PreviewSelectorTile(
                   icon: Icons.image_outlined,
@@ -1868,6 +1854,11 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
             duration: const Duration(milliseconds: 180),
             child: _selectedPreviewBlock(),
           ),
+          if (vistoria.orcamentoItems.isNotEmpty ||
+              vistoria.sinistroId.trim().isNotEmpty) ...[
+            const SizedBox(height: 12),
+            _HistoryOrcamentoCard(vistoria: vistoria),
+          ],
           const SizedBox(height: 12),
           _PreviewBlock(
             title: 'Laudo técnico (para a seguradora)',
@@ -2746,9 +2737,8 @@ class _HistoryOrcamentoPreviewList extends StatelessWidget {
                       const SizedBox(height: 2),
                       EllipsisText(
                         '${item.quantidade}x ${tipoIntervencaoLabel(item.tipoIntervencao)} • '
-                        '${formatCurrencyBRL(item.valorPeca * item.quantidade)} + '
-                        '${formatHoras(item.horasMaoObra)}'
-                        '${item.tipoServico.isEmpty ? '' : ' de ${tipoServicoLabel(item.tipoServico).toLowerCase()}'}',
+                        '${formatCurrencyBRL(item.valorPeca * item.quantidade)}'
+                        '${item.horasMaoObra > 0 ? ' + ${formatHoras(item.horasMaoObra)}${item.tipoServico.isEmpty ? '' : ' de ${tipoServicoLabel(item.tipoServico).toLowerCase()}'}' : ''}',
                         style: const TextStyle(
                           color: Color(0xFF6B7280),
                           fontSize: 11,
@@ -5915,9 +5905,17 @@ class _FastPersonAvatar extends StatelessWidget {
 /// próximos passos), com o visual da Argos. Gerado no servidor a cada toque,
 /// porque o orçamento pode ter mudado desde a última vez.
 class _RelatorioClienteCard extends StatefulWidget {
-  final InspectionCase inspection;
+  final String sinistroId;
+  final String vistoriaDocId;
 
-  const _RelatorioClienteCard({required this.inspection});
+  /// Só o botão, para ir dentro do card de orçamento da aba Vistorias.
+  final bool compacto;
+
+  const _RelatorioClienteCard({
+    required this.sinistroId,
+    required this.vistoriaDocId,
+    this.compacto = false,
+  });
 
   @override
   State<_RelatorioClienteCard> createState() => _RelatorioClienteCardState();
@@ -5927,10 +5925,22 @@ class _RelatorioClienteCardState extends State<_RelatorioClienteCard> {
   bool _gerando = false;
 
   Future<void> _gerar() async {
-    final sinistroId = widget.inspection.id;
-    final vistoriaId = widget.inspection.vistoriaAtualId.trim();
+    final sinistroId = widget.sinistroId;
+    final vistoriaId = widget.vistoriaDocId;
     final sinistroRef =
         FirebaseFirestore.instance.collection('sinistro').doc(sinistroId);
+
+    // Antes de gerar, o mecânico escolhe as fotos e a validade.
+    final opcoes = await showModalBottomSheet<_OpcoesRelatorio>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (_) => _RelatorioOpcoesSheet(vistoriaDocId: vistoriaId),
+    );
+    if (opcoes == null || !mounted) return;
 
     setState(() => _gerando = true);
 
@@ -5940,6 +5950,8 @@ class _RelatorioClienteCardState extends State<_RelatorioClienteCard> {
           .call<Map<String, dynamic>>({
         'sinistroId': sinistroId,
         'vistoriaId': vistoriaId,
+        'fotosExcluidas': opcoes.fotosExcluidas,
+        'validadeDias': opcoes.validadeDias,
       });
 
       // A função marca "gerando"; espera o laudo-service trocar para
@@ -5980,9 +5992,49 @@ class _RelatorioClienteCardState extends State<_RelatorioClienteCard> {
     }
   }
 
+  Widget _botao() {
+    const color = Color(0xFF0057C0);
+
+    return SizedBox(
+      width: double.infinity,
+      child: ElevatedButton.icon(
+        onPressed: _gerando ? null : _gerar,
+        icon: _gerando
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white,
+                ),
+              )
+            : const Icon(Icons.picture_as_pdf_outlined, size: 18),
+        label: Text(
+          _gerando
+              ? 'Gerando relatório...'
+              : widget.compacto
+                  ? 'Relatório para o cliente (PDF)'
+                  : 'Gerar relatório (PDF)',
+        ),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: color,
+          foregroundColor: Colors.white,
+          disabledBackgroundColor: color.withOpacity(.6),
+          disabledForegroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     const color = Color(0xFF0057C0);
+
+    if (widget.compacto) return _botao();
 
     return Container(
       width: double.infinity,
@@ -6021,33 +6073,374 @@ class _RelatorioClienteCardState extends State<_RelatorioClienteCard> {
             ),
           ),
           const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: _gerando ? null : _gerar,
-              icon: _gerando
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
-                      ),
-                    )
-                  : const Icon(Icons.picture_as_pdf_outlined, size: 18),
-              label: Text(_gerando ? 'Gerando relatório...' : 'Gerar relatório (PDF)'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: color,
-                foregroundColor: Colors.white,
-                disabledBackgroundColor: color.withOpacity(.6),
-                disabledForegroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
+          _botao(),
+        ],
+      ),
+    );
+  }
+}
+
+/// O que o mecânico escolheu antes de gerar o relatório do cliente.
+class _OpcoesRelatorio {
+  /// storagePath (ou url) das fotos que NÃO vão para o cliente.
+  final List<String> fotosExcluidas;
+  final int validadeDias;
+
+  const _OpcoesRelatorio({
+    required this.fotosExcluidas,
+    required this.validadeDias,
+  });
+}
+
+/// Antes de gerar o relatório: escolher as fotos que vão para o cliente
+/// (ex.: tirar a foto em que o mecânico aparece) e a validade do orçamento.
+/// A validade escolhida vira o padrão da oficina (gravado pela função).
+class _RelatorioOpcoesSheet extends StatefulWidget {
+  final String vistoriaDocId;
+
+  const _RelatorioOpcoesSheet({required this.vistoriaDocId});
+
+  @override
+  State<_RelatorioOpcoesSheet> createState() => _RelatorioOpcoesSheetState();
+}
+
+class _RelatorioOpcoesSheetState extends State<_RelatorioOpcoesSheet> {
+  static const _validades = [7, 15, 30];
+
+  bool _carregando = true;
+  final List<MapEntry<String, String>> _fotos = []; // id -> url
+  final Set<String> _excluidas = {};
+  int _validadeDias = 15;
+
+  @override
+  void initState() {
+    super.initState();
+    _carregar();
+  }
+
+  Future<void> _carregar() async {
+    try {
+      final db = FirebaseFirestore.instance;
+      final vistoria =
+          (await db.collection('vistorias').doc(widget.vistoriaDocId).get())
+                  .data() ??
+              const <String, dynamic>{};
+
+      // Mesmo filtro do laudo-service: foto de orçamento pronto não é foto
+      // de dano e já fica de fora do relatório.
+      final idsOrcamento = {
+        for (final id in (vistoria['imagensOrcamentoIds'] as List? ?? const []))
+          id.toString(),
+      };
+      for (final img in (vistoria['images'] as List? ?? const [])) {
+        if (img is! Map) continue;
+        if (idsOrcamento.contains(img['imageId']?.toString())) continue;
+        final url = img['url']?.toString() ?? '';
+        if (url.isEmpty) continue;
+        final storagePath = img['storagePath']?.toString() ?? '';
+        _fotos.add(MapEntry(storagePath.isNotEmpty ? storagePath : url, url));
+      }
+
+      final credenciadoId = vistoria['credenciadoId']?.toString() ?? '';
+      if (credenciadoId.isNotEmpty) {
+        final oficina =
+            (await db.collection('credenciados').doc(credenciadoId).get())
+                .data();
+        final dias = oficina?['validadeOrcamentoDias'];
+        if (dias is num && dias >= 1 && dias <= 180) {
+          _validadeDias = dias.round();
+        }
+      }
+    } catch (e) {
+      debugPrint('Erro ao carregar opções do relatório: $e');
+    }
+
+    if (mounted) setState(() => _carregando = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const color = Color(0xFF0057C0);
+    final validades = {..._validades, _validadeDias}.toList()..sort();
+    final incluidas = _fotos.length - _excluidas.length;
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * .85,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFD1D5DB),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                'Relatório para o cliente',
+                style: GoogleFonts.spaceGrotesk(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: const Color(0xFF1F2937),
+                ),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'Escolha as fotos que vão para o cliente e a validade do orçamento.',
+                style: TextStyle(
+                  color: Color(0xFF6B7280),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 14),
+              if (_carregando)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 32),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _fotos.isEmpty
+                              ? 'Esta vistoria não tem fotos.'
+                              : 'Fotos ($incluidas de ${_fotos.length}) · toque para tirar ou incluir',
+                          style: const TextStyle(
+                            color: Color(0xFF414755),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        GridView.count(
+                          crossAxisCount: 3,
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          mainAxisSpacing: 8,
+                          crossAxisSpacing: 8,
+                          children: [
+                            for (final foto in _fotos)
+                              _FotoSelecionavel(
+                                url: foto.value,
+                                incluida: !_excluidas.contains(foto.key),
+                                onTap: () => setState(() {
+                                  if (!_excluidas.remove(foto.key)) {
+                                    _excluidas.add(foto.key);
+                                  }
+                                }),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        const Text(
+                          'Validade do orçamento',
+                          style: TextStyle(
+                            color: Color(0xFF414755),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          children: [
+                            for (final dias in validades)
+                              ChoiceChip(
+                                label: Text('$dias dias'),
+                                selected: _validadeDias == dias,
+                                onSelected: (_) =>
+                                    setState(() => _validadeDias = dias),
+                              ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _carregando
+                      ? null
+                      : () => Navigator.of(context).pop(
+                            _OpcoesRelatorio(
+                              fotosExcluidas: _excluidas.toList(),
+                              validadeDias: _validadeDias,
+                            ),
+                          ),
+                  icon: const Icon(Icons.picture_as_pdf_outlined, size: 18),
+                  label: const Text('Gerar relatório (PDF)'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: color,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Miniatura de foto com marca de incluída/excluída do relatório.
+class _FotoSelecionavel extends StatelessWidget {
+  final String url;
+  final bool incluida;
+  final VoidCallback onTap;
+
+  const _FotoSelecionavel({
+    required this.url,
+    required this.incluida,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      selected: incluida,
+      label: incluida ? 'Foto incluída no relatório' : 'Foto fora do relatório',
+      child: GestureDetector(
+        onTap: onTap,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.network(
+                url,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) =>
+                    const ColoredBox(color: Color(0xFFE5E7EB)),
+              ),
+              if (!incluida) Container(color: Colors.white.withOpacity(.65)),
+              Positioned(
+                top: 6,
+                right: 6,
+                child: Icon(
+                  incluida ? Icons.check_circle : Icons.remove_circle,
+                  color: incluida
+                      ? const Color(0xFF0057C0)
+                      : const Color(0xFF9CA3AF),
+                  size: 22,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Card do orçamento na aba Vistorias, separado do "Resumo da vistoria":
+/// itens recolhíveis, total e o relatório para o cliente logo abaixo.
+class _HistoryOrcamentoCard extends StatefulWidget {
+  final LinkedVistoriaInfo vistoria;
+
+  const _HistoryOrcamentoCard({required this.vistoria});
+
+  @override
+  State<_HistoryOrcamentoCard> createState() => _HistoryOrcamentoCardState();
+}
+
+class _HistoryOrcamentoCardState extends State<_HistoryOrcamentoCard> {
+  bool _aberto = false;
+
+  @override
+  Widget build(BuildContext context) {
+    const color = Color(0xFF0057C0);
+    final itens = widget.vistoria.orcamentoItems;
+    final total = itens.fold<double>(0, (soma, item) => soma + item.valorTotal);
+    final podeGerar = widget.vistoria.sinistroId.trim().isNotEmpty;
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: color.withOpacity(.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: itens.isEmpty ? null : () => setState(() => _aberto = !_aberto),
+            borderRadius: BorderRadius.circular(12),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  const Icon(Icons.request_quote_outlined, color: color, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Orçamento (para o cliente)',
+                          style: GoogleFonts.spaceGrotesk(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: color,
+                          ),
+                        ),
+                        Text(
+                          itens.isEmpty
+                              ? 'Nenhum item registrado ainda.'
+                              : '${itens.length} ite${itens.length > 1 ? 'ns' : 'm'} · ${formatCurrencyBRL(total)}',
+                          style: const TextStyle(
+                            color: Color(0xFF6B7280),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (itens.isNotEmpty)
+                    Icon(
+                      _aberto ? Icons.expand_less : Icons.expand_more,
+                      color: color,
+                      semanticLabel: _aberto ? 'Recolher itens' : 'Ver itens',
+                    ),
+                ],
               ),
             ),
           ),
+          if (_aberto) ...[
+            const SizedBox(height: 10),
+            _HistoryOrcamentoPreviewList(vistoria: widget.vistoria),
+          ],
+          if (podeGerar) ...[
+            const SizedBox(height: 12),
+            _RelatorioClienteCard(
+              sinistroId: widget.vistoria.sinistroId,
+              vistoriaDocId: widget.vistoria.docId,
+              compacto: true,
+            ),
+          ],
         ],
       ),
     );
