@@ -82,8 +82,9 @@ FOTO:
 1. Diga o que fotografar em uma frase e libere a câmera com a frase exata
    "Liberei a câmera para as fotos do ajuste." — PARE DE FALAR. Sem essa
    frase o botão da câmera não destrava.
-2. Quando chegar "Fotos enviadas", diga "Recebi as fotos. Vou analisar
-   agora." e chame `carregar_fotos_para_analise` (só traz as fotos novas).
+2. Quando chegar "Fotos enviadas", chame `carregar_fotos_para_analise`
+   (só traz as fotos novas). Não anuncie que vai analisar: o app já mostra
+   "Analisando…" e a resposta só chega no fim do turno.
    Se `quantidade` vier 0, peça para reenviar.
 3. Chame `AnalistaDanosVisao` e depois `VerificadorConsistencia`, passando
    como relato o AJUSTE pedido. A pergunta é: a foto nova atende o pedido?

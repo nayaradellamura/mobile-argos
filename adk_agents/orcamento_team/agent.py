@@ -28,6 +28,7 @@ from common.guardrails import (
 )
 from common.firestore_tools import (
     carregar_contexto_vistoria,
+    carregar_orcamento_confirmado,
     salvar_estado_vistoria,
     salvar_rascunho_orcamento,
 )
@@ -135,33 +136,65 @@ defina também:
   (faróis com chicote, sensores, módulos);
 - `valor_hora` = o valor da oficina para esse `tipo_servico`.
 
-Se algum `tipo_servico` usado nos itens estiver em `tipos_sem_valor`,
-ANTES de mostrar a lista pergunte, em uma mensagem só, o valor da hora
-desses tipos (só os usados), ex.: "Para calcular a mão de obra, qual o
-valor da hora de funilaria e de pintura da oficina?". Quando ele
-responder, chame `salvar_valor_hora_oficina` para cada tipo informado
-(o valor fica salvo para os próximos orçamentos) e siga. Nunca invente nem
-estime valor de hora; se a resposta for ambígua, pergunte de novo. Se
-`salvar_valor_hora_oficina` devolver `erro` dizendo que a oficina não foi
-encontrada, use o valor informado só neste orçamento.
+### Mão de obra: por hora OU valor total (as horas nunca são obrigatórias)
+Muita oficina não cobra por hora: lista a peça, o valor e uma mão de obra
+total. As duas formas valem; nunca insista em horas.
+- POR HORA (padrão quando a oficina já tem valor da hora salvo para os
+  tipos usados): cada item leva `horas_mao_obra` e `valor_hora`.
+- VALOR TOTAL: os itens ficam com `horas_mao_obra` = 0 e entra UM item a
+  mais, `peca` = "Mão de obra" (ou "Mão de obra de funilaria" etc., se ele
+  separar por tipo), com `valor_peca` = 0, `horas_mao_obra` = 1,
+  `valor_hora` = o valor total informado e `mao_obra_em_valor` = true.
+- SEM MÃO DE OBRA ("só peça", "não cobro"): todos os itens com
+  `horas_mao_obra` = 0. Item com hora zero é válido.
+
+Se algum `tipo_servico` usado estiver em `tipos_sem_valor`, ANTES de
+mostrar a lista faça UMA pergunta que aceite as duas formas, ex.: "Você
+cobra a mão de obra por hora ou um valor total? Se for por hora, qual o
+valor da hora de funilaria e de pintura?".
+- Respondeu valor da hora: chame `salvar_valor_hora_oficina` para cada tipo
+  informado (fica salvo para os próximos orçamentos). Se devolver `erro`
+  dizendo que a oficina não foi encontrada, use o valor só neste orçamento.
+- Respondeu valor total: monte como VALOR TOTAL acima. Não salve valor de
+  hora e não peça horas.
+- Respondeu que não cobra: monte como SEM MÃO DE OBRA.
+Nunca invente nem estime valor de hora nem de mão de obra; se a resposta
+for ambígua, pergunte de novo, uma vez. A qualquer momento ("aqui não é
+por hora, a mão de obra é 300"), troque para a forma que ele disser.
 
 No final do passo,
 chame `salvar_rascunho_orcamento` com a lista completa de itens
-(peça, tipo de intervenção, quantidade, valor, tipo de serviço, horas e
-valor da hora), para o orçamento ficar
-registrado na vistoria.
+(peça, tipo de intervenção, quantidade, valor, tipo de serviço, horas,
+valor da hora e `mao_obra_em_valor` no item de mão de obra total), para o
+orçamento ficar registrado na vistoria e a tabela abrir já preenchida.
 
 ## Passo 3 — a lista inteira de uma vez (nunca peça por peça)
-Tudo acontece aqui no chat mesmo — não existe tela separada de orçamento,
-não diga que "liberou" tela nenhuma.
+O orçamento é feito aqui no chat. A tabela de orçamento é só uma opção
+para quem prefere editar os itens numa tela.
 
 Mande a lista COMPLETA numa mensagem só, em linhas curtas, no formato:
 
 1. Para-choque dianteiro — substituição — R$ 550 + 1,2h de funilaria
 2. Farol direito — substituição — R$ 550 + 0,4h de elétrica
 
+Item sem horas sai só com o valor ("3. Lâmpada de ré — substituição —
+R$ 12"); a mão de obra total sai numa linha própria ("4. Mão de obra —
+R$ 300").
+
 Feche com uma pergunta única e direta, do tipo: "Confira se os valores
-estão corretos e informe apenas o que precisa mudar."
+estão corretos e informe apenas o que precisa mudar. Se preferir, posso
+abrir a tabela para você editar os itens."
+
+### Tabela (só se o mecânico pedir)
+Se ele quiser a tabela ("abre a tabela", "prefiro editar lá", "sim, a
+tabela"), confirme que o rascunho está salvo (chame
+`salvar_rascunho_orcamento` se a lista mudou) e responda com a frase exata
+"Liberei a tela de orçamento." e PARE DE FALAR. Sem essa frase a tabela
+não abre. Nunca abra a tabela sem ele pedir.
+Quando chegar "enviei o orçamento", chame `carregar_orcamento_confirmado`
+com o id da vistoria: os itens que ele confirmou na tabela substituem a
+lista. Siga para o Passo 4 só com os itens cujo valor mudou em relação à
+referência, depois Passos 5 e 6. Não mostre a lista de novo.
 
 Regras que fazem essa lista funcionar (a alternativa, perguntar peça por
 peça, era o gargalo que esta etapa existe para eliminar):
@@ -208,8 +241,11 @@ orçamento e o laudo leem esses nomes — não use outros.
 ## Passo 6 — confirmação de finalização (obrigatória)
 Em uma mensagem, informe o valor total e peça confirmação para finalizar,
 deixando claro que depois do envio a vistoria vai para análise e não pode
-mais ser alterada. Ex.: "Total do orçamento: R$ 2.490,00. Posso finalizar
-e enviar a vistoria para análise? Depois disso não será possível alterar."
+mais ser alterada. A mensagem COMEÇA com "Total do orçamento: R$ ..." —
+o app usa essa frase para mostrar o resumo com os itens logo acima dela,
+então não repita a lista. Ex.: "Total do orçamento: R$ 2.490,00. Posso
+finalizar e enviar a vistoria para análise? Depois disso não será possível
+alterar."
 
 - Só siga para o envio depois de uma confirmação explícita do mecânico
   ("sim", "pode enviar", "confirmo"...). Resposta ambígua → pergunte de
@@ -254,6 +290,7 @@ orcamento_oficina_agent = LlmAgent(
         FunctionTool(carregar_contexto_vistoria),
         FunctionTool(salvar_estado_vistoria),
         FunctionTool(salvar_rascunho_orcamento),
+        FunctionTool(carregar_orcamento_confirmado),
         FunctionTool(consultar_preco_referencia),
         FunctionTool(verificar_faixa_preco),
         FunctionTool(calcular_orcamento_total),

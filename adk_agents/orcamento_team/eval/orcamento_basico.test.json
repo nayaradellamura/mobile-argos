@@ -112,7 +112,7 @@
             {
               "rubric_id": "sem_tela",
               "rubric_content": {
-                "text_property": "A resposta NÃO diz que liberou tela de orçamento nem manda o usuário para outra tela: o orçamento é feito no próprio chat."
+                "text_property": "A resposta NÃO abre a tabela de orçamento (não diz que liberou a tela de orçamento) sem o usuário ter pedido: o orçamento é feito no próprio chat, e a tabela só pode ser oferecida como opção."
               },
               "type": "FINAL_RESPONSE_QUALITY"
             }
@@ -314,7 +314,7 @@
             {
               "rubric_id": "sem_tela",
               "rubric_content": {
-                "text_property": "A resposta NÃO diz que liberou tela de orçamento nem manda o usuário para outra tela: o orçamento é feito no próprio chat."
+                "text_property": "A resposta NÃO abre a tabela de orçamento (não diz que liberou a tela de orçamento) sem o usuário ter pedido: o orçamento é feito no próprio chat, e a tabela só pode ser oferecida como opção."
               },
               "type": "FINAL_RESPONSE_QUALITY"
             }
@@ -580,7 +580,7 @@
             {
               "rubric_id": "sem_tela",
               "rubric_content": {
-                "text_property": "A resposta NÃO diz que liberou tela de orçamento nem manda o usuário para outra tela: o orçamento é feito no próprio chat."
+                "text_property": "A resposta NÃO abre a tabela de orçamento (não diz que liberou a tela de orçamento) sem o usuário ter pedido: o orçamento é feito no próprio chat, e a tabela só pode ser oferecida como opção."
               },
               "type": "FINAL_RESPONSE_QUALITY"
             }

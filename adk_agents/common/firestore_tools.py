@@ -130,31 +130,16 @@ def salvar_rascunho_orcamento(id_vistoria: str, itens: list[dict]) -> dict:
             `valor_hora` é o da oficina para o `tipo_servico` do item.
             `origem` é "vistoria" ou "sugestao_aceita", só para o app poder
             sinalizar visualmente o que veio de sugestão proativa.
+            Mão de obra em valor total (sem horas): um item com
+            `mao_obra_em_valor: true`, `horas_mao_obra: 1` e `valor_hora` =
+            o valor total — mesma convenção da tabela do app.
 
     Returns:
         dict de confirmação com a quantidade de itens salvos.
     """
     db = _client()
 
-    rascunho = [
-        {
-            "peca": item.get("peca", ""),
-            "tipoIntervencao": item.get("tipo_intervencao", "substituicao"),
-            "quantidade": max(1, round(_para_float(item.get("quantidade")) or 1)),
-            "valorPeca": _para_float(item.get("valor_peca")),
-            "tipoServico": item.get("tipo_servico") or "funilaria",
-            "horasMaoObra": _para_float(item.get("horas_mao_obra")),
-            "origem": item.get("origem", "vistoria"),
-            # Congelado no item, como o app faz; sem valor, o histórico e o
-            # laudo caem no valor legado.
-            **(
-                {"valorHora": _para_float(item.get("valor_hora"))}
-                if item.get("valor_hora") is not None
-                else {}
-            ),
-        }
-        for item in itens
-    ]
+    rascunho = [_item_rascunho(item) for item in itens]
 
     db.collection("vistorias").document(id_vistoria).set(
         {
@@ -165,6 +150,42 @@ def salvar_rascunho_orcamento(id_vistoria: str, itens: list[dict]) -> dict:
     )
 
     return {"id_vistoria": id_vistoria, "itens_salvos": len(rascunho)}
+
+
+def _item_rascunho(item: dict) -> dict:
+    """Converte um item do agente para o formato que a tabela do app lê."""
+    if item.get("mao_obra_em_valor"):
+        valor = _para_float(item.get("valor_hora"))
+        return {
+            "peca": item.get("peca") or "Mão de obra",
+            "tipoIntervencao": item.get("tipo_intervencao", "reparo"),
+            "quantidade": 1,
+            "valorPeca": _para_float(item.get("valor_peca")),
+            "tipoServico": item.get("tipo_servico") or "mecanica",
+            # Tabela do app: mão de obra em valor = 1 h ao valor informado.
+            "horasMaoObra": 1.0 if valor > 0 else 0.0,
+            "valorHora": valor,
+            "valorMaoObra": valor,
+            "maoObraEmValor": True,
+            "origem": item.get("origem", "mecanico"),
+        }
+
+    return {
+        "peca": item.get("peca", ""),
+        "tipoIntervencao": item.get("tipo_intervencao", "substituicao"),
+        "quantidade": max(1, round(_para_float(item.get("quantidade")) or 1)),
+        "valorPeca": _para_float(item.get("valor_peca")),
+        "tipoServico": item.get("tipo_servico") or "funilaria",
+        "horasMaoObra": _para_float(item.get("horas_mao_obra")),
+        "origem": item.get("origem", "vistoria"),
+        # Congelado no item, como o app faz; sem valor, o histórico e o
+        # laudo caem no valor legado.
+        **(
+            {"valorHora": _para_float(item.get("valor_hora"))}
+            if item.get("valor_hora") is not None
+            else {}
+        ),
+    }
 
 
 def carregar_orcamento_confirmado(id_vistoria: str) -> dict:
@@ -198,6 +219,7 @@ def carregar_orcamento_confirmado(id_vistoria: str) -> dict:
             "tipo_servico": item.get("tipoServico", ""),
             "horas_mao_obra": _para_float(item.get("horasMaoObra")),
             "valor_hora": item.get("valorHora"),
+            **({"mao_obra_em_valor": True} if item.get("maoObraEmValor") else {}),
         }
         for item in itens_finais
     ]
