@@ -2375,11 +2375,23 @@ class _AiChatPageState extends State<AiChatPage> {
         espera = Duration(seconds: min(espera.inSeconds * 2, 30));
 
         if (enviadas > 0 && mounted) {
+          // A primeira leva pode ainda estar em análise (~1 min): dois turnos
+          // ao mesmo tempo na mesma sessão do agente se atropelam.
+          await _aguardarArgosLivre();
+          if (!mounted || isInspectionCompleted) return;
           await _analyzePhotosWithAgent(session: session, quantity: enviadas);
         }
       }
     } finally {
       _fotosEmReenvio.removeAll(aceitas);
+    }
+  }
+
+  /// Espera o Argos terminar o turno em andamento (até 5 min).
+  Future<void> _aguardarArgosLivre() async {
+    final limite = DateTime.now().add(const Duration(minutes: 5));
+    while (mounted && isAiTyping && DateTime.now().isBefore(limite)) {
+      await Future<void>.delayed(const Duration(seconds: 1));
     }
   }
 
