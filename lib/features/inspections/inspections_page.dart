@@ -1175,37 +1175,25 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                   ajustesNecessarios: _ajustesNecessariosRejeicao,
                                 ),
                               ],
-                              // Documentos separados por destino: o laudo e o
-                              // orçamento aprovado são da seguradora; o
-                              // relatório do reparo é o que vai para o cliente.
+                              // Documentos ficam só aqui (a aba Vistorias mostra
+                              // o que foi coletado). Cada card diz para quem é.
                               if (inspection.hasOrcamentoAprovado ||
-                                  inspection.laudoTecnicoStatus.isNotEmpty) ...[
+                                  inspection.laudoTecnicoStatus.isNotEmpty ||
+                                  inspection.vistoriaAtualId.trim().isNotEmpty) ...[
                                 const SizedBox(height: 18),
-                                const _GrupoDocumentosTitulo(
-                                  titulo: 'Para a seguradora',
-                                  descricao:
-                                      'Análise técnica da IA e orçamento aprovado.',
-                                ),
-                              ],
-                              if (inspection.hasOrcamentoAprovado) ...[
-                                const SizedBox(height: 10),
-                                _OrcamentoAprovadoCard(inspection: inspection),
+                                const _GrupoDocumentosTitulo(titulo: 'Documentos'),
                               ],
                               if (inspection.laudoTecnicoStatus.isNotEmpty) ...[
-                                SizedBox(
-                                  height: inspection.hasOrcamentoAprovado ? 14 : 10,
-                                ),
+                                const SizedBox(height: 10),
                                 _LaudoTecnicoCard(inspection: inspection),
+                              ],
+                              if (inspection.hasOrcamentoAprovado) ...[
+                                const SizedBox(height: 14),
+                                _OrcamentoAprovadoCard(inspection: inspection),
                               ],
                               if (inspection.vistoriaAtualId.trim().isNotEmpty &&
                                   !inspection.isPendingOfflineSync) ...[
-                                const SizedBox(height: 18),
-                                const _GrupoDocumentosTitulo(
-                                  titulo: 'Para o cliente',
-                                  descricao:
-                                      'Relatório do reparo para mandar ao dono do veículo.',
-                                ),
-                                const SizedBox(height: 10),
+                                const SizedBox(height: 14),
                                 _RelatorioClienteCard(
                                   sinistroId: inspection.id,
                                   vistoriaDocId: inspection.vistoriaAtualId.trim(),
@@ -1477,9 +1465,18 @@ class _InspectionHistoryTabState extends State<_InspectionHistoryTab> {
                             ? Padding(
                                 key: ValueKey('preview_${vistoria.docId}'),
                                 padding: const EdgeInsets.only(top: 10),
-                                child: _HistoryVistoriaPreview(
-                                  vistoria: vistoria,
-                                  laudoPdfUrl: laudoPdfUrl,
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                                  children: [
+                                    _HistoryVistoriaPreview(
+                                      vistoria: vistoria,
+                                      laudoPdfUrl: laudoPdfUrl,
+                                    ),
+                                    if (vistoria.orcamentoItems.isNotEmpty) ...[
+                                      const SizedBox(height: 10),
+                                      _HistoryOrcamentoCard(vistoria: vistoria),
+                                    ],
+                                  ],
                                 ),
                               )
                             : const SizedBox.shrink(),
@@ -1854,11 +1851,6 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
             duration: const Duration(milliseconds: 180),
             child: _selectedPreviewBlock(),
           ),
-          if (vistoria.orcamentoItems.isNotEmpty ||
-              vistoria.sinistroId.trim().isNotEmpty) ...[
-            const SizedBox(height: 12),
-            _HistoryOrcamentoCard(vistoria: vistoria),
-          ],
           const SizedBox(height: 12),
           _PreviewBlock(
             title: 'Laudo técnico (para a seguradora)',
@@ -3996,9 +3988,9 @@ class _InspectionCardContent extends StatelessWidget {
 /// Título de um grupo de documentos do resumo (seguradora ou cliente).
 class _GrupoDocumentosTitulo extends StatelessWidget {
   final String titulo;
-  final String descricao;
+  final String? descricao;
 
-  const _GrupoDocumentosTitulo({required this.titulo, required this.descricao});
+  const _GrupoDocumentosTitulo({required this.titulo, this.descricao});
 
   @override
   Widget build(BuildContext context) {
@@ -4016,15 +4008,17 @@ class _GrupoDocumentosTitulo extends StatelessWidget {
               letterSpacing: .6,
             ),
           ),
-          const SizedBox(height: 2),
-          Text(
-            descricao,
-            style: const TextStyle(
-              color: Color(0xFF6B7280),
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
+          if (descricao != null) ...[
+            const SizedBox(height: 2),
+            Text(
+              descricao!,
+              style: const TextStyle(
+                color: Color(0xFF6B7280),
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
             ),
-          ),
+          ],
         ],
       ),
     );
@@ -4133,7 +4127,7 @@ class _LaudoTecnicoCard extends StatelessWidget {
     if (isPronto) {
       color = const Color(0xFF0057C0);
       icon = Icons.description_outlined;
-      message = 'O laudo técnico desta vistoria está disponível.';
+      message = 'Análise técnica da vistoria. Vai para a seguradora.';
     } else if (isErro) {
       color = Colors.orange.shade800;
       icon = Icons.error_outline;
@@ -5908,13 +5902,9 @@ class _RelatorioClienteCard extends StatefulWidget {
   final String sinistroId;
   final String vistoriaDocId;
 
-  /// Só o botão, para ir dentro do card de orçamento da aba Vistorias.
-  final bool compacto;
-
   const _RelatorioClienteCard({
     required this.sinistroId,
     required this.vistoriaDocId,
-    this.compacto = false,
   });
 
   @override
@@ -6009,13 +5999,7 @@ class _RelatorioClienteCardState extends State<_RelatorioClienteCard> {
                 ),
               )
             : const Icon(Icons.picture_as_pdf_outlined, size: 18),
-        label: Text(
-          _gerando
-              ? 'Gerando relatório...'
-              : widget.compacto
-                  ? 'Relatório para o cliente (PDF)'
-                  : 'Gerar relatório (PDF)',
-        ),
+        label: Text(_gerando ? 'Gerando relatório...' : 'Gerar relatório (PDF)'),
         style: ElevatedButton.styleFrom(
           backgroundColor: color,
           foregroundColor: Colors.white,
@@ -6034,8 +6018,6 @@ class _RelatorioClienteCardState extends State<_RelatorioClienteCard> {
   Widget build(BuildContext context) {
     const color = Color(0xFF0057C0);
 
-    if (widget.compacto) return _botao();
-
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
@@ -6052,7 +6034,7 @@ class _RelatorioClienteCardState extends State<_RelatorioClienteCard> {
               const Icon(Icons.ios_share_rounded, size: 20, color: color),
               const SizedBox(width: 8),
               Text(
-                'Relatório para o cliente',
+                'Relatório do reparo',
                 style: GoogleFonts.spaceGrotesk(
                   fontSize: 15,
                   fontWeight: FontWeight.bold,
@@ -6063,8 +6045,7 @@ class _RelatorioClienteCardState extends State<_RelatorioClienteCard> {
           ),
           const SizedBox(height: 8),
           const Text(
-            'PDF com o veículo, os danos, as fotos e o orçamento, pronto '
-            'para enviar ao cliente.',
+            'Veículo, danos, fotos e orçamento. Para enviar ao dono do veículo.',
             style: TextStyle(
               color: Color(0xFF414755),
               fontSize: 13,
@@ -6196,7 +6177,7 @@ class _RelatorioOpcoesSheetState extends State<_RelatorioOpcoesSheet> {
               ),
               const SizedBox(height: 4),
               const Text(
-                'Escolha as fotos que vão para o cliente e a validade do orçamento.',
+                'Escolha a validade do orçamento e as fotos que vão para o cliente.',
                 style: TextStyle(
                   color: Color(0xFF6B7280),
                   fontSize: 13,
@@ -6215,6 +6196,28 @@ class _RelatorioOpcoesSheetState extends State<_RelatorioOpcoesSheet> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        const Text(
+                          'Validade do orçamento',
+                          style: TextStyle(
+                            color: Color(0xFF414755),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          children: [
+                            for (final dias in validades)
+                              ChoiceChip(
+                                label: Text('$dias dias'),
+                                selected: _validadeDias == dias,
+                                onSelected: (_) =>
+                                    setState(() => _validadeDias = dias),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
                         Text(
                           _fotos.isEmpty
                               ? 'Esta vistoria não tem fotos.'
@@ -6242,28 +6245,6 @@ class _RelatorioOpcoesSheetState extends State<_RelatorioOpcoesSheet> {
                                     _excluidas.add(foto.key);
                                   }
                                 }),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: 16),
-                        const Text(
-                          'Validade do orçamento',
-                          style: TextStyle(
-                            color: Color(0xFF414755),
-                            fontSize: 12,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 8,
-                          children: [
-                            for (final dias in validades)
-                              ChoiceChip(
-                                label: Text('$dias dias'),
-                                selected: _validadeDias == dias,
-                                onSelected: (_) =>
-                                    setState(() => _validadeDias = dias),
                               ),
                           ],
                         ),
@@ -6355,7 +6336,7 @@ class _FotoSelecionavel extends StatelessWidget {
 }
 
 /// Card do orçamento na aba Vistorias, separado do "Resumo da vistoria":
-/// itens recolhíveis, total e o relatório para o cliente logo abaixo.
+/// itens recolhíveis e total. Os PDFs ficam na aba Resumo.
 class _HistoryOrcamentoCard extends StatefulWidget {
   final LinkedVistoriaInfo vistoria;
 
@@ -6373,7 +6354,6 @@ class _HistoryOrcamentoCardState extends State<_HistoryOrcamentoCard> {
     const color = Color(0xFF0057C0);
     final itens = widget.vistoria.orcamentoItems;
     final total = itens.fold<double>(0, (soma, item) => soma + item.valorTotal);
-    final podeGerar = widget.vistoria.sinistroId.trim().isNotEmpty;
 
     return Container(
       padding: const EdgeInsets.all(14),
@@ -6399,7 +6379,7 @@ class _HistoryOrcamentoCardState extends State<_HistoryOrcamentoCard> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Orçamento (para o cliente)',
+                          'Orçamento',
                           style: GoogleFonts.spaceGrotesk(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
@@ -6432,14 +6412,6 @@ class _HistoryOrcamentoCardState extends State<_HistoryOrcamentoCard> {
           if (_aberto) ...[
             const SizedBox(height: 10),
             _HistoryOrcamentoPreviewList(vistoria: widget.vistoria),
-          ],
-          if (podeGerar) ...[
-            const SizedBox(height: 12),
-            _RelatorioClienteCard(
-              sinistroId: widget.vistoria.sinistroId,
-              vistoriaDocId: widget.vistoria.docId,
-              compacto: true,
-            ),
           ],
         ],
       ),
