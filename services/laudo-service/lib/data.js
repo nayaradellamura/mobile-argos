@@ -39,7 +39,7 @@ function num(value) {
 
 // Normaliza um item vindo de qualquer fonte para o mesmo formato e recalcula
 // os totais a partir dos campos base (nunca confia num total pronto).
-function normalizarItem({ peca, quantidade, valorPeca, tipoServico, horasMaoObra, valorHora }) {
+function normalizarItem({ peca, quantidade, valorPeca, tipoServico, horasMaoObra, valorHora, maoObraEmValor }) {
   const qtd = Math.max(1, Math.round(num(quantidade)) || 1);
   const horas = num(horasMaoObra);
   const hora = valorHora === undefined || valorHora === null ? VALOR_HORA_LEGADO : num(valorHora);
@@ -57,6 +57,72 @@ function normalizarItem({ peca, quantidade, valorPeca, tipoServico, horasMaoObra
     valorHora: hora,
     valorMaoObra,
     valorTotal: valorPecas + valorMaoObra,
+    // Mão de obra informada em reais (gravada como 1 h ao valor), não por hora.
+    ...(maoObraEmValor === true ? { maoObraEmValor: true } : {}),
+  };
+}
+
+// Nome digitado todo em maiúsculas (comum em orçamento lido de papel) vira
+// "Primeira maiúscula"; o resto fica como o mecânico escreveu.
+function nomeLegivel(texto) {
+  const s = str(texto);
+  const letras = s.replace(/[^A-Za-zÀ-ÿ]/g, "");
+  if (letras.length < 4 || letras !== letras.toUpperCase()) return s;
+  const minusculo = s.toLocaleLowerCase("pt-BR");
+  return minusculo.charAt(0).toLocaleUpperCase("pt-BR") + minusculo.slice(1);
+}
+
+function formatarReais(valor) {
+  return (Number(valor) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/**
+ * Orçamento no formato do relatório do cliente: peças separadas de serviços
+ * (itens sem valor de peça, inclusive a mão de obra em valor total), horas
+ * explícitas quando a oficina cobra por hora, e a coluna de mão de obra das
+ * peças só quando alguma peça tem mão de obra.
+ */
+function orcamentoRelatorio(orcamentoCampo) {
+  const linha = (item) => ({
+    nome: nomeLegivel(item.peca),
+    quantidade: item.quantidade,
+    valorPecas: item.valorPecas,
+    valorMaoObra: item.valorMaoObra,
+    valorTotal: item.valorTotal,
+    detalheHoras:
+      !item.maoObraEmValor && item.horasMaoObra > 0
+        ? `${String(Math.round(item.horasMaoObra * 10) / 10).replace(".", ",")} h × R$ ${formatarReais(item.valorHora)}`
+        : "",
+  });
+
+  const itens = Array.isArray(orcamentoCampo?.itens) ? orcamentoCampo.itens : [];
+  const pecas = itens.filter((item) => item.valorPecas > 0).map(linha);
+  const servicos = itens.filter((item) => !(item.valorPecas > 0)).map(linha);
+  const soma = (lista, campo) => lista.reduce((total, item) => total + item[campo], 0);
+
+  return {
+    pecas,
+    servicos,
+    pecasComMaoObra: pecas.some((item) => item.valorMaoObra > 0),
+    // Totais do rodapé: peças (só o valor das peças) e mão de obra/serviços
+    // (toda mão de obra, das peças e dos serviços).
+    totalPecas: soma(pecas, "valorPecas"),
+    totalMaoObra: soma(pecas, "valorMaoObra") + soma(servicos, "valorTotal"),
+    total: soma(pecas, "valorTotal") + soma(servicos, "valorTotal"),
+  };
+}
+
+const VALIDADE_PADRAO_DIAS = 15;
+
+// Opções do relatório escolhidas pelo mecânico no app e gravadas pela
+// função gerarRelatorioCliente em sinistro.relatorioCliente.
+function opcoesRelatorio(sinistro) {
+  const relatorio = asObject(sinistro?.relatorioCliente);
+  const excluidas = Array.isArray(relatorio.fotosExcluidas) ? relatorio.fotosExcluidas.map((f) => str(f)).filter(Boolean) : [];
+  const dias = Math.round(num(relatorio.validadeDias));
+  return {
+    fotosExcluidas: excluidas,
+    validadeDias: dias >= 1 && dias <= 180 ? dias : VALIDADE_PADRAO_DIAS,
   };
 }
 
@@ -87,6 +153,7 @@ function buildOrcamentoCampo({ vistoria, agentParameters }) {
           tipoServico: item.tipoServico,
           horasMaoObra: item.horasMaoObra,
           valorHora: item.valorHora,
+          maoObraEmValor: item.maoObraEmValor,
         })
       )
       .filter((item) => item.peca);
@@ -112,6 +179,7 @@ function buildOrcamentoCampo({ vistoria, agentParameters }) {
           tipoServico: item.tipo_servico,
           horasMaoObra: item.horas_mao_obra,
           valorHora: item.valor_hora,
+          maoObraEmValor: item.mao_obra_em_valor,
         })
       )
       .filter((item) => item.peca);
@@ -291,6 +359,8 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
     oficinaCidade: [str(credenciadoSnapshot.city), str(credenciadoSnapshot.uf)]
       .filter(Boolean)
       .join("/"),
+    oficinaTelefone: str(credenciadoSnapshot.phone),
+    oficinaEmail: str(credenciadoSnapshot.email),
 
     mecanicoNome: str(sinistro.assignedToName, "Não informado"),
     mecanicoEmail: str(sinistro.assignedToEmail),
@@ -317,6 +387,8 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
     danosIdentificados: listaDeDanos(agentParameters),
 
     retificacao: dadosRetificacao(vistoria),
+
+    relatorioOpcoes: opcoesRelatorio(sinistro),
   };
 }
 
@@ -325,6 +397,10 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
 module.exports = {
   loadLaudoContext,
   buildOrcamentoCampo,
+  orcamentoRelatorio,
+  opcoesRelatorio,
+  nomeLegivel,
+  VALIDADE_PADRAO_DIAS,
   normalizarItem,
   fotosDeDano,
   listaDeDanos,

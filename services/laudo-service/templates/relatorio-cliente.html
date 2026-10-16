@@ -126,6 +126,10 @@
   table.itens tr { break-inside: avoid; page-break-inside: avoid; }
   table.itens td.num, table.itens th.num { text-align: right; white-space: nowrap; }
   table.itens td.peca { font-weight: 600; }
+  table.itens .horas { display: block; color: var(--cinza); font-size: 7.5pt; font-weight: 500; }
+  table.itens td.traco { color: var(--cinza); }
+  h3.subtitulo { font-size: 9pt; color: var(--cinza); text-transform: uppercase; letter-spacing: .05em; margin: 16px 0 6px; }
+  .validade { margin-top: 10px; color: var(--cinza); font-size: 8.5pt; text-align: right; }
 
   .totais {
     margin-top: 14px;
@@ -229,6 +233,18 @@
         <div class="valor">{{oficinaEndereco}}</div>
       </div>
       {{/if}}
+      {{#if oficinaTelefone}}
+      <div class="campo">
+        <div class="rotulo">Telefone</div>
+        <div class="valor">{{oficinaTelefone}}</div>
+      </div>
+      {{/if}}
+      {{#if oficinaEmail}}
+      <div class="campo">
+        <div class="rotulo">E-mail</div>
+        <div class="valor">{{oficinaEmail}}</div>
+      </div>
+      {{/if}}
       <div class="campo">
         <div class="rotulo">Mecânico responsável</div>
         <div class="valor">{{mecanicoNome}}</div>
@@ -261,33 +277,66 @@
 
     <h2>Orçamento do reparo</h2>
     {{#if orcamentoCampo.itens.length}}
+    {{#if orcamentoRelatorio.pecas.length}}
+    <h3 class="subtitulo">Peças</h3>
     <table class="itens">
       <thead>
         <tr>
-          <th>Peça ou serviço</th>
+          <th>Peça</th>
           <th class="num">Qtd.</th>
-          <th class="num">Peças</th>
-          <th class="num">Mão de obra</th>
+          <th class="num">Valor</th>
+          {{#if orcamentoRelatorio.pecasComMaoObra}}<th class="num">Mão de obra</th>{{/if}}
           <th class="num">Total</th>
         </tr>
       </thead>
       <tbody>
-        {{#each orcamentoCampo.itens}}
+        {{#each orcamentoRelatorio.pecas}}
         <tr>
-          <td class="peca">{{peca}}</td>
+          <td class="peca">{{nome}}</td>
           <td class="num">{{quantidade}}</td>
           <td class="num">R$ {{currency valorPecas}}</td>
-          <td class="num">R$ {{currency valorMaoObra}}</td>
+          {{#if ../orcamentoRelatorio.pecasComMaoObra}}
+          {{#if valorMaoObra}}
+          <td class="num">R$ {{currency valorMaoObra}}{{#if detalheHoras}}<span class="horas">{{detalheHoras}}</span>{{/if}}</td>
+          {{else}}
+          <td class="num traco">—</td>
+          {{/if}}
+          {{/if}}
           <td class="num"><strong>R$ {{currency valorTotal}}</strong></td>
         </tr>
         {{/each}}
       </tbody>
     </table>
+    {{/if}}
+    {{#if orcamentoRelatorio.servicos.length}}
+    <h3 class="subtitulo">Serviços e mão de obra</h3>
+    <table class="itens">
+      <thead>
+        <tr>
+          <th>Serviço</th>
+          <th class="num">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{#each orcamentoRelatorio.servicos}}
+        <tr>
+          <td class="peca">{{nome}}{{#if detalheHoras}}<span class="horas">{{detalheHoras}}</span>{{/if}}</td>
+          {{#if valorTotal}}
+          <td class="num"><strong>R$ {{currency valorTotal}}</strong></td>
+          {{else}}
+          <td class="num traco">—</td>
+          {{/if}}
+        </tr>
+        {{/each}}
+      </tbody>
+    </table>
+    {{/if}}
     <div class="totais">
-      <div class="linha"><span>Peças</span><span>R$ {{currency orcamentoCampo.valorPecas}}</span></div>
-      <div class="linha"><span>Mão de obra</span><span>R$ {{currency orcamentoCampo.valorMaoObra}}</span></div>
-      <div class="total"><span>Total</span><span class="num">R$ {{currency orcamentoCampo.valorTotal}}</span></div>
+      <div class="linha"><span>Peças</span><span>R$ {{currency orcamentoRelatorio.totalPecas}}</span></div>
+      <div class="linha"><span>Mão de obra e serviços</span><span>R$ {{currency orcamentoRelatorio.totalMaoObra}}</span></div>
+      <div class="total"><span>Total</span><span class="num">R$ {{currency orcamentoRelatorio.total}}</span></div>
     </div>
+    <div class="validade">Orçamento válido por {{validadeDias}} dias, até {{validoAte}}.</div>
     {{else}}
     <div class="caixa vazio">O orçamento ainda não foi preenchido pela oficina.</div>
     {{/if}}
@@ -304,7 +353,7 @@
     </div>
 
     <div class="rodape">
-      <span>Valores sujeitos à análise e aprovação da seguradora{{#if seguradoraNome}} ({{seguradoraNome}}){{/if}}. Dúvidas sobre o reparo: fale com a oficina.</span>
+      <span>Valores sujeitos à análise e aprovação da seguradora{{#if seguradoraNome}} ({{seguradoraNome}}){{/if}}. Dúvidas sobre o reparo: fale com a oficina{{#if oficinaNome}} {{oficinaNome}}{{/if}}{{#if oficinaTelefone}}, {{oficinaTelefone}}{{/if}}.</span>
       <span style="white-space:nowrap">Gerado pelo Argos</span>
     </div>
   </div>

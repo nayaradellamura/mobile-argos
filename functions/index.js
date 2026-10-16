@@ -2893,6 +2893,15 @@ exports.gerarRelatorioCliente = onCall(
       logContext: { callable: "gerarRelatorioCliente", vistoriaId },
     });
 
+    // Escolhas do mecânico na tela do app: fotos que não vão para o cliente
+    // (storagePath ou url) e validade do orçamento em dias.
+    const fotosExcluidas = (Array.isArray(request.data?.fotosExcluidas) ? request.data.fotosExcluidas : [])
+      .map((f) => str(f))
+      .filter(Boolean)
+      .slice(0, 100);
+    const validadeDias = Math.round(Number(request.data?.validadeDias));
+    const validadeValida = Number.isFinite(validadeDias) && validadeDias >= 1 && validadeDias <= 180;
+
     await db.collection("sinistro").doc(sinistroId).set(
       {
         relatorioCliente: {
@@ -2900,10 +2909,23 @@ exports.gerarRelatorioCliente = onCall(
           vistoriaId,
           solicitadoEm: admin.firestore.FieldValue.serverTimestamp(),
           erro: admin.firestore.FieldValue.delete(),
+          fotosExcluidas,
+          validadeDias: validadeValida ? validadeDias : admin.firestore.FieldValue.delete(),
         },
       },
       { merge: true }
     );
+
+    // A validade vira o padrão da oficina para os próximos relatórios (as
+    // regras do Firestore não deixam o app gravar esse campo direto).
+    const credenciadoId = str(vistoriaSnap.data()?.credenciadoId || sinistroSnap.data()?.credenciadoId);
+    if (validadeValida && credenciadoId && !credenciadoId.includes("/")) {
+      await db
+        .collection("credenciados")
+        .doc(credenciadoId)
+        .set({ validadeOrcamentoDias: validadeDias }, { merge: true })
+        .catch((e) => console.warn("Não salvou a validade padrão da oficina:", e?.message));
+    }
 
     await enqueuePdfGeneration({
       serviceUrl: relatorioClienteServiceUrl(),

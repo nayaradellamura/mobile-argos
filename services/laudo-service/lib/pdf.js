@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const Handlebars = require("handlebars");
 const puppeteer = require("puppeteer");
+const { orcamentoRelatorio } = require("./data");
 
 const TEMPLATE_PATH = path.join(__dirname, "..", "templates", "laudo.html");
 const ORCAMENTO_TEMPLATE_PATH = path.join(__dirname, "..", "templates", "orcamento-aprovado.html");
@@ -95,12 +96,24 @@ async function renderOrcamentoAprovadoPdf({ context }) {
  * Relatório para o cliente final: veículo, danos, fotos, orçamento e
  * próximos passos, sem dados internos de auditoria nem documento do cliente.
  */
-async function renderRelatorioClientePdf({ context, etapas }) {
+async function renderRelatorioClientePdf({ context, etapas, agora = new Date() }) {
+  const opcoes = context.relatorioOpcoes || {};
+  // Fotos que o mecânico tirou do relatório (ex.: foto em que ele aparece).
+  const excluidas = new Set(opcoes.fotosExcluidas || []);
+  const validadeDias = opcoes.validadeDias || 15;
+  const validoAte = new Date(agora.getTime() + validadeDias * 24 * 60 * 60 * 1000);
+
   const html = getTemplate(RELATORIO_CLIENTE_TEMPLATE_PATH)({
     ...context,
     clienteDocumento: undefined,
     transcricao: undefined,
-    fotosRelatorio: (context.fotos || []).filter((f) => f.url).slice(0, MAX_FOTOS_RELATORIO),
+    fotosRelatorio: (context.fotos || [])
+      .filter((f) => f.url && !excluidas.has(f.storagePath) && !excluidas.has(f.url))
+      .slice(0, MAX_FOTOS_RELATORIO)
+      .map((f, i) => ({ ...f, numero: i + 1 })),
+    orcamentoRelatorio: orcamentoRelatorio(context.orcamentoCampo),
+    validadeDias,
+    validoAte: validoAte.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" }),
     etapas,
     dataEmissao: dataEmissaoAgora(),
     logoDataUri: getLogoDataUri(),
