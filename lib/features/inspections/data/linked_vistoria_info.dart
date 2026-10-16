@@ -344,15 +344,39 @@ List<String> _extractImageBase64Previews(List<dynamic> images) {
 // pré-preenchimento do agente); no envio em massa, em `orcamentoRascunho`.
 List<OrcamentoRascunhoItem> _extractOrcamentoItems(Map<String, dynamic> data) {
   final finais = data['orcamentoItensFinais'];
+  final rascunho = data['orcamentoRascunho'];
   final raw = (finais is List && finais.isNotEmpty)
       ? finais
-      : data['orcamentoRascunho'];
-
-  if (raw is! List) return const [];
+      : rascunho;
 
   double toDouble(dynamic value) => value is num
       ? value.toDouble()
       : parseValorDecimal('${value ?? ''}') ?? 0;
+
+  // Orçamento fechado só na conversa: o agente grava em
+  // agentParameters.itens_orcamento (snake_case), sem tabela nem rascunho.
+  if (raw is! List || raw.isEmpty) {
+    final params = data['agentParameters'];
+    final doAgente = params is Map ? params['itens_orcamento'] : null;
+    if (doAgente is! List) return const [];
+
+    return doAgente.whereType<Map>().map((item) {
+      final quantidade = toDouble(item['quantidade']).round();
+
+      return OrcamentoRascunhoItem(
+        peca: stringValue(item['peca']),
+        tipoIntervencao: stringValue(item['tipo_intervencao']),
+        quantidade: quantidade < 1 ? 1 : quantidade,
+        valorPeca: toDouble(item['valor_peca']),
+        tipoServico: stringValue(item['tipo_servico']),
+        horasMaoObra: toDouble(item['horas_mao_obra']),
+        valorHora: item['valor_hora'] == null
+            ? kValorHoraLegado
+            : toDouble(item['valor_hora']),
+        origem: 'vistoria',
+      );
+    }).where((item) => item.peca.isNotEmpty).toList();
+  }
 
   return raw.whereType<Map>().map((item) {
     final quantidade = toDouble(item['quantidade']).round();
