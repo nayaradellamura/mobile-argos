@@ -1,6 +1,7 @@
-// Leitura em voz das mensagens do Argos (teste, ligado por uma opção oculta
-// no perfil). O app manda o texto da mensagem; aqui ele vira MP3 com o
+// Leitura em voz das mensagens do Argos (botão "Ouvir" em toda fala do
+// Argos no chat). O app manda o texto da mensagem; aqui ele vira MP3 com o
 // Text-to-Speech do Google e volta em base64 para o app tocar.
+// Para trocar a voz, mude só VOZ_PADRAO (lista: cloud.google.com/text-to-speech/docs/chirp3-hd).
 
 const { GoogleAuth } = require("google-auth-library");
 

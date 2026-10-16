@@ -16,7 +16,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 
 import '../../services/argos_ai_service.dart';
-import '../../services/preferencias_service.dart';
 import '../../services/argos_connectivity_service.dart';
 import '../../services/bulk_sync_coordinator.dart';
 import '../../services/user_audio_storage_service.dart';
@@ -73,6 +72,11 @@ class ChatMessage {
   /// o mecânico (arquivo sumiu, sem permissão).
   final String? photoStatus;
 
+  /// Cartão de resumo do orçamento (peça e valor de cada linha), mostrado
+  /// junto da confirmação final. Não-nulo só nessa bolha.
+  final List<MapEntry<String, double>>? orcamentoLinhas;
+  final double? orcamentoTotal;
+
   const ChatMessage({
     required this.type,
     required this.text,
@@ -89,6 +93,8 @@ class ChatMessage {
     this.isColetaModoPrompt = false,
     this.selectedColetaModo,
     this.photoStatus,
+    this.orcamentoLinhas,
+    this.orcamentoTotal,
   });
 
   static const fotoReenviando = 'reenviando';
@@ -117,6 +123,8 @@ class ChatMessage {
       selectedColetaModo: selectedColetaModo ?? this.selectedColetaModo,
       photoStatus:
           limparPhotoStatus ? null : (photoStatus ?? this.photoStatus),
+      orcamentoLinhas: orcamentoLinhas,
+      orcamentoTotal: orcamentoTotal,
     );
   }
 }
@@ -214,9 +222,6 @@ class _AiChatPageState extends State<AiChatPage> {
   void initState() {
     super.initState();
 
-    PreferenciasService.instance.ouvirMensagensArgos
-        .addListener(_onPreferenciasChanged);
-    PreferenciasService.instance.carregar();
     _falaPlayer.onPlayerComplete.listen((_) {
       if (mounted) setState(() => _falaTexto = null);
     });
@@ -250,8 +255,6 @@ class _AiChatPageState extends State<AiChatPage> {
 
   @override
   void dispose() {
-    PreferenciasService.instance.ouvirMensagensArgos
-        .removeListener(_onPreferenciasChanged);
     _falaPlayer.dispose();
     widget.selectedTabIndexListenable
         ?.removeListener(_onSelectedTabIndexChanged);
@@ -365,6 +368,111 @@ class _AiChatPageState extends State<AiChatPage> {
       cameraUnlocked = true;
       cameraPulsing = true;
     });
+  }
+
+  bool _isResumoOrcamentoText(String value) {
+    return _normalizeMessage(value).contains('total do orçamento');
+  }
+
+  /// Monta a bolha do cartão de resumo a partir do registro gravado no
+  /// histórico (`role: orcamento_resumo`).
+  ChatMessage? _resumoOrcamentoMessage(
+    Map<String, dynamic> data, {
+    DateTime? createdAt,
+  }) {
+    final itens = data['itens'];
+    if (itens is! List || itens.isEmpty) return null;
+
+    final linhas = [
+      for (final item in itens.whereType<Map>())
+        MapEntry(
+          item['peca']?.toString() ?? '',
+          (item['valor'] is num) ? (item['valor'] as num).toDouble() : 0.0,
+        ),
+    ];
+    final total = data['total'];
+
+    return ChatMessage(
+      type: ChatMessageType.ai,
+      text: '',
+      orcamentoLinhas: linhas,
+      orcamentoTotal: total is num
+          ? total.toDouble()
+          : linhas.fold<double>(0, (soma, linha) => soma + linha.value),
+      createdAt: createdAt,
+    );
+  }
+
+  /// Na confirmação final ("Total do orçamento: ..."), mostra acima dela o
+  /// cartão com os itens que o agente acabou de salvar em
+  /// `agentParameters.itens_orcamento`, para o mecânico conferir antes do
+  /// "sim". Vale para o orçamento feito na conversa e na tabela.
+  Future<void> _mostrarResumoOrcamento(String texto) async {
+    final session = currentSession;
+    if (session == null || !_isResumoOrcamentoText(texto)) return;
+
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('vistorias')
+          .doc(session.docId)
+          .get();
+      final params = doc.data()?['agentParameters'];
+      if (params is! Map) return;
+
+      final itens = params['itens_orcamento'];
+      if (itens is! List || itens.isEmpty) return;
+
+      double numero(dynamic v) =>
+          v is num ? v.toDouble() : (parseValorDecimal('${v ?? ''}') ?? 0);
+
+      final linhas = <Map<String, dynamic>>[];
+      var soma = 0.0;
+      for (final item in itens.whereType<Map>()) {
+        final quantidade = max(1, numero(item['quantidade']).round());
+        final valorHora = item['valor_hora'] == null
+            ? kValorHoraLegado
+            : numero(item['valor_hora']);
+        final valor = numero(item['valor_peca']) * quantidade +
+            numero(item['horas_mao_obra']) * valorHora;
+        final peca = item['peca']?.toString().trim() ?? '';
+
+        soma += valor;
+        linhas.add({
+          'peca': quantidade > 1 ? '$peca (x$quantidade)' : peca,
+          'valor': valor,
+        });
+      }
+
+      final totalAgente = params['valor_total_final'];
+      final dados = <String, dynamic>{
+        'itens': linhas,
+        'total': totalAgente is num ? totalAgente.toDouble() : soma,
+      };
+
+      await VistoriaChatSessionService.instance.appendChatMessage(
+        vistoriaDocId: session.docId,
+        role: 'orcamento_resumo',
+        text: '',
+        extraData: dados,
+      );
+
+      final card = _resumoOrcamentoMessage(dados, createdAt: DateTime.now());
+      if (!mounted || card == null) return;
+
+      setState(() {
+        final indice = messages.lastIndexWhere(
+          (m) => m.type == ChatMessageType.ai && m.orcamentoLinhas == null,
+        );
+        if (indice >= 0) {
+          messages.insert(indice, card);
+        } else {
+          messages.add(card);
+        }
+      });
+      _scrollToBottom();
+    } catch (e) {
+      debugPrint('Erro ao montar o resumo do orçamento: $e');
+    }
   }
 
   void _openOrcamentoAfterRelease(String text) {
@@ -1670,6 +1778,7 @@ class _AiChatPageState extends State<AiChatPage> {
 
       _openCameraAfterPhotoRelease(reply);
       _openOrcamentoAfterRelease(reply);
+      unawaited(_mostrarResumoOrcamento(reply));
       _scrollToBottom();
     } catch (e) {
       debugPrint('Erro ao enviar oi inicial para IA: $e');
@@ -1718,7 +1827,17 @@ class _AiChatPageState extends State<AiChatPage> {
       }
 
       final message = _chatMessageFromFirestore(item);
-      if (message != null) loadedMessages.add(message);
+      if (message == null) continue;
+
+      // O resumo é gravado depois da confirmação do Argos, mas aparece
+      // acima dela, como na hora em que foi mostrado.
+      if (message.orcamentoLinhas != null &&
+          loadedMessages.isNotEmpty &&
+          loadedMessages.last.type == ChatMessageType.ai) {
+        loadedMessages.insert(loadedMessages.length - 1, message);
+      } else {
+        loadedMessages.add(message);
+      }
     }
 
     messages
@@ -1772,6 +1891,10 @@ class _AiChatPageState extends State<AiChatPage> {
     final text = data['text']?.toString() ?? '';
     final imageUrl = data['url']?.toString();
     final createdAt = _dateFromFirestoreValue(data['createdAt']);
+
+    if (role == 'orcamento_resumo') {
+      return _resumoOrcamentoMessage(data, createdAt: createdAt);
+    }
 
     if (text.trim().isEmpty && role != 'audio') return null;
 
@@ -2003,6 +2126,7 @@ class _AiChatPageState extends State<AiChatPage> {
 
       _openCameraAfterPhotoRelease(reply);
       _openOrcamentoAfterRelease(reply);
+      unawaited(_mostrarResumoOrcamento(reply));
       _scrollToBottom();
     } on FirebaseFunctionsException catch (e) {
       debugPrint('ERRO CLOUD FUNCTION');
@@ -2354,20 +2478,11 @@ class _AiChatPageState extends State<AiChatPage> {
     _mostrarRespostaDoArgos(reply.isEmpty ? fallback : reply);
   }
 
-  // ── Ouvir mensagens do Argos (teste, ver PreferenciasService) ──────────
+  // ── Ouvir mensagens do Argos (Text-to-Speech, ver functions/fala_argos.js)
   final AudioPlayer _falaPlayer = AudioPlayer();
   final Map<String, Uint8List> _falaCache = {};
   String? _falaTexto;
   bool _falaCarregando = false;
-
-  void _onPreferenciasChanged() {
-    if (!mounted) return;
-    if (!PreferenciasService.instance.ouvirMensagensArgos.value) {
-      _falaPlayer.stop();
-      _falaTexto = null;
-    }
-    setState(() {});
-  }
 
   /// Toca a mensagem em voz; se ela já estiver tocando, para.
   Future<void> _alternarFala(String texto) async {
@@ -2419,6 +2534,7 @@ class _AiChatPageState extends State<AiChatPage> {
 
     _openCameraAfterPhotoRelease(texto);
     _openOrcamentoAfterRelease(texto);
+    unawaited(_mostrarResumoOrcamento(texto));
     _scrollToBottom();
   }
 
@@ -2993,6 +3109,7 @@ class _AiChatPageState extends State<AiChatPage> {
 
       _openCameraAfterPhotoRelease(audioResult.reply);
       _openOrcamentoAfterRelease(audioResult.reply);
+      unawaited(_mostrarResumoOrcamento(audioResult.reply));
       _scrollToBottom();
     } on FirebaseFunctionsException catch (e) {
       debugPrint('ERRO CLOUD FUNCTION AUDIO');
@@ -3242,8 +3359,7 @@ class _AiChatPageState extends State<AiChatPage> {
                               child: _ChatBubble(
                                 message: message,
                                 acaoOuvir: message.type == ChatMessageType.ai &&
-                                        PreferenciasService.instance
-                                            .ouvirMensagensArgos.value
+                                        message.orcamentoLinhas == null
                                     ? _BotaoOuvir(
                                         tocando: _falaTexto == message.text,
                                         carregando: _falaCarregando &&
@@ -4123,7 +4239,7 @@ class _ChatBubble extends StatelessWidget {
   /// Não-nulo apenas na bolha da pergunta bifurcada, pra renderizar os botões inline.
   final void Function(ColetaModo)? onChooseColetaModo;
 
-  /// Botão de ouvir a mensagem (opção de teste ligada no perfil).
+  /// Botão de ouvir a mensagem (Text-to-Speech, em toda fala do Argos).
   final Widget? acaoOuvir;
 
   /// Não-nulo apenas na foto que não deu para reenviar sozinho.
@@ -4141,6 +4257,13 @@ class _ChatBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     switch (message.type) {
       case ChatMessageType.ai:
+        final linhas = message.orcamentoLinhas;
+        if (linhas != null) {
+          return _OrcamentoResumoBubble(
+            linhas: linhas,
+            total: message.orcamentoTotal ?? 0,
+          );
+        }
         return _AiBubble(
           text: message.text,
           boldLineIndexes: message.boldLineIndexes,
@@ -4596,6 +4719,103 @@ class _PhotoBubble extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Cartão com os itens e o total do orçamento, mostrado na confirmação final
+/// (mesmo visual do resumo do "Enviar tudo de uma vez").
+class _OrcamentoResumoBubble extends StatelessWidget {
+  final List<MapEntry<String, double>> linhas;
+  final double total;
+
+  const _OrcamentoResumoBubble({required this.linhas, required this.total});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 46),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: const Color(0xFF0057C0).withOpacity(.14)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(
+                  Icons.request_quote_outlined,
+                  size: 18,
+                  color: Color(0xFF0057C0),
+                ),
+                SizedBox(width: 6),
+                Text(
+                  'Resumo do orçamento',
+                  style: TextStyle(
+                    color: Color(0xFF0057C0),
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            for (final linha in linhas)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        linha.key,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Color(0xFF1F2937),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      formatCurrencyBRL(linha.value),
+                      style: const TextStyle(
+                        color: Color(0xFF6B7280),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const Divider(height: 18, color: Color(0xFF1F2937)),
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'Total',
+                    style: TextStyle(
+                      color: Color(0xFF1F2937),
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                Text(
+                  formatCurrencyBRL(total),
+                  style: const TextStyle(
+                    color: Color(0xFF0057C0),
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -5929,7 +6149,7 @@ class _TypingBubbleState extends State<_TypingBubble>
   }
 }
 
-/// Botão pequeno de ouvir/parar a mensagem do Argos (opção de teste).
+/// Botão pequeno de ouvir/parar a mensagem do Argos.
 class _BotaoOuvir extends StatelessWidget {
   final bool tocando;
   final bool carregando;

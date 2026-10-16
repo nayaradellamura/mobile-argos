@@ -998,7 +998,10 @@ class VistoriaChatSessionService {
   }) async {
     final cleanText = text.trim();
 
-    if (cleanText.isEmpty && role != 'audio') return;
+    // O resumo do orçamento não tem texto: os itens vão em `extraData`.
+    if (cleanText.isEmpty && role != 'audio' && role != 'orcamento_resumo') {
+      return;
+    }
 
     // TTL de sessão (24h úteis) é renovado aqui, no app — não depende de
     // nenhuma Cloud Function/backend do agente escrever isso de volta.
