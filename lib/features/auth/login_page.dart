@@ -297,6 +297,7 @@ class _LoginPageState extends State<LoginPage> {
                       labelText: 'Senha atual',
                       prefixIcon: const Icon(Icons.lock_outline),
                       suffixIcon: IconButton(
+                        tooltip: obscure ? 'Mostrar senha' : 'Ocultar senha',
                         onPressed: () {
                           setDialogState(() {
                             obscure = !obscure;
@@ -1104,6 +1105,9 @@ class _LoginPageState extends State<LoginPage> {
                             labelText: 'Senha',
                             prefixIcon: const Icon(Icons.lock_outline),
                             suffixIcon: IconButton(
+                              tooltip: obscurePassword
+                                  ? 'Mostrar senha'
+                                  : 'Ocultar senha',
                               onPressed: () {
                                 setState(() {
                                   obscurePassword = !obscurePassword;

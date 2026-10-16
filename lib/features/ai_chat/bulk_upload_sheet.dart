@@ -295,6 +295,30 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
     );
   }
 
+  /// Confirma antes de tirar uma foto ou áudio do pacote (o botão de remover
+  /// fica em cima da miniatura e era fácil tocar sem querer).
+  Future<bool> _confirmarRemocao(String oQue) async {
+    final remover = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Remover $oQue?'),
+        content: const Text('Ele sai do pacote e não será enviado.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Manter'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
+            child: const Text('Remover'),
+          ),
+        ],
+      ),
+    );
+    return remover ?? false;
+  }
+
   /// Remove um item do rascunho persistido do Firestore.
   void _removeSyncedItem(String localId) {
     unawaited(
@@ -651,7 +675,8 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
                         photos: _photos,
                         canAddMore: _photos.length < kBulkMaxPhotos,
                         onAdd: _addPhotos,
-                        onRemove: (i) {
+                        onRemove: (i) async {
+                          if (!await _confirmarRemocao('esta foto')) return;
                           final removed = _photos[i];
                           _removeSyncedItem(removed.localId);
                           setState(() => _photos.removeAt(i));
@@ -666,7 +691,8 @@ class _BulkUploadSheetState extends State<BulkUploadSheet> {
                         recordingSeconds: _recordingSeconds,
                         canRecordMore: _audios.length < kBulkMaxAudios,
                         onToggleRecording: _toggleRecording,
-                        onRemove: (i) {
+                        onRemove: (i) async {
+                          if (!await _confirmarRemocao('este áudio')) return;
                           final removed = _audios[i];
                           _removeSyncedItem(removed.localId);
                           setState(() => _audios.removeAt(i));
@@ -773,6 +799,7 @@ class _PhotoGrid extends StatelessWidget {
       children: [
         for (var i = 0; i < photos.length; i++)
           Stack(
+            clipBehavior: Clip.none,
             children: [
               ClipRRect(
                 borderRadius: BorderRadius.circular(14),
@@ -787,6 +814,7 @@ class _PhotoGrid extends StatelessWidget {
                 top: -6,
                 right: -6,
                 child: IconButton(
+                  tooltip: 'Remover foto',
                   icon: const Icon(
                     Icons.cancel_rounded,
                     color: Colors.redAccent,
@@ -981,6 +1009,7 @@ class _BulkAudioPlayerTileState extends State<_BulkAudioPlayerTile> {
         children: [
           IconButton(
             onPressed: _togglePlay,
+            tooltip: _isPlaying ? 'Pausar áudio' : 'Ouvir áudio',
             icon: Icon(
               _isPlaying
                   ? Icons.pause_circle_filled_rounded
@@ -1012,6 +1041,7 @@ class _BulkAudioPlayerTileState extends State<_BulkAudioPlayerTile> {
             ),
           ),
           IconButton(
+            tooltip: 'Remover áudio',
             icon: const Icon(Icons.delete_outline_rounded, size: 20),
             onPressed: widget.onRemove,
           ),

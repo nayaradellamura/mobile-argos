@@ -36,7 +36,7 @@ class _MainShellState extends State<MainShell> {
   bool profileCompletionRequired = false;
 
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
-      _accountStatusSubscription;
+  _accountStatusSubscription;
   bool _accountBlockedDialogShown = false;
 
   // Sinistro selecionado quando o Chat IA é aberto a partir do sumário da vistoria.
@@ -85,8 +85,9 @@ class _MainShellState extends State<MainShell> {
     final listener = _notificationOpenListener;
 
     if (listener != null) {
-      ArgosPushNotificationService.instance.openedSinistroId
-          .removeListener(listener);
+      ArgosPushNotificationService.instance.openedSinistroId.removeListener(
+        listener,
+      );
     }
 
     _accountStatusSubscription?.cancel();
@@ -106,19 +107,19 @@ class _MainShellState extends State<MainShell> {
         .doc(email)
         .snapshots()
         .listen(
-      (snapshot) {
-        if (!mounted || _accountBlockedDialogShown) return;
+          (snapshot) {
+            if (!mounted || _accountBlockedDialogShown) return;
 
-        final status = snapshot.data()?['status']?.toString() ?? '';
+            final status = snapshot.data()?['status']?.toString() ?? '';
 
-        if (status.isNotEmpty && status != 'ativo') {
-          _showAccountBlockedDialog(status);
-        }
-      },
-      onError: (error) {
-        debugPrint('Account status watch error: $error');
-      },
-    );
+            if (status.isNotEmpty && status != 'ativo') {
+              _showAccountBlockedDialog(status);
+            }
+          },
+          onError: (error) {
+            debugPrint('Account status watch error: $error');
+          },
+        );
   }
 
   /// Mostra o diálogo de conta bloqueada/pendente e desloga ao confirmar.
@@ -201,7 +202,7 @@ class _MainShellState extends State<MainShell> {
   void _handleNotificationSinistroOpened() {
     final sinistroId =
         ArgosPushNotificationService.instance.openedSinistroId.value?.trim() ??
-            '';
+        '';
 
     if (sinistroId.isEmpty || !mounted) return;
 
@@ -331,7 +332,8 @@ class _MainShellState extends State<MainShell> {
 
   /// Monta (e cacheia) as 3 páginas do IndexedStack, só recriando quando algo relevante muda.
   List<Widget> get pages {
-    final needsRebuild = _cachedPages == null ||
+    final needsRebuild =
+        _cachedPages == null ||
         _cachedPagesSinistroKey != selectedSinistroIdForChat ||
         _cachedPagesNotificationSinistroId != notificationSinistroIdToOpen ||
         _cachedPagesProfileCompletionRequired != profileCompletionRequired ||
@@ -602,46 +604,54 @@ class _ArgosBottomNav extends StatelessWidget {
             final isActive = currentIndex == index;
             final isLocked = completionRequired && index != 2;
 
-            return GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () => onTap(index),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 220),
-                curve: Curves.easeOut,
-                padding: EdgeInsets.symmetric(
-                  horizontal: isActive ? 20 : 12,
-                  vertical: 10,
-                ),
-                decoration: BoxDecoration(
-                  color: isActive
-                      ? const Color(0xFFE5F6FF)
-                      : Colors.transparent,
-                  borderRadius: BorderRadius.circular(18),
-                ),
-                child: Opacity(
-                  opacity: isLocked ? .35 : 1,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        isLocked ? Icons.lock_outline : item.icon,
-                        color: isActive
-                            ? const Color(0xFF0057C0)
-                            : const Color(0xFF414755).withOpacity(.45),
-                        size: 24,
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        item.label.toUpperCase(),
-                        style: TextStyle(
-                          fontSize: 9.5,
-                          fontWeight: FontWeight.w800,
+            return Semantics(
+              button: true,
+              selected: isActive,
+              label: isLocked
+                  ? '${item.label} (complete o cadastro para liberar)'
+                  : item.label,
+              excludeSemantics: true,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => onTap(index),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOut,
+                  padding: EdgeInsets.symmetric(
+                    horizontal: isActive ? 20 : 12,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: isActive
+                        ? const Color(0xFFE5F6FF)
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: Opacity(
+                    opacity: isLocked ? .35 : 1,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          isLocked ? Icons.lock_outline : item.icon,
                           color: isActive
                               ? const Color(0xFF0057C0)
-                              : const Color(0xFF414755).withOpacity(.45),
+                              : const Color(0xFF414755).withOpacity(.7),
+                          size: 24,
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 4),
+                        Text(
+                          item.label.toUpperCase(),
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w800,
+                            color: isActive
+                                ? const Color(0xFF0057C0)
+                                : const Color(0xFF414755).withOpacity(.7),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),

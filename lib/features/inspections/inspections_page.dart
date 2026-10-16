@@ -1001,6 +1001,111 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     onStartRetificacao();
   }
 
+  /// Um botão só, com o próximo passo possível: retificação, coleta,
+  /// check-in ou, se nada estiver disponível, o motivo (desabilitado).
+  Widget _buildAcaoPrincipal({
+    required bool hasCheckIn,
+    required bool isAssignedToAnother,
+    required bool canCheckIn,
+    required bool isHumanAnalysis,
+    required bool canOpenChat,
+    required bool canStartRetificacao,
+  }) {
+    ButtonStyle estilo(Color cor) => ElevatedButton.styleFrom(
+          backgroundColor: cor,
+          foregroundColor: Colors.white,
+          disabledBackgroundColor: const Color(0xFFE5E7EB),
+          disabledForegroundColor: const Color(0xFF6B7280),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+        );
+
+    if (canStartRetificacao) {
+      return ElevatedButton.icon(
+        onPressed: _goToRetificacao,
+        icon: const Icon(Icons.rate_review_outlined),
+        label: const Text('Iniciar retificação'),
+        style: estilo(Colors.deepOrange),
+      );
+    }
+
+    if (canOpenChat) {
+      return ElevatedButton.icon(
+        onPressed: _goToChat,
+        icon: const Icon(Icons.smart_toy),
+        label: const Text('Iniciar coleta no Argos IA'),
+        style: estilo(const Color(0xFF0057C0)),
+      );
+    }
+
+    if (canCheckIn && !isHumanAnalysis && !inspection.isPendingOfflineSync) {
+      return ValueListenableBuilder<bool>(
+        valueListenable: ArgosConnectivityService.instance.isOnline,
+        builder: (context, online, _) {
+          final blockedByOffline = !online;
+          return ElevatedButton.icon(
+            onPressed:
+                isCheckingIn || blockedByOffline ? null : _registerCheckIn,
+            icon: isCheckingIn
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : Icon(
+                    blockedByOffline
+                        ? Icons.wifi_off_rounded
+                        : Icons.login_rounded,
+                  ),
+            label: Text(
+              isCheckingIn
+                  ? 'Realizando check-in...'
+                  : blockedByOffline
+                      ? 'Check-in precisa de internet'
+                      : hasCheckIn
+                          ? 'Assumir vistoria'
+                          : 'Realizar check-in e assumir vistoria',
+            ),
+            style: estilo(const Color(0xFF0057C0)),
+          );
+        },
+      );
+    }
+
+    final String motivo;
+    final IconData icone;
+    if (inspection.isPendingOfflineSync) {
+      motivo = 'Aguardando sincronização...';
+      icone = Icons.cloud_sync_rounded;
+    } else if (isHumanAnalysis) {
+      motivo = 'Vistoria em análise';
+      icone = Icons.hourglass_top_rounded;
+    } else if (isAssignedToAnother) {
+      motivo = 'Vinculada a ${inspection.assignedToName}';
+      icone = Icons.lock_outline;
+    } else if (inspection.isCompletedCategory) {
+      motivo = 'Vistoria concluída';
+      icone = Icons.check_circle_outline;
+    } else if (inspection.isCancelledCategory) {
+      motivo = 'Vistoria cancelada';
+      icone = Icons.block;
+    } else {
+      motivo = 'Nenhuma ação disponível';
+      icone = Icons.lock_outline;
+    }
+
+    return ElevatedButton.icon(
+      onPressed: null,
+      icon: Icon(icone),
+      label: Text(motivo, overflow: TextOverflow.ellipsis),
+      style: estilo(const Color(0xFF0057C0)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final hasCheckIn = inspection.checkInAt != null;
@@ -1022,6 +1127,18 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
 
     return Scaffold(
       backgroundColor: const Color(0xFFF3FBFF),
+      // Ação principal fixa no rodapé: antes ficava no fim de uma página
+      // longa, depois de uns 8 cards, e o mecânico precisava rolar para achar.
+      bottomNavigationBar: _SummaryActionBar(
+        child: _buildAcaoPrincipal(
+          hasCheckIn: hasCheckIn,
+          isAssignedToAnother: isAssignedToAnother,
+          canCheckIn: canCheckIn,
+          isHumanAnalysis: isHumanAnalysis,
+          canOpenChat: canOpenChat,
+          canStartRetificacao: canStartRetificacao,
+        ),
+      ),
       body: SafeArea(
         child: Column(
           children: [
@@ -1165,133 +1282,6 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                               const SizedBox(height: 14),
                               const _ChecklistCard(),
                               const SizedBox(height: 20),
-                              if (canStartRetificacao) ...[
-                                SizedBox(
-                                  height: 54,
-                                  child: ElevatedButton.icon(
-                                    onPressed: _goToRetificacao,
-                                    icon: const Icon(Icons.rate_review_outlined),
-                                    label: const Text('Iniciar retificação'),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: Colors.deepOrange,
-                                      foregroundColor: Colors.white,
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(18),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ] else ...[
-                                ValueListenableBuilder<bool>(
-                                  valueListenable:
-                                      ArgosConnectivityService.instance.isOnline,
-                                  builder: (context, online, _) {
-                                    final blockedByOffline =
-                                        !online && !hasCheckIn;
-
-                                    return SizedBox(
-                                      height: 54,
-                                      child: ElevatedButton.icon(
-                                        onPressed: canCheckIn &&
-                                                !isCheckingIn &&
-                                                !blockedByOffline
-                                            ? _registerCheckIn
-                                            : null,
-                                        icon: isCheckingIn
-                                            ? const SizedBox(
-                                                width: 18,
-                                                height: 18,
-                                                child: CircularProgressIndicator(
-                                                  strokeWidth: 2,
-                                                  color: Colors.white,
-                                                ),
-                                              )
-                                            : Icon(
-                                                blockedByOffline
-                                                    ? Icons.wifi_off_rounded
-                                                    : hasCheckIn
-                                                        ? Icons.check_circle
-                                                        : Icons.login_rounded,
-                                              ),
-                                        label: Text(
-                                          isCheckingIn
-                                              ? 'Realizando check-in...'
-                                              : blockedByOffline
-                                                  ? 'Check-in precisa de internet'
-                                                  : isHumanAnalysis
-                                                      ? 'Vistoria em análise'
-                                                      : isAssignedToAnother
-                                                      ? 'Vistoria vinculada a ${inspection.assignedToName}'
-                                                      : hasCheckIn &&
-                                                              !inspection.hasAssignedUser
-                                                          ? 'Assumir vistoria'
-                                                          : hasCheckIn
-                                                              ? 'Check-in realizado às ${_formatTime(inspection.checkInAt!)}'
-                                                              : 'Realizar check-in e assumir vistoria',
-                                        ),
-                                        style: ElevatedButton.styleFrom(
-                                          backgroundColor: hasCheckIn
-                                              ? Colors.green
-                                              : (isAssignedToAnother ||
-                                                      blockedByOffline)
-                                                  ? const Color(0xFF9CA3AF)
-                                                  : const Color(0xFF0057C0),
-                                          foregroundColor: Colors.white,
-                                          disabledBackgroundColor: hasCheckIn
-                                              ? Colors.green
-                                              : (isAssignedToAnother ||
-                                                      blockedByOffline)
-                                                  ? const Color(0xFF9CA3AF)
-                                                  : const Color(0xFF0057C0),
-                                          disabledForegroundColor: Colors.white,
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(18),
-                                          ),
-                                        ),
-                                      ),
-                                    );
-                                  },
-                                ),
-                                const SizedBox(height: 10),
-                                SizedBox(
-                                  height: 54,
-                                  child: OutlinedButton.icon(
-                                    onPressed: canOpenChat ? _goToChat : null,
-                                    icon: Icon(
-                                      canOpenChat
-                                          ? Icons.smart_toy
-                                          : inspection.isPendingOfflineSync
-                                              ? Icons.cloud_sync_rounded
-                                              : Icons.lock_outline,
-                                    ),
-                                    label: Text(
-                                      canOpenChat
-                                          ? 'Iniciar coleta no Argos IA'
-                                          : inspection.isPendingOfflineSync
-                                              ? 'Aguardando sincronização...'
-                                              : isHumanAnalysis
-                                              ? 'Vistoria em análise'
-                                              : isAssignedToAnother
-                                              ? 'Chat bloqueado para outro responsável'
-                                              : 'Faça check-in para iniciar o Argos IA',
-                                    ),
-                                    style: OutlinedButton.styleFrom(
-                                      foregroundColor: canOpenChat
-                                          ? const Color(0xFF0057C0)
-                                          : const Color(0xFF6B7280),
-                                      backgroundColor: canOpenChat
-                                          ? const Color(0xFFE5F6FF)
-                                          : const Color(0xFFE5E7EB),
-                                      side: BorderSide(
-                                        color: Colors.black.withOpacity(.05),
-                                      ),
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(18),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
                             ],
                           ),
                           _InspectionHistoryTab(inspection: inspection),
@@ -3191,8 +3181,8 @@ class _InspectionsHeader extends StatelessWidget {
                         onTap: onToggleSearch,
                         borderRadius: BorderRadius.circular(12),
                         child: SizedBox(
-                          width: 36,
-                          height: 36,
+                          width: 44,
+                          height: 44,
                           child: Icon(
                             isSearching ? Icons.close : Icons.search,
                             color: isSearching
@@ -3217,8 +3207,8 @@ class _InspectionsHeader extends StatelessWidget {
                         onTap: onOpenRanking,
                         borderRadius: BorderRadius.circular(12),
                         child: const SizedBox(
-                          width: 36,
-                          height: 36,
+                          width: 44,
+                          height: 44,
                           child: Icon(
                             Icons.emoji_events_outlined,
                             color: Color(0xFF0057C0),
@@ -5998,6 +5988,34 @@ class _RelatorioClienteCardState extends State<_RelatorioClienteCard> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Rodapé fixo do resumo do sinistro, com a ação principal.
+class _SummaryActionBar extends StatelessWidget {
+  final Widget child;
+
+  const _SummaryActionBar({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(.06),
+              blurRadius: 18,
+              offset: const Offset(0, -6),
+            ),
+          ],
+        ),
+        child: SizedBox(height: 54, width: double.infinity, child: child),
       ),
     );
   }
