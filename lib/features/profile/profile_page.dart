@@ -11,7 +11,6 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../services/bulk_sync_coordinator.dart';
 import '../../services/ibge_http_client.dart';
-import '../../services/preferencias_service.dart';
 import '../../services/session_context_service.dart';
 import '../../services/vistoria_chat_session_service.dart';
 
@@ -1394,14 +1393,12 @@ class _StatusBanner extends StatelessWidget {
           ),
           const SizedBox(width: 10),
           Expanded(
-            child: _AtalhoOuvirArgos(
-              child: Text(
-                '$providerLabel · ${cadastroCompleto ? 'cadastro completo' : 'cadastro pendente'}',
-                style: TextStyle(
-                  color: cadastroCompleto ? Colors.green : Colors.orange,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 12.5,
-                ),
+            child: Text(
+              '$providerLabel · ${cadastroCompleto ? 'cadastro completo' : 'cadastro pendente'}',
+              style: TextStyle(
+                color: cadastroCompleto ? Colors.green : Colors.orange,
+                fontWeight: FontWeight.w800,
+                fontSize: 12.5,
               ),
             ),
           ),
@@ -1572,55 +1569,6 @@ class CpfInputFormatter extends TextInputFormatter {
     return TextEditingValue(
       text: formatted,
       selection: TextSelection.collapsed(offset: formatted.length),
-    );
-  }
-}
-
-/// Opção oculta de teste: 7 toques seguidos liga/desliga o botão de ouvir
-/// as mensagens do Argos no chat.
-class _AtalhoOuvirArgos extends StatefulWidget {
-  final Widget child;
-
-  const _AtalhoOuvirArgos({required this.child});
-
-  @override
-  State<_AtalhoOuvirArgos> createState() => _AtalhoOuvirArgosState();
-}
-
-class _AtalhoOuvirArgosState extends State<_AtalhoOuvirArgos> {
-  int _toques = 0;
-  DateTime _ultimoToque = DateTime.fromMillisecondsSinceEpoch(0);
-
-  Future<void> _tocar() async {
-    final agora = DateTime.now();
-    _toques = agora.difference(_ultimoToque).inSeconds < 2 ? _toques + 1 : 1;
-    _ultimoToque = agora;
-    if (_toques < 7) return;
-    _toques = 0;
-
-    final prefs = PreferenciasService.instance;
-    final ligar = !prefs.ouvirMensagensArgos.value;
-    try {
-      await prefs.definirOuvirMensagensArgos(ligar);
-    } catch (_) {}
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          ligar
-              ? 'Teste ativado: as mensagens do Argos ganham o botão de ouvir.'
-              : 'Teste desativado: botão de ouvir removido.',
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: _tocar,
-      child: widget.child,
     );
   }
 }

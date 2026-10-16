@@ -2920,10 +2920,10 @@ exports.gerarRelatorioCliente = onCall(
   }
 );
 
-// ── Ouvir mensagens do Argos (teste) ───────────────────────────────────────
+// ── Ouvir mensagens do Argos ───────────────────────────────────────────────
 //
-// Opção oculta no perfil: com ela ligada, cada mensagem do Argos no chat
-// ganha um botão de ouvir. O app manda o texto; volta o MP3 em base64.
+// Cada mensagem do Argos no chat tem um botão de ouvir. O app manda o
+// texto; volta o MP3 em base64.
 const falaArgos = require("./fala_argos");
 
 exports.falarMensagemArgos = onCall(
