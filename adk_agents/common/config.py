@@ -3,9 +3,15 @@
 O modelo vem de variavel de ambiente para poder ser trocado com um
 `gcloud run services update --update-env-vars`, sem rebuild da imagem.
 
-Padrao: `gemini-3.8-flash` (mesmo modelo das Cloud Functions). Antes era
-`gemini-3.1-flash-lite`, o mais barato que passou no teste real abaixo —
-o 3.8-flash ainda precisa ser validado com os evals (adk_agents/eval).
+Padrao: `gemini-3.1-flash-lite` na conversa e `gemini-3.8-flash` so na
+analise de fotos (ARGOS_MODEL_VISAO).
+
+Em 2026-10-14 a conversa passou para o 3.8-flash e o chat ficou lento:
+medido em 2026-10-16 nos logs do Cloud Run, cada chamada ao modelo levava
+3-8s (o flash-lite leva ~1s), e um turno faz 2-3 chamadas — 10-17s por
+mensagem. Voltou ao flash-lite no mesmo dia; evals: orcamento 4/4, vistoria
+4/5 (o caso da piada no 1o turno responde sem chamar
+carregar_contexto_vistoria antes).
 
 TESTADO NO VERTEX DO fho-argos EM 2026-09-16, com o agente de verdade:
   - gemini-2.5-flash-lite   NAO USAR como coordenador. Ele NAO consegue emitir
@@ -31,7 +37,8 @@ from __future__ import annotations
 
 import os
 
-_PADRAO = "gemini-3.8-flash"
+_PADRAO = "gemini-3.1-flash-lite"
+_PADRAO_VISAO = "gemini-3.8-flash"
 
 
 def modelo_conversa() -> str:
@@ -40,5 +47,5 @@ def modelo_conversa() -> str:
 
 
 def modelo_visao() -> str:
-    """Modelo do analista de danos por foto. Cai no de conversa se nao setado."""
-    return os.environ.get("ARGOS_MODEL_VISAO", modelo_conversa())
+    """Modelo do analista de danos por foto (onde a precisao importa mais)."""
+    return os.environ.get("ARGOS_MODEL_VISAO", _PADRAO_VISAO)

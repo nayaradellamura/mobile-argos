@@ -19,19 +19,28 @@
 # Uso:
 #   .\scripts\deploy_cloud_run.ps1
 #   .\scripts\deploy_cloud_run.ps1 -ArtifactServiceUri gs://fho-argos-adk-artifacts
-#   .\scripts\deploy_cloud_run.ps1 -Model gemini-3.1-flash-lite   # rollback de modelo
+#   .\scripts\deploy_cloud_run.ps1 -Model gemini-3.8-flash        # rollback de modelo
 
 param(
     [string]$Project = "fho-argos",
     [string]$Region = "us-central1",
     [string]$ServiceName = "argos-adk",
     [string]$ServiceAccount = "argos-adk@fho-argos.iam.gserviceaccount.com",
-    [string]$Model = "gemini-3.8-flash",
-    [string]$ModelVisao = "",
+    # Conversa no flash-lite (~1s por chamada); o 3.8-flash deixava cada
+    # mensagem em 10-17s. O 3.8-flash fica so na analise de fotos.
+    [string]$Model = "gemini-3.1-flash-lite",
+    [string]$ModelVisao = "gemini-3.8-flash",
     [string]$StorageBucket = "fho-argos.firebasestorage.app",
     [string]$ArtifactServiceUri = "",
     [string]$SessionServiceUri = "",
-    [int]$MaxInstances = 3
+    [int]$MaxInstances = 3,
+    # 1 instancia sempre ligada: sem ela, a 1a mensagem depois de uns minutos
+    # parado esperava o container subir (5-16s) e a sessao em memoria se perdia.
+    [int]$MinInstances = 1,
+    # O api_server do ADK e assincrono. Com 1 (valor herdado do console),
+    # cada mensagem simultanea abria outra instancia e a conversa pulava
+    # de instancia, recriando a sessao.
+    [int]$Concurrency = 10
 )
 
 $ErrorActionPreference = "Stop"
@@ -78,6 +87,8 @@ gcloud run deploy $ServiceName `
     --service-account $ServiceAccount `
     --no-allow-unauthenticated `
     --max-instances $MaxInstances `
+    --min-instances $MinInstances `
+    --concurrency $Concurrency `
     --cpu-boost `
     --set-env-vars ($envVars -join ",")
 
