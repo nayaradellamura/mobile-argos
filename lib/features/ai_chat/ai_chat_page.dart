@@ -68,6 +68,11 @@ class ChatMessage {
   /// Modo escolhido pelo mecânico na pergunta bifurcada, registrado na própria bolha.
   final ColetaModo? selectedColetaModo;
 
+  /// Envio da foto: null quando já subiu, [fotoReenviando] enquanto o app
+  /// tenta de novo sozinho e [fotoFalhou] quando não dá para reenviar sem
+  /// o mecânico (arquivo sumiu, sem permissão).
+  final String? photoStatus;
+
   const ChatMessage({
     required this.type,
     required this.text,
@@ -83,9 +88,18 @@ class ChatMessage {
     this.createdAt,
     this.isColetaModoPrompt = false,
     this.selectedColetaModo,
+    this.photoStatus,
   });
 
-  ChatMessage copyWith({String? text, ColetaModo? selectedColetaModo}) {
+  static const fotoReenviando = 'reenviando';
+  static const fotoFalhou = 'falhou';
+
+  ChatMessage copyWith({
+    String? text,
+    ColetaModo? selectedColetaModo,
+    String? photoStatus,
+    bool limparPhotoStatus = false,
+  }) {
     return ChatMessage(
       type: type,
       text: text ?? this.text,
@@ -101,6 +115,8 @@ class ChatMessage {
       createdAt: createdAt,
       isColetaModoPrompt: isColetaModoPrompt,
       selectedColetaModo: selectedColetaModo ?? this.selectedColetaModo,
+      photoStatus:
+          limparPhotoStatus ? null : (photoStatus ?? this.photoStatus),
     );
   }
 }
@@ -2064,9 +2080,22 @@ class _AiChatPageState extends State<AiChatPage> {
     await _enviarFotos(session, photos.map((p) => p.path).toList());
   }
 
+  /// Etapas já concluídas de cada foto que ainda não terminou de subir
+  /// (chave: caminho local). Num reenvio, só a etapa que falhou é refeita:
+  /// a foto não sobe de novo nem entra duas vezes em `images`.
+  final Map<String, _EnvioFoto> _enviosFoto = {};
+
+  /// Fotos com reenvio automático em andamento, pra não abrir dois laços.
+  final Set<String> _fotosEmReenvio = {};
+
+  /// Texto da bolha de "digitando" enquanto as fotos sobem e são analisadas
+  /// (null = só os pontinhos). O aviso do agente só chega com a resposta
+  /// inteira, então o app avisa por conta própria.
+  String? _statusFotos;
+
   /// Sobe as fotos, mostra cada uma no chat e avisa o Argos das que subiram.
-  /// As que falharem continuam no aparelho e podem ser reenviadas pelo aviso,
-  /// sem precisar fotografar de novo.
+  /// As que falharem ficam no chat como "Enviando de novo…" e o app tenta
+  /// sozinho até conseguir (ver [_reenviarFotosSozinho]).
   Future<void> _enviarFotos(VistoriaSession session, List<String> paths) async {
     setState(() {
       for (final path in paths) {
@@ -2081,87 +2110,195 @@ class _AiChatPageState extends State<AiChatPage> {
       }
     });
 
+    final plural = paths.length > 1 ? 's' : '';
+    setState(() {
+      isAiTyping = true;
+      _statusFotos = 'Enviando ${paths.length} foto$plural…';
+    });
     _scrollToBottom();
 
     var uploadedCount = 0;
     final failedPaths = <String>[];
 
-    for (final path in paths) {
+    // Sobe a leva em paralelo: em série, cada foto esperava a anterior.
+    await Future.wait(paths.map((path) async {
       try {
-        final uploadedImage =
-            await VistoriaChatSessionService.instance.uploadImageFile(
-          vistoriaDocId: session.docId,
-          imagePath: path,
-        );
-
-        await VistoriaChatSessionService.instance.appendImageEvidence(
-          vistoriaDocId: session.docId,
-          imageUrl: uploadedImage.downloadUrl,
-          imagePath: path,
-          imageId: uploadedImage.imageId,
-          storagePath: uploadedImage.storagePath,
-          fileName: uploadedImage.fileName,
-          contentType: uploadedImage.contentType,
-          sizeBytes: uploadedImage.sizeBytes,
-        );
-
-        await VistoriaChatSessionService.instance.appendChatMessage(
-          vistoriaDocId: session.docId,
-          role: 'photo',
-          text: 'Foto anexada à vistoria',
-          extraData: {
-            'imageId': uploadedImage.imageId,
-            'url': uploadedImage.downloadUrl,
-            'storagePath': uploadedImage.storagePath,
-            'fileName': uploadedImage.fileName,
-          },
-        );
-
+        await _enviarUmaFoto(session, path);
         uploadedCount++;
       } catch (e) {
-        failedPaths.add(path);
         debugPrint('Erro ao salvar foto da vistoria no Storage: $e');
+        if (_falhaSemReenvio(e)) {
+          _marcarFoto(path, ChatMessage.fotoFalhou);
+        } else {
+          failedPaths.add(path);
+        }
       }
+    }));
+
+    if (uploadedCount == 0 && mounted) {
+      setState(() {
+        isAiTyping = false;
+        _statusFotos = null;
+      });
     }
 
-    // Tira do chat as bolhas das fotos que não subiram.
     if (failedPaths.isNotEmpty && mounted) {
-      setState(() {
-        messages.removeWhere(
-          (m) =>
-              m.type == ChatMessageType.photo &&
-              failedPaths.contains(m.imagePath),
-        );
-      });
-
+      for (final path in failedPaths) {
+        _marcarFoto(path, ChatMessage.fotoReenviando);
+      }
       final failed = failedPaths.length;
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            duration: const Duration(seconds: 12),
-            backgroundColor: Colors.redAccent,
-            content: Text(
-              failed == paths.length
-                  ? 'Não foi possível enviar as fotos. Verifique a conexão.'
-                  : 'Não foi possível enviar $failed '
-                      'foto${failed > 1 ? 's' : ''}.',
-            ),
-            action: SnackBarAction(
-              label: 'Reenviar',
-              textColor: Colors.white,
-              onPressed: () {
-                if (!mounted || isInspectionCompleted) return;
-                unawaited(_enviarFotos(session, failedPaths));
-              },
-            ),
-          ),
-        );
+      _showSnack(
+        failed == 1
+            ? 'Uma foto não subiu. O app vai tentar de novo sozinho.'
+            : '$failed fotos não subiram. O app vai tentar de novo sozinho.',
+        backgroundColor: Colors.orange,
+      );
+      unawaited(_reenviarFotosSozinho(session, failedPaths));
     }
 
     if (uploadedCount == 0) return;
 
     await _analyzePhotosWithAgent(session: session, quantity: uploadedCount);
+  }
+
+  /// Sobe uma foto e grava a evidência e a bolha no histórico, pulando as
+  /// etapas que já deram certo numa tentativa anterior.
+  Future<void> _enviarUmaFoto(VistoriaSession session, String path) async {
+    final service = VistoriaChatSessionService.instance;
+    final envio = _enviosFoto.putIfAbsent(path, () => _EnvioFoto());
+
+    final uploadedImage = envio.upload ??= await service.uploadImageFile(
+      vistoriaDocId: session.docId,
+      imagePath: path,
+    );
+
+    if (!envio.evidenciaGravada) {
+      await service.appendImageEvidence(
+        vistoriaDocId: session.docId,
+        imageUrl: uploadedImage.downloadUrl,
+        imagePath: path,
+        imageId: uploadedImage.imageId,
+        storagePath: uploadedImage.storagePath,
+        fileName: uploadedImage.fileName,
+        contentType: uploadedImage.contentType,
+        sizeBytes: uploadedImage.sizeBytes,
+      );
+      envio.evidenciaGravada = true;
+    }
+
+    await service.appendChatMessage(
+      vistoriaDocId: session.docId,
+      role: 'photo',
+      text: 'Foto anexada à vistoria',
+      extraData: {
+        'imageId': uploadedImage.imageId,
+        'url': uploadedImage.downloadUrl,
+        'storagePath': uploadedImage.storagePath,
+        'fileName': uploadedImage.fileName,
+      },
+    );
+
+    _enviosFoto.remove(path);
+  }
+
+  /// Erros que não se resolvem tentando de novo: o arquivo sumiu do
+  /// aparelho ou as regras recusaram (ex. vistoria fechada).
+  bool _falhaSemReenvio(Object e) {
+    if (e is FileSystemException) return true;
+    if (e is FirebaseException) {
+      return e.code == 'unauthorized' || e.code == 'permission-denied';
+    }
+    return false;
+  }
+
+  /// Tenta de novo as fotos que não subiram enquanto o chat estiver aberto:
+  /// espera a internet voltar e aumenta o intervalo a cada rodada (até 30 s).
+  /// A cada rodada que sobe alguma foto, avisa o Argos.
+  Future<void> _reenviarFotosSozinho(
+    VistoriaSession session,
+    List<String> paths,
+  ) async {
+    // Só as que ainda não estão num laço de reenvio.
+    final aceitas = paths.where(_fotosEmReenvio.add).toList();
+    var pendentes = aceitas;
+    var espera = const Duration(seconds: 3);
+
+    try {
+      while (pendentes.isNotEmpty && mounted && !isInspectionCompleted) {
+        await Future<void>.delayed(espera);
+        await _aguardarInternet();
+        if (!mounted || isInspectionCompleted) return;
+
+        var enviadas = 0;
+        final aindaPendentes = <String>[];
+
+        for (final path in pendentes) {
+          try {
+            await _enviarUmaFoto(session, path);
+            enviadas++;
+            _marcarFoto(path, null);
+          } catch (e) {
+            debugPrint('Reenvio da foto falhou: $e');
+            if (_falhaSemReenvio(e)) {
+              _marcarFoto(path, ChatMessage.fotoFalhou);
+            } else {
+              aindaPendentes.add(path);
+            }
+          }
+        }
+
+        pendentes = aindaPendentes;
+        espera = Duration(seconds: min(espera.inSeconds * 2, 30));
+
+        if (enviadas > 0 && mounted) {
+          await _analyzePhotosWithAgent(session: session, quantity: enviadas);
+        }
+      }
+    } finally {
+      _fotosEmReenvio.removeAll(aceitas);
+    }
+  }
+
+  /// Volta logo se houver internet; senão espera o [ArgosConnectivityService]
+  /// avisar que ela voltou.
+  Future<void> _aguardarInternet() async {
+    final online = ArgosConnectivityService.instance.isOnline;
+    if (online.value) return;
+
+    final voltou = Completer<void>();
+    void ouvir() {
+      if (online.value && !voltou.isCompleted) voltou.complete();
+    }
+
+    online.addListener(ouvir);
+    try {
+      await voltou.future;
+    } finally {
+      online.removeListener(ouvir);
+    }
+  }
+
+  /// Atualiza o estado de envio na bolha da foto (null = enviada).
+  void _marcarFoto(String path, String? status) {
+    if (!mounted) return;
+    setState(() {
+      for (var i = 0; i < messages.length; i++) {
+        final m = messages[i];
+        if (m.type == ChatMessageType.photo && m.imagePath == path) {
+          messages[i] = status == null
+              ? m.copyWith(limparPhotoStatus: true)
+              : m.copyWith(photoStatus: status);
+        }
+      }
+    });
+  }
+
+  /// Toque na foto que falhou de vez: tenta mais uma rodada de reenvio.
+  void _tentarFotoDeNovo(String path) {
+    final session = currentSession;
+    if (session == null || isInspectionCompleted) return;
+    _marcarFoto(path, ChatMessage.fotoReenviando);
+    unawaited(_reenviarFotosSozinho(session, [path]));
   }
 
   /// Avisa o agente que a leva de fotos subiu e mostra a resposta dele no chat.
@@ -2171,10 +2308,14 @@ class _AiChatPageState extends State<AiChatPage> {
   }) async {
     if (!mounted) return;
 
-    setState(() => isAiTyping = true);
+    final plural = quantity > 1 ? 's' : '';
+    setState(() {
+      isAiTyping = true;
+      _statusFotos =
+          'Analisando $quantity foto$plural. Isso leva cerca de 1 minuto…';
+    });
     _scrollToBottom();
 
-    final plural = quantity > 1 ? 's' : '';
     final fallback =
         '$quantity foto$plural recebida$plural. Essas evidências foram vinculadas à vistoria.';
 
@@ -2272,6 +2413,7 @@ class _AiChatPageState extends State<AiChatPage> {
 
     setState(() {
       isAiTyping = false;
+      _statusFotos = null;
       messages.add(_aiMessageFromText(texto, createdAt: DateTime.now()));
     });
 
@@ -2291,6 +2433,7 @@ class _AiChatPageState extends State<AiChatPage> {
 
     setState(() {
       isAiTyping = false;
+      _statusFotos = null;
       messages.add(
         _aiMessageFromText(
           'Recebi as fotos. A análise está levando mais tempo; a resposta '
@@ -3083,9 +3226,9 @@ class _AiChatPageState extends State<AiChatPage> {
                           itemCount: messages.length + (isAiTyping ? 1 : 0),
                           itemBuilder: (context, index) {
                             if (isAiTyping && index == messages.length) {
-                              return const Padding(
-                                padding: EdgeInsets.only(bottom: 16),
-                                child: _TypingBubble(),
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 16),
+                                child: _TypingBubble(status: _statusFotos),
                               );
                             }
 
@@ -3111,6 +3254,12 @@ class _AiChatPageState extends State<AiChatPage> {
                                     : null,
                                 onOpenCamera:
                                     isCameraReleaseMessage ? _openCamera : null,
+                                onRetryPhoto: message.photoStatus ==
+                                            ChatMessage.fotoFalhou &&
+                                        message.imagePath != null
+                                    ? () =>
+                                        _tentarFotoDeNovo(message.imagePath!)
+                                    : null,
                                 onChooseColetaModo: message.isColetaModoPrompt &&
                                         awaitingColetaModoChoice
                                     ? _handleColetaModoChosen
@@ -3977,11 +4126,15 @@ class _ChatBubble extends StatelessWidget {
   /// Botão de ouvir a mensagem (opção de teste ligada no perfil).
   final Widget? acaoOuvir;
 
+  /// Não-nulo apenas na foto que não deu para reenviar sozinho.
+  final VoidCallback? onRetryPhoto;
+
   const _ChatBubble({
     required this.message,
     this.onOpenCamera,
     this.onChooseColetaModo,
     this.acaoOuvir,
+    this.onRetryPhoto,
   });
 
   @override
@@ -4007,6 +4160,8 @@ class _ChatBubble extends StatelessWidget {
           text: message.text,
           imagePath: message.imagePath,
           createdAt: message.createdAt,
+          photoStatus: message.photoStatus,
+          onRetry: onRetryPhoto,
         );
 
       case ChatMessageType.audio:
@@ -4338,82 +4493,117 @@ class _PhotoBubble extends StatelessWidget {
   final String text;
   final String? imagePath;
   final DateTime? createdAt;
+  final String? photoStatus;
+  final VoidCallback? onRetry;
 
   const _PhotoBubble({
     required this.text,
     required this.imagePath,
     this.createdAt,
+    this.photoStatus,
+    this.onRetry,
   });
 
   @override
   Widget build(BuildContext context) {
     final path = imagePath;
+    final reenviando = photoStatus == ChatMessage.fotoReenviando;
+    final falhou = photoStatus == ChatMessage.fotoFalhou;
+
+    final Widget icone;
+    final String legenda;
+    if (reenviando) {
+      icone = const SizedBox(
+        width: 16,
+        height: 16,
+        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+      );
+      legenda = 'Enviando de novo…';
+    } else if (falhou) {
+      icone = const Icon(Icons.refresh, color: Colors.white, size: 18);
+      legenda = 'Não enviada. Toque para tentar de novo';
+    } else {
+      icone = const Icon(Icons.image, color: Colors.white, size: 18);
+      legenda = text;
+    }
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.end,
       children: [
         Flexible(
-          child: Container(
-            width: 240,
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: const Color(0xFF0057C0),
-              borderRadius: BorderRadius.circular(22),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (path != null)
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(16),
-                    child: Image.file(
-                      File(path),
-                      height: 170,
-                      width: double.infinity,
-                      fit: BoxFit.cover,
+          child: GestureDetector(
+            onTap: onRetry,
+            child: Opacity(
+              opacity: reenviando || falhou ? .75 : 1,
+              child: Container(
+                width: 240,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0057C0),
+                  borderRadius: BorderRadius.circular(22),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (path != null)
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(16),
+                        child: Image.file(
+                          File(path),
+                          height: 170,
+                          width: double.infinity,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                    const SizedBox(height: 8),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      child: Row(
+                        children: [
+                          icone,
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              legenda,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                const SizedBox(height: 8),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.image, color: Colors.white, size: 18),
-                      const SizedBox(width: 6),
-                      Expanded(
+                    const SizedBox(height: 5),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Padding(
+                        padding: const EdgeInsets.only(right: 6),
                         child: Text(
-                          text,
-                          style: const TextStyle(
-                            color: Colors.white,
+                          _formatMessageTime(createdAt),
+                          style: TextStyle(
+                            color: Colors.white.withOpacity(.72),
+                            fontSize: 11,
                             fontWeight: FontWeight.w700,
                           ),
                         ),
                       ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 5),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: Padding(
-                    padding: const EdgeInsets.only(right: 6),
-                    child: Text(
-                      _formatMessageTime(createdAt),
-                      style: TextStyle(
-                        color: Colors.white.withOpacity(.72),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                      ),
                     ),
-                  ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         ),
       ],
     );
   }
+}
+
+/// Etapas já concluídas de uma foto que ainda não terminou de subir.
+class _EnvioFoto {
+  UploadedImageEvidence? upload;
+  bool evidenciaGravada = false;
 }
 
 /// Bolha de áudio com player, forma de onda e transcrição revelável.
@@ -5632,7 +5822,10 @@ class _AnimatedAudioWavesState extends State<_AnimatedAudioWaves>
 
 /// Bolha com três pontinhos pulsantes indicando que a IA está digitando.
 class _TypingBubble extends StatefulWidget {
-  const _TypingBubble();
+  /// Texto ao lado dos pontinhos (ex. "Analisando 3 fotos…"), se houver.
+  final String? status;
+
+  const _TypingBubble({this.status});
 
   @override
   State<_TypingBubble> createState() => _TypingBubbleState();
@@ -5683,7 +5876,7 @@ class _TypingBubbleState extends State<_TypingBubble>
           child: AnimatedBuilder(
             animation: controller,
             builder: (context, child) {
-              return Row(
+              final pontos = Row(
                 mainAxisSize: MainAxisSize.min,
                 children: List.generate(3, (index) {
                   final progress = (controller.value + (index * .18)) % 1;
@@ -5704,6 +5897,29 @@ class _TypingBubbleState extends State<_TypingBubble>
                     ),
                   );
                 }),
+              );
+
+              final status = widget.status;
+              if (status == null) return pontos;
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 240),
+                    child: Text(
+                      status,
+                      style: const TextStyle(
+                        color: Color(0xFF1F2937),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  pontos,
+                ],
               );
             },
           ),

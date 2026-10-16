@@ -1175,17 +1175,37 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                   ajustesNecessarios: _ajustesNecessariosRejeicao,
                                 ),
                               ],
+                              // Documentos separados por destino: o laudo e o
+                              // orçamento aprovado são da seguradora; o
+                              // relatório do reparo é o que vai para o cliente.
+                              if (inspection.hasOrcamentoAprovado ||
+                                  inspection.laudoTecnicoStatus.isNotEmpty) ...[
+                                const SizedBox(height: 18),
+                                const _GrupoDocumentosTitulo(
+                                  titulo: 'Para a seguradora',
+                                  descricao:
+                                      'Análise técnica da IA e orçamento aprovado.',
+                                ),
+                              ],
                               if (inspection.hasOrcamentoAprovado) ...[
-                                const SizedBox(height: 14),
+                                const SizedBox(height: 10),
                                 _OrcamentoAprovadoCard(inspection: inspection),
                               ],
                               if (inspection.laudoTecnicoStatus.isNotEmpty) ...[
-                                const SizedBox(height: 14),
+                                SizedBox(
+                                  height: inspection.hasOrcamentoAprovado ? 14 : 10,
+                                ),
                                 _LaudoTecnicoCard(inspection: inspection),
                               ],
                               if (inspection.vistoriaAtualId.trim().isNotEmpty &&
                                   !inspection.isPendingOfflineSync) ...[
-                                const SizedBox(height: 14),
+                                const SizedBox(height: 18),
+                                const _GrupoDocumentosTitulo(
+                                  titulo: 'Para o cliente',
+                                  descricao:
+                                      'Relatório do reparo para mandar ao dono do veículo.',
+                                ),
+                                const SizedBox(height: 10),
                                 _RelatorioClienteCard(inspection: inspection),
                               ],
                               const SizedBox(height: 14),
@@ -1786,35 +1806,38 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
           const SizedBox(height: 12),
           Row(
             children: [
+              // Chat sempre aparece (no "Tudo de uma vez" ele traz a
+              // resposta do Argos ao pacote); Orçamento, nos dois modos,
+              // quando a vistoria tem itens.
               Expanded(
-                child: vistoria.isEmMassa
-                    ? _PreviewSelectorTile(
-                        icon: Icons.request_quote_outlined,
-                        label: 'Orçamento',
-                        value: '${vistoria.orcamentoItems.length}',
-                        isSelected:
-                            _selectedSection == _HistoryPreviewSection.orcamento,
-                        onTap: () {
-                          setState(
-                            () => _selectedSection =
-                                _HistoryPreviewSection.orcamento,
-                          );
-                        },
-                      )
-                    : _PreviewSelectorTile(
-                        icon: Icons.chat_bubble_outline,
-                        label: 'Chat',
-                        value: '${vistoria.chatCount}',
-                        isSelected:
-                            _selectedSection == _HistoryPreviewSection.chat,
-                        onTap: () {
-                          setState(
-                            () => _selectedSection = _HistoryPreviewSection.chat,
-                          );
-                        },
-                      ),
+                child: _PreviewSelectorTile(
+                  icon: Icons.chat_bubble_outline,
+                  label: 'Chat',
+                  value: '${vistoria.chatCount}',
+                  isSelected: _selectedSection == _HistoryPreviewSection.chat,
+                  onTap: () {
+                    setState(() => _selectedSection = _HistoryPreviewSection.chat);
+                  },
+                ),
               ),
               const SizedBox(width: 8),
+              if (vistoria.orcamentoItems.isNotEmpty) ...[
+                Expanded(
+                  child: _PreviewSelectorTile(
+                    icon: Icons.request_quote_outlined,
+                    label: 'Orçamento',
+                    value: '${vistoria.orcamentoItems.length}',
+                    isSelected:
+                        _selectedSection == _HistoryPreviewSection.orcamento,
+                    onTap: () {
+                      setState(
+                        () => _selectedSection = _HistoryPreviewSection.orcamento,
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+              ],
               Expanded(
                 child: _PreviewSelectorTile(
                   icon: Icons.image_outlined,
@@ -1847,7 +1870,7 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
           ),
           const SizedBox(height: 12),
           _PreviewBlock(
-            title: 'Laudo técnico',
+            title: 'Laudo técnico (para a seguradora)',
             icon: hasLaudo
                 ? Icons.description_outlined
                 : Icons.pending_actions_outlined,
@@ -3975,6 +3998,44 @@ class _InspectionCardContent extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Título de um grupo de documentos do resumo (seguradora ou cliente).
+class _GrupoDocumentosTitulo extends StatelessWidget {
+  final String titulo;
+  final String descricao;
+
+  const _GrupoDocumentosTitulo({required this.titulo, required this.descricao});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            titulo.toUpperCase(),
+            style: const TextStyle(
+              color: Color(0xFF0057C0),
+              fontSize: 12,
+              fontWeight: FontWeight.w900,
+              letterSpacing: .6,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            descricao,
+            style: const TextStyle(
+              color: Color(0xFF6B7280),
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
       ),
     );
   }
