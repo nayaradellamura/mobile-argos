@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:camera/camera.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
@@ -2164,36 +2165,104 @@ class _AiChatPageState extends State<AiChatPage> {
     final fallback =
         '$quantity foto$plural recebida$plural. Essas evidências foram vinculadas à vistoria.';
 
-    String aiText;
+    // A análise das fotos (visão + consistência) leva perto de 1 minuto.
+    // O servidor grava a resposta no histórico com este id; se a conexão do
+    // celular cair antes, o app espera a resposta aparecer lá.
+    final turnoId = 'fotos_${DateTime.now().millisecondsSinceEpoch}';
 
+    String reply;
     try {
-      final reply = await ArgosAiService.instance.sendBackgroundMessage(
+      reply = (await ArgosAiService.instance.sendBackgroundMessage(
         text: 'Fotos enviadas ($quantity).',
         inspectionId: session.idvistoria,
         isRetificacao: session.isRetificacao,
         ajustesNecessarios: session.ajustesNecessarios,
         contextoVistoriaAnterior: session.contextoVistoriaAnterior,
-      );
-
-      aiText = reply.trim().isEmpty ? fallback : reply.trim();
+        persistirResposta: true,
+        turnoId: turnoId,
+      ))
+          .trim();
     } catch (e) {
       debugPrint('Erro ao notificar envio de fotos para IA: $e');
-      aiText = fallback;
+      await _aguardarAnaliseDasFotos(session, turnoId);
+      return;
     }
 
-    await VistoriaChatSessionService.instance.appendAiMessage(
-      vistoriaDocId: session.docId,
-      text: aiText,
-    );
+    // Resposta vazia: o servidor não gravou nada, então o app registra o
+    // texto factual. Com resposta, ela já está no histórico (servidor).
+    if (reply.isEmpty) {
+      await VistoriaChatSessionService.instance.appendAiMessage(
+        vistoriaDocId: session.docId,
+        text: fallback,
+      );
+    }
 
+    _mostrarRespostaDoArgos(reply.isEmpty ? fallback : reply);
+  }
+
+  /// Mostra uma resposta do Argos no chat e aplica os gatilhos de câmera e
+  /// orçamento que ela possa trazer.
+  void _mostrarRespostaDoArgos(String texto) {
     if (!mounted) return;
 
     setState(() {
       isAiTyping = false;
-      messages.add(_aiMessageFromText(aiText));
+      messages.add(_aiMessageFromText(texto, createdAt: DateTime.now()));
     });
 
+    _openCameraAfterPhotoRelease(texto);
+    _openOrcamentoAfterRelease(texto);
     _scrollToBottom();
+  }
+
+  /// A conexão caiu durante a análise das fotos: o agente continua
+  /// trabalhando no servidor, que grava a resposta no histórico. Espera ela
+  /// aparecer (até 5 min) em vez de mostrar uma confirmação falsa.
+  Future<void> _aguardarAnaliseDasFotos(
+    VistoriaSession session,
+    String turnoId,
+  ) async {
+    if (!mounted) return;
+
+    setState(() {
+      isAiTyping = false;
+      messages.add(
+        _aiMessageFromText(
+          'Recebi as fotos. A análise está levando mais tempo; a resposta '
+          'aparece aqui em instantes.',
+          createdAt: DateTime.now(),
+        ),
+      );
+    });
+    _scrollToBottom();
+
+    try {
+      final resposta = await FirebaseFirestore.instance
+          .collection('vistorias')
+          .doc(session.docId)
+          .snapshots()
+          .map((doc) {
+            final lista = doc.data()?['chatmessages'];
+            if (lista is! List) return null;
+            for (final item in lista.reversed) {
+              if (item is Map && item['turnoId'] == turnoId) {
+                return item['text']?.toString();
+              }
+            }
+            return null;
+          })
+          .where((texto) => texto != null && texto.trim().isNotEmpty)
+          .first
+          .timeout(const Duration(minutes: 5));
+
+      _mostrarRespostaDoArgos(resposta!.trim());
+    } catch (e) {
+      debugPrint('Análise das fotos não chegou: $e');
+      _showSnack(
+        'A análise das fotos não chegou. Envie uma mensagem para continuar.',
+        backgroundColor: Colors.orange,
+      );
+    }
   }
 
   /// Refaz o bootstrap quando a conexão volta, pra sair dos estados bloqueados offline.

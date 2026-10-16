@@ -248,6 +248,12 @@ function makeSendArgosMessageHandler({ emptyReplyFallback }) {
 
     const modo = String(request.data.modo || "").trim();
 
+    // O app pede para o servidor gravar a resposta no histórico quando ela
+    // pode demorar (ex.: análise das fotos, ~1 min). Se a conexão do celular
+    // cair antes, a resposta não se perde: o app a encontra pelo `turnoId`.
+    const persistirResposta = request.data.persistirResposta === true;
+    const turnoId = String(request.data.turnoId || "").trim().slice(0, 64);
+
     if (!text) {
       throw new HttpsError("invalid-argument", "Mensagem vazia.");
     }
@@ -327,6 +333,26 @@ function makeSendArgosMessageHandler({ emptyReplyFallback }) {
         idvistoria: inspectionId,
         currentAgent: agentResult.currentAgent,
       });
+
+      if (persistirResposta && reply.trim()) {
+        await admin
+          .firestore()
+          .collection("vistorias")
+          .doc(inspectionId)
+          .set(
+            {
+              chatmessages: admin.firestore.FieldValue.arrayUnion({
+                role: "ai",
+                text: reply.trim(),
+                origem: "servidor",
+                ...(turnoId ? { turnoId } : {}),
+                createdAt: admin.firestore.Timestamp.now(),
+              }),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+      }
 
       return {
         reply,
