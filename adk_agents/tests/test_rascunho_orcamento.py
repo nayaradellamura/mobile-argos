@@ -21,6 +21,8 @@ class ItemRascunhoTest(unittest.TestCase):
         )
 
         self.assertTrue(item["maoObraEmValor"])
+        # "mecanico" faria o laudo-service usar só esta linha como orçamento.
+        self.assertEqual(item["origem"], "vistoria")
         self.assertEqual(item["horasMaoObra"], 1.0)
         self.assertEqual(item["valorHora"], 300.0)
         self.assertEqual(item["valorMaoObra"], 300.0)

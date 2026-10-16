@@ -167,7 +167,9 @@ def _item_rascunho(item: dict) -> dict:
             "valorHora": valor,
             "valorMaoObra": valor,
             "maoObraEmValor": True,
-            "origem": item.get("origem", "mecanico"),
+            # Nunca "mecanico": essa origem marca o rascunho do envio em massa,
+            # e o laudo-service usaria só as linhas com ela como orçamento.
+            "origem": item.get("origem") or "vistoria",
         }
 
     return {
