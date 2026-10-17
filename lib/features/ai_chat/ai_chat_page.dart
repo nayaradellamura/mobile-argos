@@ -4782,7 +4782,7 @@ class _OrcamentoResumoBubble extends StatelessWidget {
                   children: [
                     Expanded(
                       child: Text(
-                        linha.key,
+                        nomeLegivel(linha.key),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(

@@ -212,4 +212,16 @@ void main() {
       expect(total, 50);
     });
   });
+
+  group('nomeLegivel', () {
+    test('nome todo em maiúsculas vira só a primeira maiúscula', () {
+      expect(nomeLegivel('LAMPADA LANTERNA D'), 'Lampada lanterna d');
+      expect(nomeLegivel('POLIMENTO FARÓIS'), 'Polimento faróis');
+    });
+
+    test('nome escrito normalmente e siglas curtas ficam como estão', () {
+      expect(nomeLegivel('Fluido freio DOT 4'), 'Fluido freio DOT 4');
+      expect(nomeLegivel('ABS'), 'ABS');
+    });
+  });
 }
