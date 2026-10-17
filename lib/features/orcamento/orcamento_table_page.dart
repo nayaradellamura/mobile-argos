@@ -239,7 +239,10 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
     });
   }
 
-  Future<void> _configurarValoresHora({bool primeiraVez = false}) async {
+  Future<void> _configurarValoresHora({
+    bool primeiraVez = false,
+    String? tipoFoco,
+  }) async {
     final tiposUsados = _itens
         .where(
           (item) =>
@@ -256,6 +259,7 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
         valoresAtuais: _valoresHora,
         tiposDestacados: tiposUsados,
         primeiraVez: primeiraVez,
+        tipoFoco: tipoFoco,
       ),
     );
 
@@ -686,14 +690,14 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
                 itemCount: preenchidos.length,
                 compacto: _compacto,
                 onClose: _closePage,
-                onConfigurarValorHora: _configurarValoresHora,
+                onConfigurarValorHora: () => _configurarValoresHora(),
                 onAlternarVisualizacao: () => setState(() {
                   _compacto = !_compacto;
                   _expandidoId = null;
                 }),
               ),
               if (faltaValorHora)
-                _ValorHoraBanner(onTap: _configurarValoresHora),
+                _ValorHoraBanner(onTap: () => _configurarValoresHora()),
               Expanded(
                 child: ListView.separated(
                   padding: const EdgeInsets.fromLTRB(18, 18, 18, 100),
@@ -727,6 +731,8 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
                     return _OrcamentoItemCard(
                       item: item,
                       valorHora: _valoresHora[item.tipoServico],
+                      onEditarValorHora: () =>
+                          _configurarValoresHora(tipoFoco: item.tipoServico),
                       total: _totalDoItem(item),
                       erro: _erroDoItem(item),
                       onChanged: () => setState(() {}),
@@ -1055,10 +1061,27 @@ class _OrcamentoHeader extends StatelessWidget {
               color: const Color(0xFF0057C0),
             ),
           ),
-          IconButton(
-            onPressed: onConfigurarValorHora,
-            tooltip: 'Valor da hora',
-            icon: const Icon(Icons.schedule_rounded, color: Color(0xFF0057C0)),
+          InkWell(
+            onTap: onConfigurarValorHora,
+            borderRadius: BorderRadius.circular(12),
+            child: const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.schedule_rounded, color: Color(0xFF0057C0)),
+                  SizedBox(height: 2),
+                  Text(
+                    'Valor/hora',
+                    style: TextStyle(
+                      color: Color(0xFF0057C0),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ],
       ),
@@ -1115,10 +1138,15 @@ class _ValoresHoraDialog extends StatefulWidget {
   final Set<String> tiposDestacados;
   final bool primeiraVez;
 
+  /// Tipo de serviço cujo valor o mecânico tocou no item: o campo dele já
+  /// abre focado.
+  final String? tipoFoco;
+
   const _ValoresHoraDialog({
     required this.valoresAtuais,
     required this.tiposDestacados,
     required this.primeiraVez,
+    this.tipoFoco,
   });
 
   @override
@@ -1197,7 +1225,7 @@ class _ValoresHoraDialogState extends State<_ValoresHoraDialog> {
                   ? 'Antes de montar o orçamento, informe quanto a oficina '
                         'cobra por hora em cada tipo de serviço. Os valores '
                         'ficam salvos para os próximos orçamentos.'
-                  : 'Os valores ficam salvos para os próximos orçamentos. '
+                  : 'Vale para este e os próximos orçamentos da oficina. '
                         'Orçamentos já enviados não mudam.',
               style: const TextStyle(color: Color(0xFF6B7280), fontSize: 12),
             ),
@@ -1205,6 +1233,7 @@ class _ValoresHoraDialogState extends State<_ValoresHoraDialog> {
             for (final entry in kTiposServico.entries) ...[
               TextField(
                 controller: _controllers[entry.key],
+                autofocus: entry.key == widget.tipoFoco,
                 keyboardType: const TextInputType.numberWithOptions(
                   decimal: true,
                 ),
@@ -1261,6 +1290,7 @@ class _ValoresHoraDialogState extends State<_ValoresHoraDialog> {
 class _OrcamentoItemCard extends StatelessWidget {
   final _EditableItem item;
   final double? valorHora;
+  final VoidCallback onEditarValorHora;
   final double? total;
   final String? erro;
   final VoidCallback onChanged;
@@ -1270,6 +1300,7 @@ class _OrcamentoItemCard extends StatelessWidget {
   const _OrcamentoItemCard({
     required this.item,
     required this.valorHora,
+    required this.onEditarValorHora,
     required this.total,
     required this.erro,
     required this.onChanged,
@@ -1464,17 +1495,10 @@ class _OrcamentoItemCard extends StatelessWidget {
                 ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text(
-                    valorHora != null
-                        ? '× ${formatCurrencyBRL(valorHora!)}/h'
-                        : 'Valor da hora não configurado',
-                    style: TextStyle(
-                      color: valorHora != null
-                          ? const Color(0xFF6B7280)
-                          : const Color(0xFFB45309),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
+                  child: _ValorHoraChip(
+                    valorHora: valorHora,
+                    tipoServico: item.tipoServico,
+                    onTap: onEditarValorHora,
                   ),
                 ),
               ],
@@ -1504,6 +1528,56 @@ class _OrcamentoItemCard extends StatelessWidget {
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// Valor da hora ao lado do campo de horas. É também o atalho para alterar
+/// o valor: o mecânico não precisa achar o botão do topo.
+class _ValorHoraChip extends StatelessWidget {
+  final double? valorHora;
+  final String tipoServico;
+  final VoidCallback onTap;
+
+  const _ValorHoraChip({
+    required this.valorHora,
+    required this.tipoServico,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final configurado = valorHora != null;
+    final cor = configurado ? const Color(0xFF0057C0) : const Color(0xFFB45309);
+
+    return Material(
+      color: configurado ? const Color(0xFFE5F6FF) : const Color(0xFFFFF4E5),
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  configurado
+                      ? '× ${formatCurrencyBRL(valorHora!)}/h\n'
+                            '${tipoServicoLabel(tipoServico).toLowerCase()}'
+                      : 'Definir valor da hora',
+                  style: TextStyle(
+                    color: cor,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              Icon(Icons.edit_outlined, size: 16, color: cor),
+            ],
+          ),
+        ),
       ),
     );
   }
