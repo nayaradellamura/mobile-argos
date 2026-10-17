@@ -78,6 +78,17 @@ String formatHoras(double horas) {
   return '${text}h';
 }
 
+/// Nome digitado todo em maiúsculas (comum em orçamento lido de papel) vira
+/// "Primeira maiúscula"; o resto fica como o mecânico escreveu. Mesma regra
+/// do relatório do cliente (laudo-service, `nomeLegivel`).
+String nomeLegivel(String texto) {
+  final s = texto.trim();
+  final letras = s.replaceAll(RegExp(r'[^A-Za-zÀ-ÿ]'), '');
+  if (letras.length < 4 || letras != letras.toUpperCase()) return s;
+  final minusculo = s.toLowerCase();
+  return minusculo[0].toUpperCase() + minusculo.substring(1);
+}
+
 /// Rótulo de exibição do tipo de intervenção gravado no Firestore.
 String tipoIntervencaoLabel(String tipo) {
   switch (tipo) {

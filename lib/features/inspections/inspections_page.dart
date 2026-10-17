@@ -2719,7 +2719,9 @@ class _HistoryOrcamentoPreviewList extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       EllipsisText(
-                        item.peca.isEmpty ? 'Peça não informada' : item.peca,
+                        item.peca.isEmpty
+                            ? 'Peça não informada'
+                            : nomeLegivel(item.peca),
                         style: const TextStyle(
                           fontWeight: FontWeight.w800,
                           fontSize: 13,
@@ -2728,9 +2730,15 @@ class _HistoryOrcamentoPreviewList extends StatelessWidget {
                       ),
                       const SizedBox(height: 2),
                       EllipsisText(
-                        '${item.quantidade}x ${tipoIntervencaoLabel(item.tipoIntervencao)} • '
-                        '${formatCurrencyBRL(item.valorPeca * item.quantidade)}'
-                        '${item.horasMaoObra > 0 ? ' + ${formatHoras(item.horasMaoObra)}${item.tipoServico.isEmpty ? '' : ' de ${tipoServicoLabel(item.tipoServico).toLowerCase()}'}' : ''}',
+                        // Peça e mão de obra separadas, como no relatório do
+                        // cliente; sem "R$ 0,00" quando o item é só serviço.
+                        [
+                          '${item.quantidade}x ${tipoIntervencaoLabel(item.tipoIntervencao)}',
+                          if (item.valorPeca > 0)
+                            'peça ${formatCurrencyBRL(item.valorPeca * item.quantidade)}',
+                          if (item.horasMaoObra > 0)
+                            'mão de obra ${formatCurrencyBRL(item.horasMaoObra * item.valorHora)}',
+                        ].join(' • '),
                         style: const TextStyle(
                           color: Color(0xFF6B7280),
                           fontSize: 11,
@@ -6088,6 +6096,10 @@ class _RelatorioOpcoesSheet extends StatefulWidget {
 class _RelatorioOpcoesSheetState extends State<_RelatorioOpcoesSheet> {
   static const _validades = [7, 15, 30];
 
+  /// O relatório leva no máximo 9 fotos (MAX_FOTOS_RELATORIO no
+  /// laudo-service); as que passarem disso ficam de fora, na ordem.
+  static const _maxFotosRelatorio = 9;
+
   bool _carregando = true;
   final List<MapEntry<String, String>> _fotos = []; // id -> url
   final Set<String> _excluidas = {};
@@ -6228,6 +6240,21 @@ class _RelatorioOpcoesSheetState extends State<_RelatorioOpcoesSheet> {
                             fontWeight: FontWeight.w800,
                           ),
                         ),
+                        if (_fotos.length > _maxFotosRelatorio) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            incluidas > _maxFotosRelatorio
+                                ? 'O relatório leva até $_maxFotosRelatorio fotos: tire mais ${incluidas - _maxFotosRelatorio} ou só as $_maxFotosRelatorio primeiras entram.'
+                                : 'O relatório leva até $_maxFotosRelatorio fotos.',
+                            style: TextStyle(
+                              color: incluidas > _maxFotosRelatorio
+                                  ? const Color(0xFFB45309)
+                                  : const Color(0xFF6B7280),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 8),
                         GridView.count(
                           crossAxisCount: 3,
