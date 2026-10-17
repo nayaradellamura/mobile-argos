@@ -39,7 +39,7 @@ function num(value) {
 
 // Normaliza um item vindo de qualquer fonte para o mesmo formato e recalcula
 // os totais a partir dos campos base (nunca confia num total pronto).
-function normalizarItem({ peca, quantidade, valorPeca, tipoServico, horasMaoObra, valorHora, maoObraEmValor }) {
+function normalizarItem({ peca, quantidade, valorPeca, tipoServico, horasMaoObra, valorHora, maoObraEmValor, tipoIntervencao }) {
   const qtd = Math.max(1, Math.round(num(quantidade)) || 1);
   const horas = num(horasMaoObra);
   const hora = valorHora === undefined || valorHora === null ? VALOR_HORA_LEGADO : num(valorHora);
@@ -59,6 +59,7 @@ function normalizarItem({ peca, quantidade, valorPeca, tipoServico, horasMaoObra
     valorTotal: valorPecas + valorMaoObra,
     // Mão de obra informada em reais (gravada como 1 h ao valor), não por hora.
     ...(maoObraEmValor === true ? { maoObraEmValor: true } : {}),
+    ...(str(tipoIntervencao) ? { tipoIntervencao: str(tipoIntervencao) } : {}),
   };
 }
 
@@ -76,39 +77,60 @@ function formatarReais(valor) {
   return (Number(valor) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+// "Troca de pastilhas" / "Reparo do para-choque": nome do serviço de mão de
+// obra de uma peça, para ele aparecer uma vez só, na lista de serviços.
+function nomeServicoDaPeca(nome, tipoIntervencao) {
+  const minusculo = nome ? nome.charAt(0).toLocaleLowerCase("pt-BR") + nome.slice(1) : "";
+  if (tipoIntervencao === "reparo") return `Reparo: ${minusculo}`;
+  if (tipoIntervencao === "substituicao" || tipoIntervencao === "troca") return `Troca: ${minusculo}`;
+  return `Mão de obra: ${minusculo}`;
+}
+
 /**
- * Orçamento no formato do relatório do cliente: peças separadas de serviços
- * (itens sem valor de peça, inclusive a mão de obra em valor total), horas
- * explícitas quando a oficina cobra por hora, e a coluna de mão de obra das
- * peças só quando alguma peça tem mão de obra.
+ * Orçamento no formato do relatório do cliente, como num orçamento de oficina:
+ * "Peças" só com o valor das peças e "Serviços" com toda a mão de obra — a da
+ * troca/reparo de cada peça vira uma linha de serviço própria, para nunca
+ * aparecer em dois lugares. Horas explícitas quando a oficina cobra por hora.
  */
 function orcamentoRelatorio(orcamentoCampo) {
-  const linha = (item) => ({
-    nome: nomeLegivel(item.peca),
-    quantidade: item.quantidade,
-    valorPecas: item.valorPecas,
-    valorMaoObra: item.valorMaoObra,
-    valorTotal: item.valorTotal,
-    detalheHoras:
-      !item.maoObraEmValor && item.horasMaoObra > 0
-        ? `${String(Math.round(item.horasMaoObra * 10) / 10).replace(".", ",")} h × R$ ${formatarReais(item.valorHora)}`
-        : "",
-  });
+  const detalheHoras = (item) =>
+    !item.maoObraEmValor && item.horasMaoObra > 0
+      ? `${String(Math.round(item.horasMaoObra * 10) / 10).replace(".", ",")} h × R$ ${formatarReais(item.valorHora)}`
+      : "";
 
   const itens = Array.isArray(orcamentoCampo?.itens) ? orcamentoCampo.itens : [];
-  const pecas = itens.filter((item) => item.valorPecas > 0).map(linha);
-  const servicos = itens.filter((item) => !(item.valorPecas > 0)).map(linha);
-  const soma = (lista, campo) => lista.reduce((total, item) => total + item[campo], 0);
+  const pecas = [];
+  const servicos = [];
+
+  for (const item of itens) {
+    const nome = nomeLegivel(item.peca);
+    if (item.valorPecas > 0) {
+      pecas.push({
+        nome,
+        quantidade: item.quantidade,
+        valorUnitario: item.valorPeca,
+        valorTotal: item.valorPecas,
+      });
+      if (item.valorMaoObra > 0) {
+        servicos.push({
+          nome: nomeServicoDaPeca(nome, item.tipoIntervencao),
+          detalheHoras: detalheHoras(item),
+          valorTotal: item.valorMaoObra,
+        });
+      }
+    } else {
+      servicos.push({ nome, detalheHoras: detalheHoras(item), valorTotal: item.valorTotal });
+    }
+  }
+
+  const soma = (lista) => lista.reduce((total, item) => total + item.valorTotal, 0);
 
   return {
     pecas,
     servicos,
-    pecasComMaoObra: pecas.some((item) => item.valorMaoObra > 0),
-    // Totais do rodapé: peças (só o valor das peças) e mão de obra/serviços
-    // (toda mão de obra, das peças e dos serviços).
-    totalPecas: soma(pecas, "valorPecas"),
-    totalMaoObra: soma(pecas, "valorMaoObra") + soma(servicos, "valorTotal"),
-    total: soma(pecas, "valorTotal") + soma(servicos, "valorTotal"),
+    totalPecas: soma(pecas),
+    totalServicos: soma(servicos),
+    total: soma(pecas) + soma(servicos),
   };
 }
 
@@ -154,6 +176,7 @@ function buildOrcamentoCampo({ vistoria, agentParameters }) {
           horasMaoObra: item.horasMaoObra,
           valorHora: item.valorHora,
           maoObraEmValor: item.maoObraEmValor,
+          tipoIntervencao: item.tipoIntervencao,
         })
       )
       .filter((item) => item.peca);
@@ -180,6 +203,7 @@ function buildOrcamentoCampo({ vistoria, agentParameters }) {
           horasMaoObra: item.horas_mao_obra,
           valorHora: item.valor_hora,
           maoObraEmValor: item.mao_obra_em_valor,
+          tipoIntervencao: item.tipo_intervencao,
         })
       )
       .filter((item) => item.peca);

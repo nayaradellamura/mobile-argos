@@ -49,27 +49,35 @@ describe("orcamentoRelatorio", () => {
 
     assert.deepEqual(r.pecas.map((p) => p.nome), ["Pastilhas"]);
     assert.deepEqual(r.servicos.map((s) => s.nome), ["Polimento faróis", "Mão de obra"]);
-    assert.equal(r.pecasComMaoObra, false);
     assert.equal(r.totalPecas, 112);
-    assert.equal(r.totalMaoObra, 400);
+    assert.equal(r.totalServicos, 400);
     assert.equal(r.total, 512);
     // Mão de obra em valor não mostra "1 h × R$ 300".
     assert.equal(r.servicos[1].detalheHoras, "");
   });
 
-  test("mostra as horas quando a oficina cobra por hora", () => {
+  test("mão de obra da peça vira serviço próprio, nunca fica na tabela de peças", () => {
     const campo = buildOrcamentoCampo({
       vistoria: {
-        orcamentoItensFinais: [item("Para-choque", { valorPeca: 550, horasMaoObra: 1.2, valorHora: 90 })],
+        orcamentoItensFinais: [
+          item("PASTILHAS", { valorPeca: 112, horasMaoObra: 1, valorHora: 50, tipoIntervencao: "substituicao" }),
+          item("Para-choque", { valorPeca: 550, horasMaoObra: 1.2, valorHora: 90, tipoIntervencao: "reparo" }),
+        ],
       },
       agentParameters: {},
     });
 
     const r = orcamentoRelatorio(campo);
 
-    assert.equal(r.pecasComMaoObra, true);
-    assert.equal(r.pecas[0].detalheHoras, "1,2 h × R$ 90,00");
-    assert.equal(r.total, 550 + 108);
+    assert.deepEqual(r.pecas.map((p) => [p.nome, p.valorTotal]), [["Pastilhas", 112], ["Para-choque", 550]]);
+    assert.deepEqual(r.servicos.map((s) => [s.nome, s.valorTotal]), [
+      ["Troca: pastilhas", 50],
+      ["Reparo: para-choque", 108],
+    ]);
+    assert.equal(r.servicos[1].detalheHoras, "1,2 h × R$ 90,00");
+    assert.equal(r.totalPecas, 662);
+    assert.equal(r.totalServicos, 158);
+    assert.equal(r.total, 662 + 158);
   });
 
   test("agentParameters com mao_obra_em_valor vira serviço sem horas", () => {
