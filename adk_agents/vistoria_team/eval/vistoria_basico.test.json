@@ -586,6 +586,108 @@
           "id_vistoria": "VIS-EVAL-VIS-0001"
         }
       }
+    },
+    {
+      "eval_id": "vis_mecanico_insiste_segue",
+      "conversation": [
+        {
+          "invocation_id": "t1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Olá"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "carregar_contexto_vistoria",
+                "args": {
+                  "id_vistoria": "VIS-EVAL-VIS-0001"
+                }
+              }
+            ],
+            "tool_responses": [],
+            "intermediate_responses": []
+          },
+          "rubrics": []
+        },
+        {
+          "invocation_id": "t2",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Confirmo, bati de frente num poste. O carro está com 52.000 km."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "tool_responses": [],
+            "intermediate_responses": []
+          },
+          "rubrics": []
+        },
+        {
+          "invocation_id": "t3",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Fotos de identificação enviadas"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "tool_responses": [],
+            "intermediate_responses": []
+          },
+          "rubrics": []
+        },
+        {
+          "invocation_id": "t4",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Já enviei, pode seguir para a próxima etapa."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "tool_responses": [],
+            "intermediate_responses": []
+          },
+          "rubrics": [
+            {
+              "rubric_id": "segue_sem_barrar",
+              "rubric_content": {
+                "text_property": "A resposta NÃO pede de novo as fotos de identificação nem diz que não é possível prosseguir; avança para a próxima etapa."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            },
+            {
+              "rubric_id": "libera_danos_externos",
+              "rubric_content": {
+                "text_property": "A resposta contém a frase \"Liberei a câmera para as fotos dos danos externos\"."
+              },
+              "type": "FINAL_RESPONSE_QUALITY"
+            }
+          ]
+        }
+      ],
+      "session_input": {
+        "app_name": "vistoria_team",
+        "user_id": "mecanico-avaliacao",
+        "state": {
+          "id_vistoria": "VIS-EVAL-VIS-0001"
+        }
+      }
     }
   ]
 }
