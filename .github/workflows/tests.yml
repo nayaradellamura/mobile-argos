@@ -1,0 +1,84 @@
+# Testes automatizados (unitários) do Argos, em três jobs independentes:
+#   - flutter: regras de orçamento, rascunho do envio em massa e tabela de
+#     preços do app (test/).
+#   - laudo-service: montagem do orçamento de campo do laudo
+#     (services/laudo-service/test, node:test, sem npm install — o
+#     firebase-admin é substituído por um stub no próprio teste).
+#   - adk-agents: tools determinísticas dos agentes (adk_agents/tests,
+#     unittest, Firestore mockado).
+#
+# As avaliações dos agentes (adk_agents/eval) NÃO rodam aqui: precisam do
+# Gemini e do emulador do Firestore — ver adk_agents/eval/README.md.
+
+name: tests
+
+on:
+  push:
+    branches: [main, Juan, 'feat/**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  flutter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Mesma versão do Flutter usada em build-apk.yml.
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.0'
+          channel: stable
+          cache: true
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      - name: flutter test
+        run: flutter test
+
+  laudo-service:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: services/laudo-service
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: node --test
+        run: npm test
+
+  adk-agents:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # adk_agents/ pode ainda não estar versionado: sem ele, o job passa
+      # sem fazer nada. (hashFiles só funciona depois do checkout, por isso
+      # a condição fica em cada passo e não no job.)
+      - uses: actions/setup-python@v5
+        if: hashFiles('adk_agents/requirements.txt') != ''
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: adk_agents/requirements.txt
+
+      - name: pip install
+        if: hashFiles('adk_agents/requirements.txt') != ''
+        working-directory: adk_agents
+        run: python -m pip install -r requirements.txt
+
+      - name: unittest
+        if: hashFiles('adk_agents/requirements.txt') != ''
+        working-directory: adk_agents
+        run: python -m unittest discover -s tests -t . -v

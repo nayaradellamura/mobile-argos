@@ -1,0 +1,61 @@
+{
+  "criteria": {
+    "tool_trajectory_avg_score": {
+      "threshold": 1.0,
+      "match_type": "IN_ORDER"
+    },
+    "rubric_based_tool_use_quality_v1": {
+      "threshold": 0.8,
+      "judge_model_options": {
+        "judge_model": "gemini-2.5-flash",
+        "num_samples": 3
+      },
+      "rubrics": [
+        {
+          "rubric_id": "nunca_inventa_id",
+          "rubric_content": {
+            "text_property": "Toda chamada de ferramenta que recebe id_vistoria usa um id no formato 'VIS-EVAL-VIS-000N' (o da sessão), nunca um id inventado ou pedido ao usuário."
+          },
+          "type": "TOOL_USE_QUALITY"
+        }
+      ]
+    },
+    "rubric_based_final_response_quality_v1": {
+      "threshold": 0.8,
+      "judge_model_options": {
+        "judge_model": "gemini-2.5-flash",
+        "num_samples": 3
+      },
+      "rubrics": [
+        {
+          "rubric_id": "sem_girias",
+          "rubric_content": {
+            "text_property": "A resposta não contém gírias, vocativos informais nem emojis (ex.: 'rapaz', 'mano', 'cara', 'parceiro', 'chefe', 'show', 'beleza', 'fechou', 'bora', 'tranquilo', 'valeu')."
+          },
+          "type": "FINAL_RESPONSE_QUALITY"
+        },
+        {
+          "rubric_id": "mensagem_curta",
+          "rubric_content": {
+            "text_property": "A resposta tem no máximo 3 frases curtas."
+          },
+          "type": "FINAL_RESPONSE_QUALITY"
+        },
+        {
+          "rubric_id": "nao_cita_manual",
+          "rubric_content": {
+            "text_property": "A resposta não menciona que está consultando um manual ou ferramenta interna."
+          },
+          "type": "FINAL_RESPONSE_QUALITY"
+        },
+        {
+          "rubric_id": "sem_detalhe_interno",
+          "rubric_content": {
+            "text_property": "A resposta não contém JSON, código, nomes de ferramentas, nomes de agentes nem ids internos."
+          },
+          "type": "FINAL_RESPONSE_QUALITY"
+        }
+      ]
+    }
+  }
+}

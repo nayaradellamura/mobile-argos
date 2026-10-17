@@ -16,8 +16,10 @@ ENV PUPPETEER_SKIP_DOWNLOAD=true \
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install --omit=dev
+# Copia o package-lock.json junto e usa `npm ci`: build reproduzível, com as
+# mesmas versões testadas localmente (npm install podia resolver outras).
+COPY package*.json ./
+RUN npm ci --omit=dev
 
 COPY . .
 

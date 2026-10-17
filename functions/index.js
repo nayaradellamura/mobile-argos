@@ -56,7 +56,9 @@ const VERTEX_PROJECT_ID = FIREBASE_PROJECT_ID;
 // chamada volta 404. Se algum dia voltar pra um modelo 2.x, pode voltar pra
 // us-central1 (global também atende os dois, então não é obrigatório).
 const VERTEX_LOCATION = "global";
-const GEMINI_REVIEW_MODEL = "gemini-3.8-flash";
+// Configurável via env var GEMINI_REVIEW_MODEL (functions/.env); independente
+// do modelo do laudo-service (LAUDO_GEMINI_MODEL, lá em lib/gemini.js).
+const GEMINI_REVIEW_MODEL = process.env.GEMINI_REVIEW_MODEL || "gemini-3.8-flash";
 const GEMINI_REVIEW_GENERATION_CONFIG = {
   temperature: 0.1,
   // 1024 cortava a transcrição no meio pra áudios mais longos — a resposta
@@ -91,16 +93,141 @@ function createSessionId(uid, inspectionId) {
     .slice(0, 32);
 }
 
+// ── Autorização: quem pode mexer em qual vistoria ──────────────────────────
+//
+// As callables recebem o id da vistoria/sinistro direto do app. Só checar
+// `request.auth` deixava qualquer usuário logado (inclusive cadastro ainda
+// 'pendente') conversar com o agente, mandar áudio ou expirar a vistoria de
+// QUALQUER oficina. A regra espelha o que o app já faz no cliente
+// (login_page.dart + session_context_service.dart):
+//   1. users/{email} (fallback users/{uid}) precisa existir com status
+//      'ativo' -- mesmo critério do login, que trata status ausente como
+//      'pendente';
+//   2. o usuário precisa pertencer à oficina dona da vistoria: o
+//      credenciadoId do doc do usuário bate, OU o uid está em
+//      credenciados/{id}.funcionariosUids.
+// A oficina dona vem do sinistro (fonte da verdade, mesmos campos aceitos em
+// notifySinistroChanges) e, se o sinistro não tiver, do credenciadoId gravado
+// na própria vistoria. Sem nenhum dos dois, nega (e loga) -- negar é o lado
+// seguro; dado legado assim precisa ser corrigido no Firestore.
+//
+// Custo: no máximo 2 leituras por chamada (doc do usuário + doc do
+// credenciado), e a do credenciado só acontece se o credenciadoId do usuário
+// não bater de cara. O sinistro/vistoria já foram lidos por quem chama.
+const VISTORIA_ACCESS_DENIED_MESSAGE =
+  "Você não tem permissão para acessar esta vistoria.";
 
-exports.sendArgosMessage = onCall(
-  {
-    region: "us-central1",
-    // O turno de fotos encadeia download das imagens + AnalistaDanosVisao
-    // (multimodal) + VerificadorConsistencia. Nos 60s default isso estoura.
-    timeoutSeconds: 540,
-    memory: "512MiB",
-  },
-  async (request) => {
+function resolveOwnerCredenciadoId({ vistoria = {}, sinistro = {} }) {
+  const s = asObject(sinistro);
+  const v = asObject(vistoria);
+
+  return str(
+    s.credenciadoId ||
+      s.credenciadoID ||
+      s.workshopId ||
+      s.oficinaId ||
+      v.credenciadoId
+  );
+}
+
+async function loadCallerUserDoc({ db, uid, email }) {
+  const cleanEmail = str(email).toLowerCase();
+
+  if (cleanEmail) {
+    const byEmail = await db.collection("users").doc(cleanEmail).get();
+    if (byEmail.exists) return byEmail.data() || {};
+  }
+
+  // Mesmo fallback do session_context_service.dart (doc legado keyed por uid).
+  const byUid = await db.collection("users").doc(uid).get();
+  return byUid.exists ? byUid.data() || {} : null;
+}
+
+// Lança HttpsError('permission-denied') se o usuário não puder agir sobre a
+// vistoria. `vistoria`/`sinistro` são os dados JÁ carregados pelo chamador --
+// o `sinistro` só deve ser passado se veio de uma fonte confiável (o
+// sinistroId gravado na vistoria, ou o próprio id da chamada), nunca de um
+// sinistroId solto mandado pelo app, senão dá pra parear uma vistoria alheia
+// com um sinistro da própria oficina.
+//
+// DESLIGADO por decisão do grupo (2026-10-15): enquanto a regra de acesso
+// por usuário não for revista, as callables voltam a atender qualquer
+// usuário autenticado, como antes. Para religar, troque para true.
+const VERIFICAR_ACESSO_POR_OFICINA = false;
+
+async function assertCanAccessVistoria({ uid, email, vistoria = {}, sinistro = {}, logContext = {} }) {
+  if (!VERIFICAR_ACESSO_POR_OFICINA) return;
+
+  const db = admin.firestore();
+  const logInfo = { uid, ...logContext };
+
+  const user = await loadCallerUserDoc({ db, uid, email });
+
+  if (!user) {
+    console.warn("Acesso negado: usuário sem documento em users.", logInfo);
+    throw new HttpsError("permission-denied", VISTORIA_ACCESS_DENIED_MESSAGE);
+  }
+
+  const status = str(user.status).toLowerCase() || "pendente";
+
+  if (status !== "ativo") {
+    console.warn("Acesso negado: usuário com status não ativo.", { ...logInfo, status });
+    throw new HttpsError(
+      "permission-denied",
+      status === "bloqueado"
+        ? "Seu acesso foi bloqueado pelo administrador."
+        : "Seu acesso está pendente de aprovação pelo administrador."
+    );
+  }
+
+  const ownerCredenciadoId = resolveOwnerCredenciadoId({ vistoria, sinistro });
+
+  if (!ownerCredenciadoId) {
+    console.warn(
+      "Acesso negado: vistoria/sinistro sem credenciadoId (dado legado ou inexistente).",
+      logInfo
+    );
+    throw new HttpsError("permission-denied", VISTORIA_ACCESS_DENIED_MESSAGE);
+  }
+
+  if (str(user.credenciadoId) === ownerCredenciadoId) return;
+
+  const credenciadoSnap = await db.collection("credenciados").doc(ownerCredenciadoId).get();
+  const funcionariosUids = credenciadoSnap.exists
+    ? credenciadoSnap.data()?.funcionariosUids
+    : null;
+
+  if (Array.isArray(funcionariosUids) && funcionariosUids.includes(uid)) return;
+
+  console.warn("Acesso negado: usuário não pertence à oficina da vistoria.", {
+    ...logInfo,
+    ownerCredenciadoId,
+    userCredenciadoId: str(user.credenciadoId) || null,
+  });
+  throw new HttpsError("permission-denied", VISTORIA_ACCESS_DENIED_MESSAGE);
+}
+
+
+// Usado quando o agente ADK encerra o turno sem nenhum texto. Neutro de
+// propósito: não finge que o assistente "entendeu" algo que ele não disse.
+const ADK_EMPTY_REPLY_FALLBACK =
+  "Não recebi resposta do assistente. Envie sua mensagem novamente.";
+
+const SEND_ARGOS_MESSAGE_OPTIONS = {
+  region: "us-central1",
+  // O turno de fotos encadeia download das imagens + AnalistaDanosVisao
+  // (multimodal) + VerificadorConsistencia. Nos 60s default isso estoura.
+  timeoutSeconds: 540,
+  memory: "512MiB",
+};
+
+// `emptyReplyFallback`: o que devolver quando o agente termina o turno sem
+// texto nenhum. A conversa normal (sendArgosMessage) recebe um aviso neutro;
+// as mensagens de sistema do app (sendmessageargos — ex. "Fotos enviadas")
+// recebem "" de propósito, porque o app já tem o próprio texto factual de
+// fallback pra esse caso (ver sendBackgroundMessage em argos_ai_service.dart).
+function makeSendArgosMessageHandler({ emptyReplyFallback }) {
+  return async (request) => {
     if (!request.auth) {
       throw new HttpsError(
         "unauthenticated",
@@ -116,13 +243,25 @@ exports.sendArgosMessage = onCall(
       request.data.inspectionId ||
         request.data.idvistoria ||
         request.data.sinistroId ||
-        "INS-001"
+        ""
     ).trim();
 
     const modo = String(request.data.modo || "").trim();
 
+    // O app pede para o servidor gravar a resposta no histórico quando ela
+    // pode demorar (ex.: análise das fotos, ~1 min). Se a conexão do celular
+    // cair antes, a resposta não se perde: o app a encontra pelo `turnoId`.
+    const persistirResposta = request.data.persistirResposta === true;
+    const turnoId = String(request.data.turnoId || "").trim().slice(0, 64);
+
     if (!text) {
       throw new HttpsError("invalid-argument", "Mensagem vazia.");
+    }
+
+    // Sem id não há vistoria pra carregar/salvar — antes caía num "INS-001"
+    // fixo, misturando a sessão de vistorias diferentes no mesmo documento.
+    if (!inspectionId) {
+      throw new HttpsError("invalid-argument", "inspectionId é obrigatório.");
     }
 
     const sessionId = createSessionId(uid, inspectionId);
@@ -131,6 +270,18 @@ exports.sendArgosMessage = onCall(
       const context = await loadArgosInspectionContext({
         inspectionId,
         sinistroId: request.data.sinistroId,
+      });
+
+      // Antes de qualquer conversa/escrita: o usuário precisa ser da oficina
+      // dona da vistoria. Vale também pras mensagens de sistema que o app
+      // manda sozinho via sendmessageargos ("Fotos enviadas", "enviei o
+      // orçamento") -- elas usam o mesmo uid/vistoria do mecânico.
+      await assertCanAccessVistoria({
+        uid,
+        email: request.auth.token?.email,
+        vistoria: context.vistoria,
+        sinistro: context.sinistroTrusted ? context.sinistro : {},
+        logContext: { callable: "sendArgosMessage", inspectionId },
       });
 
       const freshSessionParameters = buildArgosSessionParameters({
@@ -158,11 +309,13 @@ exports.sendArgosMessage = onCall(
         freshSessionParameters
       );
 
+      // LGPD: os parâmetros carregam CPF/e-mail/telefone do cliente — loga só
+      // as chaves, nunca os valores.
       console.log("Parâmetros enviados ao agente Argos no texto:", {
         inspectionId,
         sinistroId: context.sinistroId,
         sessionId,
-        parameters: sessionParameters,
+        parameterKeys: Object.keys(sessionParameters || {}),
       });
 
       const agentResult = await sendTextToArgosAgent({
@@ -174,12 +327,32 @@ exports.sendArgosMessage = onCall(
         currentAgent: context.vistoria?.agentCurrentAgent || "",
       });
 
-      const reply = agentResult.reply;
+      const reply = agentResult.reply || emptyReplyFallback;
 
       await saveAgentStateToVistoria({
         idvistoria: inspectionId,
         currentAgent: agentResult.currentAgent,
       });
+
+      if (persistirResposta && reply.trim()) {
+        await admin
+          .firestore()
+          .collection("vistorias")
+          .doc(inspectionId)
+          .set(
+            {
+              chatmessages: admin.firestore.FieldValue.arrayUnion({
+                role: "ai",
+                text: reply.trim(),
+                origem: "servidor",
+                ...(turnoId ? { turnoId } : {}),
+                createdAt: admin.firestore.Timestamp.now(),
+              }),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+      }
 
       return {
         reply,
@@ -189,6 +362,9 @@ exports.sendArgosMessage = onCall(
         sessionParameters,
       };
     } catch (error) {
+      // Erro de permissão sai como está -- não vira "internal" genérico.
+      if (error instanceof HttpsError) throw error;
+
       console.error("Erro ao conversar com o agente ADK:", error);
       console.error("code:", error.code);
       console.error("message:", error.message);
@@ -204,10 +380,18 @@ exports.sendArgosMessage = onCall(
         }
       );
     }
-  }
+  };
+}
+
+exports.sendArgosMessage = onCall(
+  SEND_ARGOS_MESSAGE_OPTIONS,
+  makeSendArgosMessageHandler({ emptyReplyFallback: ADK_EMPTY_REPLY_FALLBACK })
 );
 
-exports.sendmessageargos = exports.sendArgosMessage;
+exports.sendmessageargos = onCall(
+  SEND_ARGOS_MESSAGE_OPTIONS,
+  makeSendArgosMessageHandler({ emptyReplyFallback: "" })
+);
 
 exports.notifySinistroChanges = onDocumentWritten(
   {
@@ -326,9 +510,26 @@ function getTasksClient() {
   return cachedTasksClient;
 }
 
-async function enqueuePdfGeneration({ serviceUrl, taskKind, sinistroId, vistoriaId }) {
+async function enqueuePdfGeneration({ serviceUrl, serviceUrlParam, statusField, taskKind, sinistroId, vistoriaId, taskSuffix = "" }) {
   if (!serviceUrl) {
-    console.warn(`${taskKind}: URL nao configurada — pulando`, { sinistroId, vistoriaId });
+    // Sem a URL o PDF nunca vai sair. Em vez de so logar (ninguem ve), grava
+    // status "erro" no proprio sinistro pra ficar visivel no app/painel.
+    console.error(`${taskKind}: ${serviceUrlParam} nao configurada — PDF nao sera gerado`, { sinistroId, vistoriaId });
+    await admin
+      .firestore()
+      .collection("sinistro")
+      .doc(sinistroId)
+      .set(
+        {
+          [statusField]: {
+            status: "erro",
+            vistoriaId,
+            erro: `Geração do PDF não configurada no servidor (${serviceUrlParam} vazia). Contate o administrador.`,
+            falhouEm: admin.firestore.FieldValue.serverTimestamp(),
+          },
+        },
+        { merge: true }
+      );
     return;
   }
 
@@ -355,7 +556,7 @@ async function enqueuePdfGeneration({ serviceUrl, taskKind, sinistroId, vistoria
     // Nome deterministico: se o mesmo sinistro/vistoria disparar duas vezes
     // (ex: retry do proprio Firestore trigger), o Cloud Tasks rejeita a
     // segunda com ALREADY_EXISTS em vez de gerar o documento duplicado.
-    name: `${queuePath}/tasks/${taskKind}-${sinistroId}-${vistoriaId}`,
+    name: `${queuePath}/tasks/${taskKind}-${sinistroId}-${vistoriaId}${taskSuffix}`,
   };
 
   try {
@@ -374,6 +575,8 @@ async function enqueuePdfGeneration({ serviceUrl, taskKind, sinistroId, vistoria
 function enqueueLaudoGeneration({ sinistroId, vistoriaId }) {
   return enqueuePdfGeneration({
     serviceUrl: LAUDO_SERVICE_URL.value(),
+    serviceUrlParam: "LAUDO_SERVICE_URL",
+    statusField: "laudoTecnico",
     taskKind: "laudo",
     sinistroId,
     vistoriaId,
@@ -383,6 +586,8 @@ function enqueueLaudoGeneration({ sinistroId, vistoriaId }) {
 function enqueueOrcamentoAprovado({ sinistroId, vistoriaId }) {
   return enqueuePdfGeneration({
     serviceUrl: ORCAMENTO_SERVICE_URL.value(),
+    serviceUrlParam: "ORCAMENTO_SERVICE_URL",
+    statusField: "orcamentoAprovado",
     taskKind: "orcamento",
     sinistroId,
     vistoriaId,
@@ -478,20 +683,66 @@ exports.sendArgosAudioMessage = onCall(
     const data = request.data || {};
 
     const idvistoria = String(data.idvistoria || data.inspectionId || "").trim();
-    const sinistroId = String(data.sinistroId || "").trim();
+    const clientSinistroId = String(data.sinistroId || "").trim();
     const audioId = String(data.audioId || `audio_${Date.now()}`).trim();
     const storagePath = String(data.storagePath || "").trim();
-    const bucket = String(data.bucket || "").trim();
 
     if (!idvistoria) throw new HttpsError("invalid-argument", "idvistoria é obrigatório.");
     if (!storagePath) throw new HttpsError("invalid-argument", "storagePath é obrigatório.");
 
-    const bucketName = bucket || `${FIREBASE_PROJECT_ID}.firebasestorage.app`;
+    // O app grava o áudio em `vistorias/{idvistoria}/audio/{audioId}.mp3`
+    // (user_audio_storage_service.dart). Aceitar qualquer caminho deixava
+    // mandar pro Gemini um arquivo de OUTRA vistoria (ou qualquer objeto do
+    // bucket) -- então o caminho tem que estar debaixo da vistoria da chamada.
+    // `audioId` também vira id de documento: barra/".." ali escaparia da
+    // subcoleção.
+    const expectedAudioPrefix = `vistorias/${idvistoria}/audio/`;
+    if (
+      idvistoria.includes("/") ||
+      audioId.includes("/") ||
+      !storagePath.startsWith(expectedAudioPrefix) ||
+      storagePath.includes("..") ||
+      storagePath.length === expectedAudioPrefix.length
+    ) {
+      throw new HttpsError("invalid-argument", "storagePath inválido para esta vistoria.");
+    }
+
+    // Bucket fixo do projeto: o `bucket` que o app manda é ignorado de
+    // propósito (com ele dava pra apontar a leitura do Gemini pra qualquer
+    // bucket que a service account da function enxergue). É o mesmo valor de
+    // storageBucket em firebase_options.dart.
+    const bucketName = `${FIREBASE_PROJECT_ID}.firebasestorage.app`;
     const gcsUri = `gs://${bucketName}/${storagePath}`;
 
     const db = admin.firestore();
     const vistoriaRef = db.collection("vistorias").doc(idvistoria);
     const audioRef = vistoriaRef.collection("audios").doc(audioId);
+
+    // Lê a vistoria/sinistro e autoriza ANTES de gravar qualquer coisa (o
+    // audioRef.set abaixo criaria a vistoria se ela não existisse).
+    const vistoriaSnap = await vistoriaRef.get();
+    if (!vistoriaSnap.exists) {
+      throw new HttpsError("not-found", "Vistoria não encontrada.");
+    }
+    const vistoria = vistoriaSnap.data() || {};
+
+    // O sinistro da vistoria manda; o `sinistroId` do app só é usado (pro
+    // contexto do agente, não pra autorização) se a vistoria não tiver um.
+    const vistoriaSinistroId = str(vistoria.sinistroId);
+    const sinistroId = vistoriaSinistroId || clientSinistroId;
+
+    const sinistroSnap = sinistroId
+      ? await db.collection("sinistro").doc(sinistroId).get()
+      : null;
+    const sinistro = sinistroSnap?.exists ? sinistroSnap.data() || {} : {};
+
+    await assertCanAccessVistoria({
+      uid,
+      email: request.auth.token?.email,
+      vistoria,
+      sinistro: vistoriaSinistroId ? sinistro : {},
+      logContext: { callable: "sendArgosAudioMessage", idvistoria },
+    });
 
     try {
       await audioRef.set(
@@ -519,13 +770,6 @@ exports.sendArgosAudioMessage = onCall(
         gcsUri,
       });
 
-      const vistoriaSnap = await vistoriaRef.get();
-      const vistoria = vistoriaSnap.data() || {};
-
-      const sinistroSnap = sinistroId
-        ? await db.collection("sinistro").doc(sinistroId).get()
-        : null;
-      const sinistro = sinistroSnap?.exists ? sinistroSnap.data() || {} : {};
       const veiculo = await loadVehicleContext({ db, sinistro });
 
       const audioAnalysis = await transcribeAndReviewAudioWithGemini({
@@ -576,7 +820,12 @@ const sessionParameters = mergeSessionParameters(
   freshSessionParameters
 );
 
-console.log("Parâmetros enviados ao agente Argos no áudio:", sessionParameters);
+// LGPD: só as chaves — os valores incluem CPF/e-mail/telefone do cliente.
+console.log("Parâmetros enviados ao agente Argos no áudio:", {
+  idvistoria,
+  sinistroId,
+  parameterKeys: Object.keys(sessionParameters || {}),
+});
 
     const agentResult = await sendTextToArgosAgent({
       uid,
@@ -587,7 +836,7 @@ console.log("Parâmetros enviados ao agente Argos no áudio:", sessionParameters
       currentAgent: vistoria?.agentCurrentAgent || "",
     });
 
-    const reply = agentResult.reply;
+    const reply = agentResult.reply || ADK_EMPTY_REPLY_FALLBACK;
 
     await saveAgentStateToVistoria({
       idvistoria,
@@ -1269,7 +1518,9 @@ Contexto da vistoria:
   });
 
   const rawText = extractGeminiText(result);
-  console.log("Resposta bruta Gemini áudio:", rawText);
+  // LGPD: a transcrição pode conter CPF/e-mail/telefone falados pelo
+  // mecânico — loga só o tamanho, nunca o texto.
+  console.log("Resposta Gemini áudio recebida:", { idvistoria, chars: (rawText || "").length });
 
   const parsed = parseGeminiAudioJson(rawText);
 
@@ -1356,10 +1607,11 @@ function parseGeminiAudioJson(rawText) {
       ""
   ).trim();
 
+  // LGPD: só tamanhos — o texto bruto pode conter dados pessoais.
   console.warn("Gemini retornou JSON inválido. Aplicando recuperação:", {
-    rawText: cleanText,
-    transcricaoOriginal,
-    transcricaoRevisada,
+    rawChars: cleanText.length,
+    originalChars: transcricaoOriginal.length,
+    revisadaChars: transcricaoRevisada.length,
   });
 
   return {
@@ -1488,11 +1740,17 @@ async function loadArgosInspectionContext({ inspectionId, sinistroId }) {
 
   let vistoria = {};
   let resolvedSinistroId = cleanSinistroId;
+  // `sinistroTrusted`: o sinistro carregado pode ser usado pra autorização?
+  // Só quando o id veio da própria vistoria ou do inspectionId -- nunca
+  // quando é o `sinistroId` avulso mandado pelo app (ver
+  // assertCanAccessVistoria).
+  let sinistroTrusted = false;
 
   if (cleanInspectionId) {
     const vistoriaSnap = await db.collection("vistorias").doc(cleanInspectionId).get();
     if (vistoriaSnap.exists) {
       vistoria = vistoriaSnap.data() || {};
+      sinistroTrusted = Boolean(str(vistoria.sinistroId));
       resolvedSinistroId = String(vistoria.sinistroId || resolvedSinistroId || "").trim();
     }
   }
@@ -1507,11 +1765,13 @@ async function loadArgosInspectionContext({ inspectionId, sinistroId }) {
     if (!vistoriaQuery.empty) {
       vistoria = vistoriaQuery.docs[0].data() || {};
       resolvedSinistroId = String(vistoria.sinistroId || cleanInspectionId).trim();
+      sinistroTrusted = true;
     }
   }
 
   if (!resolvedSinistroId && cleanInspectionId && cleanInspectionId.startsWith("ARG-")) {
     resolvedSinistroId = cleanInspectionId;
+    sinistroTrusted = true;
   }
 
   let sinistro = {};
@@ -1523,7 +1783,7 @@ async function loadArgosInspectionContext({ inspectionId, sinistroId }) {
 
   const veiculo = await loadVehicleContext({ db, sinistro });
 
-  return { vistoria, sinistro, veiculo, sinistroId: resolvedSinistroId };
+  return { vistoria, sinistro, veiculo, sinistroId: resolvedSinistroId, sinistroTrusted };
 }
 
 async function loadVehicleContext({ db, sinistro = {} }) {
@@ -1772,8 +2032,11 @@ function str(value) {
 // Duas decisões que importam:
 //
 // 1. O `state` inicial carrega `id_vistoria`. O prompt dos dois agentes usa
-//    `{id_vistoria}` (sem `?`), então uma sessão criada sem esse state falha
-//    ALTO em vez de renderizar silenciosamente uma instrução contraditória.
+//    `{id_vistoria}` (sem `?`, obrigatório): uma sessão criada sem esse
+//    state falha alto no ADK em vez de seguir sem saber qual vistoria é.
+//    Mesmo assim o id vai tanto no `state` da criação quanto no
+//    `stateDelta` de todo /run (ver sendTextToArgosAgent), e o
+//    sendArgosMessage rejeita chamada sem inspectionId.
 //
 // 2. Quando a sessão não existe (cold start, deploy, reciclagem da instância),
 //    ela é recriada JÁ COM o histórico de `vistorias/{id}.chatmessages`. Sem
@@ -1929,10 +2192,9 @@ function extractAdkReply(events) {
     }
   }
 
-  return (
-    partes.join("\n").trim() ||
-    "Entendi. Pode continuar descrevendo a vistoria."
-  );
+  // Pode voltar "" (turno só de ferramentas): quem chama decide o fallback —
+  // ver ADK_EMPTY_REPLY_FALLBACK e makeSendArgosMessageHandler.
+  return partes.join("\n").trim();
 }
 
 // Qual agente está com a palavra ao fim do turno — é o que substitui o
@@ -2218,6 +2480,21 @@ exports.checkVistoriaExpiration = onCall(
       throw new HttpsError("not-found", "Vistoria não encontrada.");
     }
 
+    // Expirar mexe na vistoria E no sinistro -- só quem é da oficina dona.
+    const vistoria = doc.data() || {};
+    const sinistroId = str(vistoria.sinistroId);
+    const sinistroSnap = sinistroId
+      ? await db.collection("sinistro").doc(sinistroId).get()
+      : null;
+
+    await assertCanAccessVistoria({
+      uid: request.auth.uid,
+      email: request.auth.token?.email,
+      vistoria,
+      sinistro: sinistroSnap?.exists ? sinistroSnap.data() || {} : {},
+      logContext: { callable: "checkVistoriaExpiration", idvistoria },
+    });
+
     const expired = await expireVistoriaIfDue(db, doc);
 
     return { expired };
@@ -2251,8 +2528,10 @@ async function sendTelegramMessage(text) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: TELEGRAM_CHAT_ID.value(),
+        // Texto puro, sem parse_mode: com "Markdown" o Telegram recusava
+        // (400 "can't parse entities") qualquer mensagem com `_` solto —
+        // ex. status EM_ANALISE_OPERACIONAL ou nome de política/recurso.
         text,
-        parse_mode: "Markdown",
       }),
     }
   );
@@ -2261,6 +2540,17 @@ async function sendTelegramMessage(text) {
     const errBody = await resp.text();
     throw new Error(`Telegram recusou a mensagem (${resp.status}): ${errBody}`);
   }
+}
+
+// Comparação em tempo constante (evita timing attack no token). O
+// timingSafeEqual exige buffers do mesmo tamanho, então confere o tamanho
+// antes; token esperado vazio (secret não configurado) nunca bate.
+function tokenMatches(received, expected) {
+  if (!received || !expected) return false;
+  const a = Buffer.from(String(received), "utf8");
+  const b = Buffer.from(String(expected), "utf8");
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
 exports.telegramAlertRelay = onRequest(
@@ -2279,7 +2569,7 @@ exports.telegramAlertRelay = onRequest(
     const tokenFromHeader = authHeader.replace(/^Bearer\s+/i, "");
     const expected = MONITORING_WEBHOOK_TOKEN.value();
 
-    if (tokenFromQuery !== expected && tokenFromHeader !== expected) {
+    if (!tokenMatches(tokenFromQuery, expected) && !tokenMatches(tokenFromHeader, expected)) {
       console.warn("telegramAlertRelay: token invalido/ausente, ignorando.");
       res.status(401).send("unauthorized");
       return;
@@ -2301,7 +2591,7 @@ exports.telegramAlertRelay = onRequest(
       const url = incident.url || "";
 
       const lines = [
-        `${emoji} *${statusLabel}* — ${policyName}`,
+        `${emoji} ${statusLabel} — ${policyName}`,
         resourceName ? `Recurso: ${resourceName}` : null,
         summary || null,
         url ? url : null,
@@ -2404,7 +2694,7 @@ exports.dailyDigest = onSchedule(
     const janela = `${fmtHour(windowStart)}–${fmtHour(now)}`;
 
     if (semAtividade) {
-      await sendTelegramMessage(`🕐 *${janela}* — sem atividade no período.`);
+      await sendTelegramMessage(`🕐 ${janela} — sem atividade no período.`);
       return;
     }
 
@@ -2413,7 +2703,7 @@ exports.dailyDigest = onSchedule(
       .join("\n");
 
     const lines = [
-      `🕐 *Resumo ${janela}*`,
+      `🕐 Resumo ${janela}`,
       `📋 Sinistros novos: ${novosSinistrosSnap.size}`,
       `✅ Check-ins realizados: ${checkinsSnap.size}`,
       vistoriasAtivasSnap.size > 0
@@ -2425,5 +2715,258 @@ exports.dailyDigest = onSchedule(
     ].filter(Boolean);
 
     await sendTelegramMessage(lines.join("\n"));
+  }
+);
+
+// ── Orçamento pronto por arquivo ───────────────────────────────────────────
+//
+// Botão "Importar orçamento" da tabela de orçamento do app: o mecânico manda
+// foto, print, PDF, planilha (xlsx) ou CSV do orçamento que já tem, o app
+// sobe em `vistorias/{id}/orcamento/` e chama esta função. Os itens voltam
+// para a tabela para conferência — esta função não grava orçamento nenhum,
+// só registra o que foi lido (auditoria) em `orcamentoImportado`.
+const orcamentoArquivo = require("./orcamento_arquivo");
+
+exports.extrairOrcamentoArquivo = onCall(
+  {
+    region: "us-central1",
+    timeoutSeconds: 120,
+    memory: "1GiB",
+  },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Usuário precisa estar autenticado.");
+    }
+
+    const data = request.data || {};
+    const idvistoria = str(data.idvistoria);
+    const storagePath = str(data.storagePath);
+    const mimeType = str(data.mimeType);
+    const nomeArquivo = str(data.nomeArquivo);
+
+    const prefixo = `vistorias/${idvistoria}/orcamento/`;
+    if (
+      !idvistoria ||
+      idvistoria.includes("/") ||
+      !storagePath.startsWith(prefixo) ||
+      storagePath.includes("..") ||
+      storagePath.length === prefixo.length
+    ) {
+      throw new HttpsError("invalid-argument", "Arquivo inválido para esta vistoria.");
+    }
+
+    const tipo = orcamentoArquivo.tipoDoArquivo(mimeType, nomeArquivo || storagePath);
+    if (tipo === "xls") {
+      throw new HttpsError(
+        "invalid-argument",
+        "Planilha no formato antigo (.xls). Salve como .xlsx ou .csv e envie de novo."
+      );
+    }
+    if (!tipo) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Formato não suportado. Envie foto, PDF, planilha (.xlsx) ou CSV."
+      );
+    }
+
+    const db = admin.firestore();
+    const vistoriaRef = db.collection("vistorias").doc(idvistoria);
+    const vistoriaSnap = await vistoriaRef.get();
+    if (!vistoriaSnap.exists) {
+      throw new HttpsError("not-found", "Vistoria não encontrada.");
+    }
+
+    const vistoria = vistoriaSnap.data() || {};
+    const sinistroId = str(vistoria.sinistroId);
+    const sinistroSnap = sinistroId
+      ? await db.collection("sinistro").doc(sinistroId).get()
+      : null;
+
+    await assertCanAccessVistoria({
+      uid: request.auth.uid,
+      email: request.auth.token?.email,
+      vistoria,
+      sinistro: sinistroSnap?.exists ? sinistroSnap.data() || {} : {},
+      logContext: { callable: "extrairOrcamentoArquivo", idvistoria },
+    });
+
+    // Bucket fixo do projeto (mesmo motivo do áudio: não aceitar bucket do app).
+    const file = admin
+      .storage()
+      .bucket(`${FIREBASE_PROJECT_ID}.firebasestorage.app`)
+      .file(storagePath);
+
+    const [existe] = await file.exists();
+    if (!existe) throw new HttpsError("not-found", "Arquivo não encontrado.");
+
+    const [metadata] = await file.getMetadata();
+    if (Number(metadata.size || 0) > orcamentoArquivo.MAX_BYTES) {
+      throw new HttpsError("invalid-argument", "Arquivo grande demais (máximo 15 MB).");
+    }
+
+    const [buffer] = await file.download();
+
+    let resultado;
+    try {
+      resultado = await orcamentoArquivo.extrairOrcamento({
+        client: getGenAIClient(),
+        model: GEMINI_REVIEW_MODEL,
+        tipo,
+        buffer,
+        mimeType: mimeType || metadata.contentType,
+      });
+    } catch (e) {
+      console.error("Falha ao ler orçamento por arquivo:", { idvistoria, tipo, erro: e.message });
+      throw new HttpsError("internal", "Não foi possível ler o arquivo agora. Tente de novo.");
+    }
+
+    await vistoriaRef.set(
+      {
+        orcamentoImportado: {
+          origem: "arquivo",
+          tipo,
+          storagePath,
+          itens: resultado.itens,
+          totalDocumento: resultado.totalDocumento,
+          legivel: resultado.legivel,
+          lidoPor: request.auth.uid,
+          lidoEm: admin.firestore.FieldValue.serverTimestamp(),
+        },
+      },
+      { merge: true }
+    );
+
+    console.log("Orçamento por arquivo lido:", {
+      idvistoria,
+      tipo,
+      itens: resultado.itens.length,
+      legivel: resultado.legivel,
+    });
+
+    return resultado;
+  }
+);
+
+// ── Relatório para o cliente final ─────────────────────────────────────────
+//
+// Botão "Relatório para o cliente" no histórico da vistoria. Gera um PDF com
+// o visual da Argos (veículo, danos, fotos, orçamento e próximos passos) no
+// laudo-service, pela mesma fila do laudo. O app acompanha
+// `sinistro.relatorioCliente` até ficar "pronto" e abre o PDF.
+function relatorioClienteServiceUrl() {
+  const laudoUrl = LAUDO_SERVICE_URL.value();
+  if (!laudoUrl) return "";
+  try {
+    return `${new URL(laudoUrl).origin}/gerar-relatorio-cliente`;
+  } catch (_) {
+    return "";
+  }
+}
+
+exports.gerarRelatorioCliente = onCall(
+  { region: "us-central1", timeoutSeconds: 60 },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Usuário precisa estar autenticado.");
+    }
+
+    const sinistroId = str(request.data?.sinistroId);
+    const vistoriaId = str(request.data?.vistoriaId);
+    if (!sinistroId || !vistoriaId || sinistroId.includes("/") || vistoriaId.includes("/")) {
+      throw new HttpsError("invalid-argument", "sinistroId e vistoriaId são obrigatórios.");
+    }
+
+    const db = admin.firestore();
+    const [sinistroSnap, vistoriaSnap] = await Promise.all([
+      db.collection("sinistro").doc(sinistroId).get(),
+      db.collection("vistorias").doc(vistoriaId).get(),
+    ]);
+    if (!sinistroSnap.exists || !vistoriaSnap.exists) {
+      throw new HttpsError("not-found", "Vistoria não encontrada.");
+    }
+
+    await assertCanAccessVistoria({
+      uid: request.auth.uid,
+      email: request.auth.token?.email,
+      vistoria: vistoriaSnap.data() || {},
+      sinistro: sinistroSnap.data() || {},
+      logContext: { callable: "gerarRelatorioCliente", vistoriaId },
+    });
+
+    // Escolhas do mecânico na tela do app: fotos que não vão para o cliente
+    // (storagePath ou url) e validade do orçamento em dias.
+    const fotosExcluidas = (Array.isArray(request.data?.fotosExcluidas) ? request.data.fotosExcluidas : [])
+      .map((f) => str(f))
+      .filter(Boolean)
+      .slice(0, 100);
+    const validadeDias = Math.round(Number(request.data?.validadeDias));
+    const validadeValida = Number.isFinite(validadeDias) && validadeDias >= 1 && validadeDias <= 180;
+
+    await db.collection("sinistro").doc(sinistroId).set(
+      {
+        relatorioCliente: {
+          status: "gerando",
+          vistoriaId,
+          solicitadoEm: admin.firestore.FieldValue.serverTimestamp(),
+          erro: admin.firestore.FieldValue.delete(),
+          fotosExcluidas,
+          validadeDias: validadeValida ? validadeDias : admin.firestore.FieldValue.delete(),
+        },
+      },
+      { merge: true }
+    );
+
+    // A validade vira o padrão da oficina para os próximos relatórios (as
+    // regras do Firestore não deixam o app gravar esse campo direto).
+    const credenciadoId = str(vistoriaSnap.data()?.credenciadoId || sinistroSnap.data()?.credenciadoId);
+    if (validadeValida && credenciadoId && !credenciadoId.includes("/")) {
+      await db
+        .collection("credenciados")
+        .doc(credenciadoId)
+        .set({ validadeOrcamentoDias: validadeDias }, { merge: true })
+        .catch((e) => console.warn("Não salvou a validade padrão da oficina:", e?.message));
+    }
+
+    await enqueuePdfGeneration({
+      serviceUrl: relatorioClienteServiceUrl(),
+      serviceUrlParam: "LAUDO_SERVICE_URL",
+      statusField: "relatorioCliente",
+      taskKind: "relatorio",
+      sinistroId,
+      vistoriaId,
+      // Pode ser gerado várias vezes (orçamento muda); nome único por pedido.
+      taskSuffix: `-${Date.now()}`,
+    });
+
+    return { status: "gerando" };
+  }
+);
+
+// ── Ouvir mensagens do Argos ───────────────────────────────────────────────
+//
+// Cada mensagem do Argos no chat tem um botão de ouvir. O app manda o
+// texto; volta o MP3 em base64.
+const falaArgos = require("./fala_argos");
+
+exports.falarMensagemArgos = onCall(
+  { region: "us-central1", timeoutSeconds: 30 },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Usuário precisa estar autenticado.");
+    }
+
+    const texto = str(request.data?.texto);
+    if (!texto) throw new HttpsError("invalid-argument", "Texto vazio.");
+    if (texto.length > falaArgos.MAX_CARACTERES * 2) {
+      throw new HttpsError("invalid-argument", "Mensagem longa demais para ouvir.");
+    }
+
+    try {
+      const audio = await falaArgos.sintetizar({ texto, projectId: FIREBASE_PROJECT_ID });
+      return { audio, mimeType: "audio/mpeg" };
+    } catch (e) {
+      console.error("Falha ao sintetizar fala:", e.message);
+      throw new HttpsError("internal", "Não foi possível gerar o áudio agora.");
+    }
   }
 );

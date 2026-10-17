@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:image_picker/image_picker.dart' as image_picker;
 import 'package:permission_handler/permission_handler.dart';
 
 /// Tela de captura de fotos com a câmera do dispositivo, devolvendo a lista de `XFile` capturados.
@@ -28,19 +27,15 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
   bool _isTakingPicture = false;
   bool _isFlashOn = false;
   bool _isClosing = false;
-  bool _isPickingFromGallery = false;
   bool _disposeScheduled = false;
 
   int _initializeToken = 0;
-  int _hiddenGalleryTapCount = 0;
-  Timer? _hiddenGalleryTapResetTimer;
 
   double _minZoom = 1.0;
   double _maxZoom = 1.0;
   double _currentZoom = 1.0;
 
   final List<XFile> _photos = [];
-  final image_picker.ImagePicker _imagePicker = image_picker.ImagePicker();
 
   List<int> get _backCameraIndexes {
     final indexes = <int>[];
@@ -117,7 +112,6 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
   void dispose() {
     _isClosing = true;
     _initializeToken++;
-    _hiddenGalleryTapResetTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _scheduleDisposeCameraAfterClose();
     super.dispose();
@@ -132,7 +126,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
       unawaited(_disposeCamera());
     }
 
-    if (state == AppLifecycleState.resumed && !_isPickingFromGallery) {
+    if (state == AppLifecycleState.resumed) {
       _initializeCamera(_selectedCameraIndex);
     }
   }
@@ -187,18 +181,66 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
 
     if (requestedStatus.isGranted || requestedStatus.isLimited) return;
 
-    if (requestedStatus.isPermanentlyDenied) {
-      throw Exception(
-        'Permissão de câmera negada permanentemente. Libere o acesso nas configurações do aplicativo.',
-      );
-    }
+    throw _CameraPermissionDeniedException(
+      permanently: requestedStatus.isPermanentlyDenied,
+    );
+  }
 
-    throw Exception('Permissão de câmera necessária para capturar evidências.');
+  bool _isPermissionDialogOpen = false;
+
+  /// Explica por que a câmera é necessária e oferece abrir as configurações
+  /// (negada de vez) ou tentar de novo; "Voltar" fecha a tela.
+  Future<void> _showCameraPermissionDialog({required bool permanently}) async {
+    if (_isPermissionDialogOpen) return;
+    _isPermissionDialogOpen = true;
+
+    final action = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Câmera sem permissão'),
+        content: Text(
+          permanently
+              ? 'O acesso à câmera está bloqueado. Para fotografar as '
+                  'evidências da vistoria, libere a câmera nas configurações '
+                  'do aparelho.'
+              : 'O Argos precisa da câmera para fotografar as evidências da '
+                  'vistoria. Permita o acesso para continuar.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop('voltar'),
+            child: const Text('Voltar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext)
+                .pop(permanently ? 'configuracoes' : 'tentar'),
+            child: Text(permanently ? 'Abrir configurações' : 'Tentar de novo'),
+          ),
+        ],
+      ),
+    );
+
+    _isPermissionDialogOpen = false;
+
+    if (!mounted) return;
+
+    switch (action) {
+      case 'configuracoes':
+        // Ao voltar das configurações, o resumed reinicializa a câmera.
+        await openAppSettings();
+        break;
+      case 'tentar':
+        await _initializeCamera(_selectedCameraIndex);
+        break;
+      default:
+        await _closePage();
+    }
   }
 
   /// Inicializa (ou reinicializa) o controller da câmera no índice indicado, com retry em caso de falha.
   Future<void> _initializeCamera([int? cameraIndex]) async {
-    if (!mounted || _isClosing || _isPickingFromGallery) return;
+    if (!mounted || _isClosing) return;
 
     final token = ++_initializeToken;
 
@@ -308,9 +350,18 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
         _isInitializing = false;
       });
 
+      if (e is _CameraPermissionDeniedException) {
+        await _showCameraPermissionDialog(permanently: e.permanently);
+        return;
+      }
+
+      debugPrint('Erro ao inicializar câmera: $e');
+
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Erro ao inicializar câmera: $e'),
+        const SnackBar(
+          content: Text(
+            'Não foi possível abrir a câmera. Feche e tente novamente.',
+          ),
           backgroundColor: Colors.redAccent,
         ),
       );
@@ -389,7 +440,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     if (_photos.length >= maxPhotos) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Limite máximo de 10 fotos atingido.'),
+          content: Text('Limite máximo de $maxPhotos fotos atingido.'),
           backgroundColor: Colors.orange,
         ),
       );
@@ -424,11 +475,13 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
         ),
       );
     } catch (e) {
+      debugPrint('Erro ao capturar foto: $e');
+
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Erro ao capturar foto: $e'),
+        const SnackBar(
+          content: Text('Não foi possível capturar a foto. Tente novamente.'),
           backgroundColor: Colors.redAccent,
         ),
       );
@@ -492,25 +545,12 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     _scheduleDisposeCameraAfterClose();
   }
 
-  /// Trata o toque no botão de concluir: finaliza se há fotos, senão conta toques pra abrir a galeria oculta.
+  /// Trata o toque no botão de concluir: finaliza se há fotos, senão avisa.
+  /// As fotos só podem vir da câmera, nunca da galeria — a evidência precisa
+  /// ser capturada na hora da vistoria.
   Future<void> _handleFinishButtonPressed() async {
     if (_photos.isNotEmpty) {
       await _finishCapture();
-      return;
-    }
-
-    _hiddenGalleryTapCount++;
-
-    _hiddenGalleryTapResetTimer?.cancel();
-    _hiddenGalleryTapResetTimer = Timer(const Duration(seconds: 3), () {
-      _hiddenGalleryTapCount = 0;
-    });
-
-    if (_hiddenGalleryTapCount >= 5) {
-      _hiddenGalleryTapCount = 0;
-      _hiddenGalleryTapResetTimer?.cancel();
-
-      await _openHiddenGalleryPicker();
       return;
     }
 
@@ -521,77 +561,6 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
         duration: Duration(milliseconds: 850),
       ),
     );
-  }
-
-  /// Abre o seletor de galeria (acesso oculto via 5 toques) e importa as fotos escolhidas.
-  Future<void> _openHiddenGalleryPicker() async {
-    if (_isPickingFromGallery || _photos.length >= maxPhotos) return;
-
-    setState(() {
-      _isPickingFromGallery = true;
-      _isInitializing = true;
-    });
-
-    _initializeToken++;
-    await _disposeCamera();
-
-    try {
-      final remaining = maxPhotos - _photos.length;
-
-      final selected = await _imagePicker.pickMultiImage(
-        imageQuality: 82,
-        limit: remaining,
-      );
-
-      if (!mounted) return;
-
-      if (selected.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Nenhuma foto selecionada.'),
-            backgroundColor: Colors.orange,
-          ),
-        );
-        return;
-      }
-
-      final photosToAdd = selected.take(remaining).toList();
-
-      setState(() {
-        _photos.addAll(photosToAdd);
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            '${photosToAdd.length} foto${photosToAdd.length > 1 ? 's' : ''} importada${photosToAdd.length > 1 ? 's' : ''} da galeria.',
-          ),
-          backgroundColor: Colors.green,
-        ),
-      );
-
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        _openPhotosManager();
-      });
-    } catch (e) {
-      if (!mounted) return;
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Erro ao abrir galeria: $e'),
-          backgroundColor: Colors.redAccent,
-        ),
-      );
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isPickingFromGallery = false;
-        });
-
-        await _initializeCamera(_selectedCameraIndex);
-      }
-    }
   }
 
   /// Abre o bottom sheet de revisão das fotos capturadas, com opção de ver/remover cada uma.
@@ -981,9 +950,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
                     width: double.infinity,
                     height: 56,
                     child: ElevatedButton.icon(
-                      onPressed: _isPickingFromGallery
-                          ? null
-                          : _handleFinishButtonPressed,
+                      onPressed: _handleFinishButtonPressed,
                       icon: Icon(canFinish ? Icons.check_circle : Icons.lock_outline),
                       label: Text(
                         canFinish
@@ -1342,4 +1309,11 @@ class _CameraOptionButton extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Permissão de câmera negada; `permanently` indica bloqueio pelo sistema.
+class _CameraPermissionDeniedException implements Exception {
+  final bool permanently;
+
+  const _CameraPermissionDeniedException({required this.permanently});
 }

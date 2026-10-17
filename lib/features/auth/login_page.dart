@@ -297,6 +297,7 @@ class _LoginPageState extends State<LoginPage> {
                       labelText: 'Senha atual',
                       prefixIcon: const Icon(Icons.lock_outline),
                       suffixIcon: IconButton(
+                        tooltip: obscure ? 'Mostrar senha' : 'Ocultar senha',
                         onPressed: () {
                           setDialogState(() {
                             obscure = !obscure;
@@ -1059,7 +1060,7 @@ class _LoginPageState extends State<LoginPage> {
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'Entre com e-mail e senha ou utilize SSO Google',
+                          'Entre com e-mail e senha ou com sua conta Google',
                           textAlign: TextAlign.center,
                           style: TextStyle(color: Color(0xFF414755)),
                         ),
@@ -1104,6 +1105,9 @@ class _LoginPageState extends State<LoginPage> {
                             labelText: 'Senha',
                             prefixIcon: const Icon(Icons.lock_outline),
                             suffixIcon: IconButton(
+                              tooltip: obscurePassword
+                                  ? 'Mostrar senha'
+                                  : 'Ocultar senha',
                               onPressed: () {
                                 setState(() {
                                   obscurePassword = !obscurePassword;

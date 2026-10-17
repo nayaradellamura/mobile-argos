@@ -82,7 +82,7 @@ extension InspectionStatusX on InspectionStatus {
       case InspectionStatus.inProgress:
         return 'Em andamento';
       case InspectionStatus.submitted:
-        return 'Em analise';
+        return 'Em análise';
       case InspectionStatus.approved:
         return 'Aprovada';
       case InspectionStatus.rejected:
@@ -315,6 +315,10 @@ class InspectionCase {
   final String orcamentoAprovadoStatus;
   final String orcamentoAprovadoUrl;
   final double orcamentoAprovadoValorTotal;
+  // Laudo técnico em PDF gerado pelo laudo-service (sinistro.laudoTecnico).
+  final String laudoTecnicoStatus;
+  final String laudoTecnicoUrl;
+  final String laudoTecnicoVistoriaId;
 
   const InspectionCase({
     required this.id,
@@ -344,6 +348,9 @@ class InspectionCase {
     this.orcamentoAprovadoStatus = '',
     this.orcamentoAprovadoUrl = '',
     this.orcamentoAprovadoValorTotal = 0,
+    this.laudoTecnicoStatus = '',
+    this.laudoTecnicoUrl = '',
+    this.laudoTecnicoVistoriaId = '',
   });
 
   // Constrói a partir de um documento do Firestore.
@@ -363,6 +370,7 @@ class InspectionCase {
         DateTime.now();
 
     final orcamentoAprovado = asStringMap(data['orcamentoAprovado']);
+    final laudoTecnico = asStringMap(data['laudoTecnico']);
 
     return InspectionCase(
       id: doc.id,
@@ -396,10 +404,22 @@ class InspectionCase {
       orcamentoAprovadoUrl: stringValue(orcamentoAprovado['url']),
       orcamentoAprovadoValorTotal:
           (orcamentoAprovado['valorTotal'] as num?)?.toDouble() ?? 0,
+      laudoTecnicoStatus: stringValue(laudoTecnico['status']),
+      laudoTecnicoUrl: stringValue(laudoTecnico['url']),
+      laudoTecnicoVistoriaId: stringValue(laudoTecnico['vistoriaId']),
     );
   }
 
   bool get hasOrcamentoAprovado => orcamentoAprovadoStatus == 'pronto';
+
+  bool get hasLaudoTecnicoPronto =>
+      laudoTecnicoStatus == 'pronto' && laudoTecnicoUrl.isNotEmpty;
+
+  // URL do PDF do laudo técnico, só se estiver pronto e for desta vistoria.
+  String laudoTecnicoUrlForVistoria(Iterable<String> vistoriaIds) {
+    if (!hasLaudoTecnicoPronto || laudoTecnicoVistoriaId.isEmpty) return '';
+    return vistoriaIds.contains(laudoTecnicoVistoriaId) ? laudoTecnicoUrl : '';
+  }
 
   bool get hasAssignedUser => assignedToUid.trim().isNotEmpty;
 
@@ -504,7 +524,7 @@ class InspectionCase {
       case InspectionLifecycleCategory.completed:
         return 'Finalizada';
       case InspectionLifecycleCategory.aiAnalysis:
-        return 'Em analise';
+        return 'Em análise';
       case InspectionLifecycleCategory.inProgress:
         if (_isExpired) return 'Expirada';
         if (_isAbandoned) return 'Abandonada';
@@ -605,6 +625,9 @@ class InspectionCase {
       orcamentoAprovadoStatus: orcamentoAprovadoStatus,
       orcamentoAprovadoUrl: orcamentoAprovadoUrl,
       orcamentoAprovadoValorTotal: orcamentoAprovadoValorTotal,
+      laudoTecnicoStatus: laudoTecnicoStatus,
+      laudoTecnicoUrl: laudoTecnicoUrl,
+      laudoTecnicoVistoriaId: laudoTecnicoVistoriaId,
     );
   }
 }

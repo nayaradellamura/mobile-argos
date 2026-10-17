@@ -51,12 +51,18 @@ class ArgosAiService {
 
   /// Manda uma mensagem de sistema (ex.: aviso de que as fotos subiram) e
   /// retorna a resposta do agente.
+  ///
+  /// Com [persistirResposta], o servidor também grava a resposta no
+  /// histórico da vistoria (com o [turnoId]), para ela não se perder se a
+  /// conexão cair antes de o agente terminar.
   Future<String> sendBackgroundMessage({
     required String text,
     required String inspectionId,
     bool isRetificacao = false,
     String? ajustesNecessarios,
     String? contextoVistoriaAnterior,
+    bool persistirResposta = false,
+    String? turnoId,
   }) async {
     final cleanText = text.trim();
 
@@ -70,6 +76,8 @@ class ArgosAiService {
     final result = await callable.call<Map<String, dynamic>>({
       'text': cleanText,
       'inspectionId': inspectionId,
+      if (persistirResposta) 'persistirResposta': true,
+      if (turnoId != null) 'turnoId': turnoId,
       if (isRetificacao) ...{
         'modo': 'retificacao',
         'ajustesNecessarios': ajustesNecessarios ?? '',

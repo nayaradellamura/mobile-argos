@@ -1,15 +1,39 @@
 const express = require("express");
 const admin = require("firebase-admin");
 
-const { loadLaudoContext } = require("./lib/data");
-const { gerarAchadosTecnicos } = require("./lib/gemini");
-const { renderLaudoPdf, renderOrcamentoAprovadoPdf } = require("./lib/pdf");
-const { uploadLaudoPdf, uploadOrcamentoAprovadoPdf } = require("./lib/storage");
+const { loadLaudoContext, etapasRelatorio } = require("./lib/data");
+const { gerarAchadosTecnicos, MODEL: LAUDO_GEMINI_MODEL } = require("./lib/gemini");
+const { renderLaudoPdf, renderOrcamentoAprovadoPdf, renderRelatorioClientePdf } = require("./lib/pdf");
+const { uploadLaudoPdf, uploadOrcamentoAprovadoPdf, uploadRelatorioClientePdf } = require("./lib/storage");
 
 if (!admin.apps.length) {
   admin.initializeApp({
     projectId: process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || "fho-argos",
   });
+}
+
+// Idempotência: o documento já está pronto para ESTA requisição? Compara
+// tanto o ID resolvido (vistoriaId) quanto o ID que veio na requisição
+// original (vistoriaIdSolicitado) — se a vistoria tinha ID provisório
+// (VIS-OFFLINE-...) já reconciliado, o gravado é o resolvido, e a
+// reentrega da mesma tarefa pelo Cloud Tasks ainda chega com o provisório.
+function jaProntoPara(documento, vistoriaIdRequisicao) {
+  if (documento?.status !== "pronto") return false;
+  return (
+    documento.vistoriaId === vistoriaIdRequisicao ||
+    documento.vistoriaIdSolicitado === vistoriaIdRequisicao
+  );
+}
+
+// Campos de uma tentativa anterior que falhou. As gravações usam
+// set(..., { merge: true }) no mapa aninhado, então sem apagar
+// explicitamente o `erro`/`falhouEm` antigo sobreviveria num status
+// "gerando"/"pronto" posterior.
+function limparErroAnterior() {
+  return {
+    erro: admin.firestore.FieldValue.delete(),
+    falhouEm: admin.firestore.FieldValue.delete(),
+  };
 }
 
 const app = express();
@@ -40,14 +64,21 @@ app.post("/gerar-laudo", async (req, res) => {
     // não gera de novo nem sobrescreve.
     const sinistroSnapAntes = await sinistroRef.get();
     const laudoAtual = sinistroSnapAntes.data()?.laudoTecnico;
-    if (laudoAtual?.status === "pronto" && laudoAtual?.vistoriaId === vistoriaId) {
+    if (jaProntoPara(laudoAtual, vistoriaId)) {
       console.log("Laudo já estava pronto, ignorando:", { sinistroId, vistoriaId });
       res.status(200).json({ status: "ja_existia", url: laudoAtual.url });
       return;
     }
 
     await sinistroRef.set(
-      { laudoTecnico: { status: "gerando", vistoriaId, iniciadoEm: admin.firestore.FieldValue.serverTimestamp() } },
+      {
+        laudoTecnico: {
+          status: "gerando",
+          vistoriaId,
+          iniciadoEm: admin.firestore.FieldValue.serverTimestamp(),
+          ...limparErroAnterior(),
+        },
+      },
       { merge: true }
     );
 
@@ -66,12 +97,14 @@ app.post("/gerar-laudo", async (req, res) => {
         laudoTecnico: {
           status: "pronto",
           vistoriaId: resolvedVistoriaId,
+          vistoriaIdSolicitado: vistoriaId,
           url,
           storagePath,
           classificacaoContran: achados.classificacaoContran || null,
           achados,
           geradoEm: admin.firestore.FieldValue.serverTimestamp(),
-          modelo: process.env.LAUDO_GEMINI_MODEL || "gemini-2.5-flash",
+          modelo: LAUDO_GEMINI_MODEL,
+          ...limparErroAnterior(),
         },
       },
       { merge: true }
@@ -107,6 +140,66 @@ app.post("/gerar-laudo", async (req, res) => {
 // técnico, não chama o Gemini: é só um preenchimento de template com o
 // orçamento que o mecânico já registrou em campo (context.orcamentoCampo),
 // já formalmente aprovado pela decisão do analista.
+// Relatório para o cliente final (botão no histórico da vistoria). Sempre
+// gera de novo: o mecânico pode ter mudado o orçamento desde a última vez.
+app.post("/gerar-relatorio-cliente", async (req, res) => {
+  const sinistroId = String(req.body?.sinistroId || "").trim();
+  const vistoriaId = String(req.body?.vistoriaId || "").trim();
+
+  if (!sinistroId || !vistoriaId) {
+    res.status(400).json({ error: "sinistroId e vistoriaId são obrigatórios." });
+    return;
+  }
+
+  const sinistroRef = admin.firestore().collection("sinistro").doc(sinistroId);
+  console.log("Gerando relatório do cliente:", { sinistroId, vistoriaId });
+
+  try {
+    const context = await loadLaudoContext({ sinistroId, vistoriaId });
+    const pdfBuffer = await renderRelatorioClientePdf({
+      context,
+      etapas: etapasRelatorio(context.statusVistoria),
+    });
+    const { storagePath, url } = await uploadRelatorioClientePdf({
+      vistoriaId: context.vistoriaId,
+      pdfBuffer,
+    });
+
+    await sinistroRef.set(
+      {
+        relatorioCliente: {
+          status: "pronto",
+          vistoriaId: context.vistoriaId,
+          url,
+          storagePath,
+          geradoEm: admin.firestore.FieldValue.serverTimestamp(),
+          erro: admin.firestore.FieldValue.delete(),
+        },
+      },
+      { merge: true }
+    );
+
+    console.log("Relatório do cliente pronto:", { sinistroId, storagePath });
+    res.status(200).json({ status: "pronto", url });
+  } catch (err) {
+    console.error("Falha ao gerar relatório do cliente:", { sinistroId, vistoriaId, error: err?.message });
+    await sinistroRef
+      .set(
+        {
+          relatorioCliente: {
+            status: "erro",
+            vistoriaId,
+            erro: String(err?.message || err),
+            falhouEm: admin.firestore.FieldValue.serverTimestamp(),
+          },
+        },
+        { merge: true }
+      )
+      .catch(() => {});
+    res.status(500).json({ error: String(err?.message || err) });
+  }
+});
+
 app.post("/gerar-orcamento-aprovado", async (req, res) => {
   const sinistroId = String(req.body?.sinistroId || "").trim();
   const vistoriaId = String(req.body?.vistoriaId || "").trim();
@@ -124,7 +217,7 @@ app.post("/gerar-orcamento-aprovado", async (req, res) => {
   try {
     const sinistroSnapAntes = await sinistroRef.get();
     const orcamentoAtual = sinistroSnapAntes.data()?.orcamentoAprovado;
-    if (orcamentoAtual?.status === "pronto" && orcamentoAtual?.vistoriaId === vistoriaId) {
+    if (jaProntoPara(orcamentoAtual, vistoriaId)) {
       console.log("Orçamento aprovado já estava pronto, ignorando:", { sinistroId, vistoriaId });
       res.status(200).json({ status: "ja_existia", url: orcamentoAtual.url });
       return;
@@ -136,6 +229,7 @@ app.post("/gerar-orcamento-aprovado", async (req, res) => {
           status: "gerando",
           vistoriaId,
           iniciadoEm: admin.firestore.FieldValue.serverTimestamp(),
+          ...limparErroAnterior(),
         },
       },
       { merge: true }
@@ -175,10 +269,12 @@ app.post("/gerar-orcamento-aprovado", async (req, res) => {
         orcamentoAprovado: {
           status: "pronto",
           vistoriaId: resolvedVistoriaId,
+          vistoriaIdSolicitado: vistoriaId,
           url,
           storagePath,
           valorTotal: context.orcamentoCampo.valorTotal,
           geradoEm: admin.firestore.FieldValue.serverTimestamp(),
+          ...limparErroAnterior(),
         },
       },
       { merge: true }

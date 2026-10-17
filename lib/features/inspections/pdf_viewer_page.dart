@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -8,7 +9,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 
 /// Tela genérica de leitura de PDF (orçamento aprovado, laudo técnico, etc.),
-/// com zoom, baixar e compartilhar direto no leitor.
+/// com zoom e salvar/compartilhar pelo menu do sistema.
 class PdfViewerPage extends StatefulWidget {
   final String url;
   final String title;
@@ -36,18 +37,20 @@ class _PdfViewerPageState extends State<PdfViewerPage> {
     return '${limpo.isEmpty ? 'documento' : limpo}.pdf';
   }
 
-  /// Baixa o PDF uma vez só e guarda localmente — tanto "Baixar" quanto
-  /// "Compartilhar" precisam do arquivo em disco (o leitor em si mostra
-  /// direto da URL, sem precisar disso).
+  /// Baixa o PDF uma vez só e guarda num arquivo temporário — o menu de
+  /// compartilhar precisa do arquivo em disco (o leitor em si mostra direto
+  /// da URL, sem precisar disso).
   Future<File> _garantirArquivoLocal() async {
     if (_arquivoLocal != null) return _arquivoLocal!;
 
-    final resposta = await http.get(Uri.parse(widget.url));
+    final resposta = await http
+        .get(Uri.parse(widget.url))
+        .timeout(const Duration(seconds: 30));
     if (resposta.statusCode != 200) {
       throw Exception('Falha ao baixar o PDF (HTTP ${resposta.statusCode}).');
     }
 
-    final dir = await getApplicationDocumentsDirectory();
+    final dir = await getTemporaryDirectory();
     final arquivo = File('${dir.path}/$_nomeArquivo');
     await arquivo.writeAsBytes(resposta.bodyBytes, flush: true);
 
@@ -55,27 +58,9 @@ class _PdfViewerPageState extends State<PdfViewerPage> {
     return arquivo;
   }
 
-  /// Baixa o PDF e mostra uma confirmação com o caminho salvo.
-  Future<void> _baixar() async {
-    if (_baixando) return;
-    setState(() => _baixando = true);
-    try {
-      final arquivo = await _garantirArquivoLocal();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('PDF salvo: ${arquivo.path}')),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Não foi possível baixar o PDF: $e')),
-      );
-    } finally {
-      if (mounted) setState(() => _baixando = false);
-    }
-  }
-
-  /// Baixa o PDF e abre o menu de compartilhamento do sistema.
+  /// Baixa o PDF e abre o menu do sistema, onde dá pra salvar no aparelho
+  /// (Arquivos/Drive) ou enviar por outro app — salvar na pasta privada do
+  /// app deixava o arquivo inacessível pro usuário.
   Future<void> _compartilhar() async {
     if (_baixando) return;
     setState(() => _baixando = true);
@@ -89,9 +74,13 @@ class _PdfViewerPageState extends State<PdfViewerPage> {
         ),
       );
     } catch (e) {
+      debugPrint('Erro ao salvar/compartilhar PDF: $e');
       if (!mounted) return;
+      final mensagem = e is TimeoutException || e is SocketException
+          ? 'Não foi possível baixar o PDF. Verifique sua conexão e tente novamente.'
+          : 'Não foi possível salvar ou compartilhar o PDF. Tente novamente.';
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Não foi possível compartilhar o PDF: $e')),
+        SnackBar(content: Text(mensagem)),
       );
     } finally {
       if (mounted) setState(() => _baixando = false);
@@ -137,18 +126,12 @@ class _PdfViewerPageState extends State<PdfViewerPage> {
                 child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
               ),
             )
-          else ...[
+          else
             IconButton(
-              tooltip: 'Baixar PDF',
-              icon: const Icon(Icons.download_outlined),
-              onPressed: _baixar,
-            ),
-            IconButton(
-              tooltip: 'Compartilhar PDF',
+              tooltip: 'Salvar ou compartilhar PDF',
               icon: const Icon(Icons.share_outlined),
               onPressed: _compartilhar,
             ),
-          ],
         ],
       ),
       body: _erro != null
@@ -160,10 +143,16 @@ class _PdfViewerPageState extends State<PdfViewerPage> {
                   children: [
                     const Icon(Icons.error_outline, size: 40, color: Colors.redAccent),
                     const SizedBox(height: 12),
-                    Text(
-                      'Não foi possível carregar o PDF.\n$_erro',
+                    const Text(
+                      'Não foi possível carregar o PDF. Verifique sua conexão e tente novamente.',
                       textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.black54),
+                      style: TextStyle(color: Colors.black54),
+                    ),
+                    const SizedBox(height: 16),
+                    OutlinedButton.icon(
+                      onPressed: () => setState(() => _erro = null),
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Tentar novamente'),
                     ),
                   ],
                 ),
@@ -175,6 +164,9 @@ class _PdfViewerPageState extends State<PdfViewerPage> {
               canShowScrollHead: true,
               canShowScrollStatus: true,
               onDocumentLoadFailed: (details) {
+                debugPrint(
+                  'Erro ao carregar PDF: ${details.error} - ${details.description}',
+                );
                 setState(() => _erro = details.description);
               },
             ),

@@ -1,9 +1,11 @@
 import 'dart:async';
+import '../orcamento/orcamento_calculo.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
@@ -533,18 +535,26 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
                             actionLabel: 'Limpar busca',
                             onAction: _closeSearch,
                           )
-                        : const _StateMessage(
+                        : _StateMessage(
                             icon: Icons.person_search_outlined,
                             title: 'Nenhuma vistoria sua',
                             message:
-                                'Você ainda não tem sinistros atribuídos. Toque em "Oficina" para ver todas as da oficina.',
+                                'Você ainda não tem sinistros atribuídos. Veja as vistorias da oficina para assumir uma.',
+                            actionLabel: 'Ver da oficina',
+                            onAction: () => setState(() => _onlyMine = false),
                           ))
                     : filteredInspections.isEmpty
                         ? _StateMessage(
                             icon: _selectedFilter.icon,
                             title: 'Nenhum item em ${_selectedFilter.label}',
                             message:
-                                'Não há vistorias nessa categoria no momento. Toque em outra categoria para alterar o filtro.',
+                                'Não há vistorias nessa categoria no momento.',
+                            actionLabel: _selectedFilter == InspectionFilter.all
+                                ? null
+                                : 'Ver todas',
+                            onAction: _selectedFilter == InspectionFilter.all
+                                ? null
+                                : () => _changeFilter(InspectionFilter.all),
                           )
                         : ListView.separated(
                             padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
@@ -684,7 +694,7 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
                             'Não foi possível carregar as vistorias atribuídas para esta oficina.',
                         actionLabel: 'Recarregar',
                         onAction: () {
-                          setState(() {});
+                          setState(() => _cachedInspectionStream = null);
                         },
                       ),
                     ),
@@ -991,6 +1001,111 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     onStartRetificacao();
   }
 
+  /// Um botão só, com o próximo passo possível: retificação, coleta,
+  /// check-in ou, se nada estiver disponível, o motivo (desabilitado).
+  Widget _buildAcaoPrincipal({
+    required bool hasCheckIn,
+    required bool isAssignedToAnother,
+    required bool canCheckIn,
+    required bool isHumanAnalysis,
+    required bool canOpenChat,
+    required bool canStartRetificacao,
+  }) {
+    ButtonStyle estilo(Color cor) => ElevatedButton.styleFrom(
+          backgroundColor: cor,
+          foregroundColor: Colors.white,
+          disabledBackgroundColor: const Color(0xFFE5E7EB),
+          disabledForegroundColor: const Color(0xFF6B7280),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+        );
+
+    if (canStartRetificacao) {
+      return ElevatedButton.icon(
+        onPressed: _goToRetificacao,
+        icon: const Icon(Icons.rate_review_outlined),
+        label: const Text('Iniciar retificação'),
+        style: estilo(Colors.deepOrange),
+      );
+    }
+
+    if (canOpenChat) {
+      return ElevatedButton.icon(
+        onPressed: _goToChat,
+        icon: const Icon(Icons.smart_toy),
+        label: const Text('Iniciar coleta no Argos IA'),
+        style: estilo(const Color(0xFF0057C0)),
+      );
+    }
+
+    if (canCheckIn && !isHumanAnalysis && !inspection.isPendingOfflineSync) {
+      return ValueListenableBuilder<bool>(
+        valueListenable: ArgosConnectivityService.instance.isOnline,
+        builder: (context, online, _) {
+          final blockedByOffline = !online;
+          return ElevatedButton.icon(
+            onPressed:
+                isCheckingIn || blockedByOffline ? null : _registerCheckIn,
+            icon: isCheckingIn
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : Icon(
+                    blockedByOffline
+                        ? Icons.wifi_off_rounded
+                        : Icons.login_rounded,
+                  ),
+            label: Text(
+              isCheckingIn
+                  ? 'Realizando check-in...'
+                  : blockedByOffline
+                      ? 'Check-in precisa de internet'
+                      : hasCheckIn
+                          ? 'Assumir vistoria'
+                          : 'Realizar check-in e assumir vistoria',
+            ),
+            style: estilo(const Color(0xFF0057C0)),
+          );
+        },
+      );
+    }
+
+    final String motivo;
+    final IconData icone;
+    if (inspection.isPendingOfflineSync) {
+      motivo = 'Aguardando sincronização...';
+      icone = Icons.cloud_sync_rounded;
+    } else if (isHumanAnalysis) {
+      motivo = 'Vistoria em análise';
+      icone = Icons.hourglass_top_rounded;
+    } else if (isAssignedToAnother) {
+      motivo = 'Vinculada a ${inspection.assignedToName}';
+      icone = Icons.lock_outline;
+    } else if (inspection.isCompletedCategory) {
+      motivo = 'Vistoria concluída';
+      icone = Icons.check_circle_outline;
+    } else if (inspection.isCancelledCategory) {
+      motivo = 'Vistoria cancelada';
+      icone = Icons.block;
+    } else {
+      motivo = 'Nenhuma ação disponível';
+      icone = Icons.lock_outline;
+    }
+
+    return ElevatedButton.icon(
+      onPressed: null,
+      icon: Icon(icone),
+      label: Text(motivo, overflow: TextOverflow.ellipsis),
+      style: estilo(const Color(0xFF0057C0)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final hasCheckIn = inspection.checkInAt != null;
@@ -1012,6 +1127,18 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
 
     return Scaffold(
       backgroundColor: const Color(0xFFF3FBFF),
+      // Ação principal fixa no rodapé: antes ficava no fim de uma página
+      // longa, depois de uns 8 cards, e o mecânico precisava rolar para achar.
+      bottomNavigationBar: _SummaryActionBar(
+        child: _buildAcaoPrincipal(
+          hasCheckIn: hasCheckIn,
+          isAssignedToAnother: isAssignedToAnother,
+          canCheckIn: canCheckIn,
+          isHumanAnalysis: isHumanAnalysis,
+          canOpenChat: canOpenChat,
+          canStartRetificacao: canStartRetificacao,
+        ),
+      ),
       body: SafeArea(
         child: Column(
           children: [
@@ -1048,9 +1175,29 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                   ajustesNecessarios: _ajustesNecessariosRejeicao,
                                 ),
                               ],
+                              // Documentos ficam só aqui (a aba Vistorias mostra
+                              // o que foi coletado). Cada card diz para quem é.
+                              if (inspection.hasOrcamentoAprovado ||
+                                  inspection.laudoTecnicoStatus.isNotEmpty ||
+                                  inspection.vistoriaAtualId.trim().isNotEmpty) ...[
+                                const SizedBox(height: 18),
+                                const _GrupoDocumentosTitulo(titulo: 'Documentos'),
+                              ],
+                              if (inspection.laudoTecnicoStatus.isNotEmpty) ...[
+                                const SizedBox(height: 10),
+                                _LaudoTecnicoCard(inspection: inspection),
+                              ],
                               if (inspection.hasOrcamentoAprovado) ...[
                                 const SizedBox(height: 14),
                                 _OrcamentoAprovadoCard(inspection: inspection),
+                              ],
+                              if (inspection.vistoriaAtualId.trim().isNotEmpty &&
+                                  !inspection.isPendingOfflineSync) ...[
+                                const SizedBox(height: 14),
+                                _RelatorioClienteCard(
+                                  sinistroId: inspection.id,
+                                  vistoriaDocId: inspection.vistoriaAtualId.trim(),
+                                ),
                               ],
                               const SizedBox(height: 14),
                               _SectionCard(
@@ -1146,133 +1293,6 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                               const SizedBox(height: 14),
                               const _ChecklistCard(),
                               const SizedBox(height: 20),
-                              if (canStartRetificacao) ...[
-                                SizedBox(
-                                  height: 54,
-                                  child: ElevatedButton.icon(
-                                    onPressed: _goToRetificacao,
-                                    icon: const Icon(Icons.rate_review_outlined),
-                                    label: const Text('Iniciar Retificação'),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: Colors.deepOrange,
-                                      foregroundColor: Colors.white,
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(18),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ] else ...[
-                                ValueListenableBuilder<bool>(
-                                  valueListenable:
-                                      ArgosConnectivityService.instance.isOnline,
-                                  builder: (context, online, _) {
-                                    final blockedByOffline =
-                                        !online && !hasCheckIn;
-
-                                    return SizedBox(
-                                      height: 54,
-                                      child: ElevatedButton.icon(
-                                        onPressed: canCheckIn &&
-                                                !isCheckingIn &&
-                                                !blockedByOffline
-                                            ? _registerCheckIn
-                                            : null,
-                                        icon: isCheckingIn
-                                            ? const SizedBox(
-                                                width: 18,
-                                                height: 18,
-                                                child: CircularProgressIndicator(
-                                                  strokeWidth: 2,
-                                                  color: Colors.white,
-                                                ),
-                                              )
-                                            : Icon(
-                                                blockedByOffline
-                                                    ? Icons.wifi_off_rounded
-                                                    : hasCheckIn
-                                                        ? Icons.check_circle
-                                                        : Icons.login_rounded,
-                                              ),
-                                        label: Text(
-                                          isCheckingIn
-                                              ? 'Realizando check-in...'
-                                              : blockedByOffline
-                                                  ? 'Check-in precisa de internet'
-                                                  : isHumanAnalysis
-                                                      ? 'Vistoria em analise humana'
-                                                      : isAssignedToAnother
-                                                      ? 'Vistoria vinculada a ${inspection.assignedToName}'
-                                                      : hasCheckIn &&
-                                                              !inspection.hasAssignedUser
-                                                          ? 'Assumir vistoria'
-                                                          : hasCheckIn
-                                                              ? 'Check-in realizado às ${_formatTime(inspection.checkInAt!)}'
-                                                              : 'Realizar check-in e assumir vistoria',
-                                        ),
-                                        style: ElevatedButton.styleFrom(
-                                          backgroundColor: hasCheckIn
-                                              ? Colors.green
-                                              : (isAssignedToAnother ||
-                                                      blockedByOffline)
-                                                  ? const Color(0xFF9CA3AF)
-                                                  : const Color(0xFF0057C0),
-                                          foregroundColor: Colors.white,
-                                          disabledBackgroundColor: hasCheckIn
-                                              ? Colors.green
-                                              : (isAssignedToAnother ||
-                                                      blockedByOffline)
-                                                  ? const Color(0xFF9CA3AF)
-                                                  : const Color(0xFF0057C0),
-                                          disabledForegroundColor: Colors.white,
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(18),
-                                          ),
-                                        ),
-                                      ),
-                                    );
-                                  },
-                                ),
-                                const SizedBox(height: 10),
-                                SizedBox(
-                                  height: 54,
-                                  child: OutlinedButton.icon(
-                                    onPressed: canOpenChat ? _goToChat : null,
-                                    icon: Icon(
-                                      canOpenChat
-                                          ? Icons.smart_toy
-                                          : inspection.isPendingOfflineSync
-                                              ? Icons.cloud_sync_rounded
-                                              : Icons.lock_outline,
-                                    ),
-                                    label: Text(
-                                      canOpenChat
-                                          ? 'Iniciar coleta no Argos IA'
-                                          : inspection.isPendingOfflineSync
-                                              ? 'Aguardando sincronização...'
-                                              : isHumanAnalysis
-                                              ? 'Vistoria em analise humana'
-                                              : isAssignedToAnother
-                                              ? 'Chat bloqueado para outro responsável'
-                                              : 'Faça check-in para iniciar o Argos IA',
-                                    ),
-                                    style: OutlinedButton.styleFrom(
-                                      foregroundColor: canOpenChat
-                                          ? const Color(0xFF0057C0)
-                                          : const Color(0xFF6B7280),
-                                      backgroundColor: canOpenChat
-                                          ? const Color(0xFFE5F6FF)
-                                          : const Color(0xFFE5E7EB),
-                                      side: BorderSide(
-                                        color: Colors.black.withOpacity(.05),
-                                      ),
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(18),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
                             ],
                           ),
                           _InspectionHistoryTab(inspection: inspection),
@@ -1416,6 +1436,12 @@ class _InspectionHistoryTabState extends State<_InspectionHistoryTab> {
             ...vistorias.map(
               (vistoria) {
                 final isSelected = vistoria.docId == _selectedDocId;
+                final laudoPdfUrl = vistoria.pdfLaudoUrl.isNotEmpty
+                    ? vistoria.pdfLaudoUrl
+                    : widget.inspection.laudoTecnicoUrlForVistoria([
+                        vistoria.docId,
+                        vistoria.idvistoria,
+                      ]);
 
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 12),
@@ -1424,6 +1450,7 @@ class _InspectionHistoryTabState extends State<_InspectionHistoryTab> {
                       _HistoryVistoriaCard(
                         vistoria: vistoria,
                         isSelected: isSelected,
+                        hasLaudoPdf: laudoPdfUrl.isNotEmpty,
                         onTap: () {
                           setState(() {
                             _selectedDocId = isSelected ? null : vistoria.docId;
@@ -1438,8 +1465,18 @@ class _InspectionHistoryTabState extends State<_InspectionHistoryTab> {
                             ? Padding(
                                 key: ValueKey('preview_${vistoria.docId}'),
                                 padding: const EdgeInsets.only(top: 10),
-                                child: _HistoryVistoriaPreview(
-                                  vistoria: vistoria,
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                                  children: [
+                                    _HistoryVistoriaPreview(
+                                      vistoria: vistoria,
+                                      laudoPdfUrl: laudoPdfUrl,
+                                    ),
+                                    if (vistoria.orcamentoItems.isNotEmpty) ...[
+                                      const SizedBox(height: 10),
+                                      _HistoryOrcamentoCard(vistoria: vistoria),
+                                    ],
+                                  ],
                                 ),
                               )
                             : const SizedBox.shrink(),
@@ -1548,17 +1585,20 @@ class _HistoryHeaderCard extends StatelessWidget {
 class _HistoryVistoriaCard extends StatelessWidget {
   final LinkedVistoriaInfo vistoria;
   final bool isSelected;
+  final bool hasLaudoPdf;
   final VoidCallback onTap;
 
   const _HistoryVistoriaCard({
     required this.vistoria,
     required this.isSelected,
+    this.hasLaudoPdf = false,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     final date = vistoria.updatedAt ?? vistoria.createdAt;
+    final hasLaudo = vistoria.hasLaudo || hasLaudoPdf;
 
     return Material(
       color: Colors.white,
@@ -1656,10 +1696,10 @@ class _HistoryVistoriaCard extends StatelessWidget {
                         ),
                         const SizedBox(width: 8),
                         _TinyMetric(
-                          icon: vistoria.hasLaudo
+                          icon: hasLaudo
                               ? Icons.description_outlined
                               : Icons.pending_actions_outlined,
-                          value: vistoria.hasLaudo ? 'Laudo' : 'Sem laudo',
+                          value: hasLaudo ? 'Laudo' : 'Sem laudo',
                         ),
                       ],
                     ),
@@ -1724,8 +1764,13 @@ enum _HistoryPreviewSection { chat, photos, audios, orcamento }
 /// Preview expandido de uma vistoria do histórico: chat/orçamento, fotos, áudios e laudo.
 class _HistoryVistoriaPreview extends StatefulWidget {
   final LinkedVistoriaInfo vistoria;
+  // PDF do laudo (vistoria.pdfLaudoUrl ou sinistro.laudoTecnico), se houver.
+  final String laudoPdfUrl;
 
-  const _HistoryVistoriaPreview({required this.vistoria});
+  const _HistoryVistoriaPreview({
+    required this.vistoria,
+    this.laudoPdfUrl = '',
+  });
 
   @override
   State<_HistoryVistoriaPreview> createState() => _HistoryVistoriaPreviewState();
@@ -1741,6 +1786,8 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
   @override
   Widget build(BuildContext context) {
     final laudoText = vistoria.laudo.trim();
+    final laudoPdfUrl = widget.laudoPdfUrl.trim();
+    final hasLaudo = vistoria.hasLaudo || laudoPdfUrl.isNotEmpty;
 
     return Container(
       padding: const EdgeInsets.all(14),
@@ -1753,39 +1800,25 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _SectionTitle(
-            title: 'Preview da vistoria',
+            title: 'Resumo da vistoria',
             icon: Icons.visibility_outlined,
           ),
           const SizedBox(height: 12),
           Row(
             children: [
+              // Chat sempre aparece (no "Tudo de uma vez" ele traz a
+              // resposta do Argos ao pacote). O orçamento tem card próprio
+              // logo abaixo, junto do relatório para o cliente.
               Expanded(
-                child: vistoria.isEmMassa
-                    ? _PreviewSelectorTile(
-                        icon: Icons.request_quote_outlined,
-                        label: 'Orçamento',
-                        value: '${vistoria.orcamentoItems.length}',
-                        isSelected:
-                            _selectedSection == _HistoryPreviewSection.orcamento,
-                        onTap: () {
-                          setState(
-                            () => _selectedSection =
-                                _HistoryPreviewSection.orcamento,
-                          );
-                        },
-                      )
-                    : _PreviewSelectorTile(
-                        icon: Icons.chat_bubble_outline,
-                        label: 'Chat',
-                        value: '${vistoria.chatCount}',
-                        isSelected:
-                            _selectedSection == _HistoryPreviewSection.chat,
-                        onTap: () {
-                          setState(
-                            () => _selectedSection = _HistoryPreviewSection.chat,
-                          );
-                        },
-                      ),
+                child: _PreviewSelectorTile(
+                  icon: Icons.chat_bubble_outline,
+                  label: 'Chat',
+                  value: '${vistoria.chatCount}',
+                  isSelected: _selectedSection == _HistoryPreviewSection.chat,
+                  onTap: () {
+                    setState(() => _selectedSection = _HistoryPreviewSection.chat);
+                  },
+                ),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -1820,21 +1853,31 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
           ),
           const SizedBox(height: 12),
           _PreviewBlock(
-            title: 'Laudo técnico',
-            icon: vistoria.hasLaudo
+            title: 'Laudo técnico (para a seguradora)',
+            icon: hasLaudo
                 ? Icons.description_outlined
                 : Icons.pending_actions_outlined,
-            child: EllipsisText(
-              laudoText.isEmpty
-                  ? 'Laudo ainda não registrado para esta vistoria.'
-                  : laudoText,
-              maxLines: 5,
-              style: const TextStyle(
-                color: Color(0xFF414755),
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                height: 1.35,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (laudoText.isNotEmpty || laudoPdfUrl.isEmpty)
+                  EllipsisText(
+                    laudoText.isNotEmpty
+                        ? laudoText
+                        : 'Laudo ainda não registrado para esta vistoria.',
+                    maxLines: 5,
+                    style: const TextStyle(
+                      color: Color(0xFF414755),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      height: 1.35,
+                    ),
+                  ),
+                if (laudoPdfUrl.isNotEmpty) ...[
+                  if (laudoText.isNotEmpty) const SizedBox(height: 10),
+                  _LaudoPdfButton(url: laudoPdfUrl),
+                ],
+              ],
             ),
           ),
           if (vistoria.observacoes.trim().isNotEmpty) ...[
@@ -2581,7 +2624,6 @@ class _HistoryAudioPreviewListState extends State<_HistoryAudioPreviewList> {
           final audios = docs.map((doc) {
             final data = doc.data();
             final audioId = stringValue(data['audioId'], fallback: doc.id);
-            final status = stringValue(data['transcriptionStatus']);
             final storagePath = stringValue(data['storagePath']);
             final downloadUrl = stringValue(
               data['mp3DownloadUrl'],
@@ -2677,7 +2719,9 @@ class _HistoryOrcamentoPreviewList extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       EllipsisText(
-                        item.peca.isEmpty ? 'Peça não informada' : item.peca,
+                        item.peca.isEmpty
+                            ? 'Peça não informada'
+                            : nomeLegivel(item.peca),
                         style: const TextStyle(
                           fontWeight: FontWeight.w800,
                           fontSize: 13,
@@ -2686,9 +2730,15 @@ class _HistoryOrcamentoPreviewList extends StatelessWidget {
                       ),
                       const SizedBox(height: 2),
                       EllipsisText(
-                        '${item.tipoIntervencao.isEmpty ? "-" : item.tipoIntervencao} • '
-                        'R\$${item.valorPeca.toStringAsFixed(2)} • '
-                        '${item.horasMaoObra}h',
+                        // Peça e mão de obra separadas, como no relatório do
+                        // cliente; sem "R$ 0,00" quando o item é só serviço.
+                        [
+                          '${item.quantidade}x ${tipoIntervencaoLabel(item.tipoIntervencao)}',
+                          if (item.valorPeca > 0)
+                            'peça ${formatCurrencyBRL(item.valorPeca * item.quantidade)}',
+                          if (item.horasMaoObra > 0)
+                            'mão de obra ${formatCurrencyBRL(item.horasMaoObra * item.valorHora)}',
+                        ].join(' • '),
                         style: const TextStyle(
                           color: Color(0xFF6B7280),
                           fontSize: 11,
@@ -2699,31 +2749,48 @@ class _HistoryOrcamentoPreviewList extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: item.isDoMecanico
-                        ? const Color(0xFFFFF3E0)
-                        : const Color(0xFFEFF7FD),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Text(
-                    item.isDoMecanico ? 'Mecânico' : 'IA',
-                    style: TextStyle(
-                      color: item.isDoMecanico
-                          ? Colors.deepOrange
-                          : const Color(0xFF0057C0),
-                      fontSize: 10,
-                      fontWeight: FontWeight.w800,
-                    ),
+                Text(
+                  formatCurrencyBRL(item.valorTotal),
+                  style: const TextStyle(
+                    color: Color(0xFF1F2937),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
               ],
             ),
           ),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: const Color(0xFFEFF7FD),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Total',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 13,
+                    color: Color(0xFF1F2937),
+                  ),
+                ),
+              ),
+              Text(
+                formatCurrencyBRL(
+                  items.fold<double>(0, (sum, item) => sum + item.valorTotal),
+                ),
+                style: const TextStyle(
+                  color: Color(0xFF0057C0),
+                  fontWeight: FontWeight.w800,
+                  fontSize: 13,
+                ),
+              ),
+            ],
+          ),
+        ),
       ],
     );
   }
@@ -2815,14 +2882,17 @@ class _HistoryAudioTileState extends State<_HistoryAudioTile> {
       await _player.stop();
       await _player.play(UrlSource(url));
     } catch (error) {
+      debugPrint('Erro ao tocar áudio do histórico: $error');
       if (!mounted) return;
       setState(() {
         _isLoading = false;
         _isPlaying = false;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Não foi possível tocar o áudio: $error'),
+        const SnackBar(
+          content: Text(
+            'Não foi possível tocar o áudio. Verifique sua conexão e tente novamente.',
+          ),
           backgroundColor: Colors.orange,
         ),
       );
@@ -3014,89 +3084,6 @@ class _PreviewBlock extends StatelessWidget {
   }
 }
 
-/// Bolha de mensagem do chat usada no preview expandido do histórico.
-class _ChatPreviewMessage extends StatelessWidget {
-  final ChatPreviewInfo message;
-
-  const _ChatPreviewMessage({required this.message});
-
-  @override
-  Widget build(BuildContext context) {
-    final isAi = message.role.toLowerCase().contains('ai') ||
-        message.role.toLowerCase().contains('assistant');
-
-    final isAudio = message.kind == ChatPreviewKind.audio;
-    final isImage = message.kind == ChatPreviewKind.image;
-    final isMedia = isAudio || isImage;
-
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 7),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: isAi ? Colors.white : const Color(0xFFEAF6FF),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.black.withOpacity(.04)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            isAi ? 'IA Argos' : 'Mecânico',
-            style: TextStyle(
-              color: isAi ? Colors.purple : const Color(0xFF0057C0),
-              fontSize: 10,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          const SizedBox(height: 4),
-          if (isMedia)
-            Row(
-              children: [
-                Container(
-                  width: 30,
-                  height: 30,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(.85),
-                    borderRadius: BorderRadius.circular(11),
-                  ),
-                  child: Icon(
-                    isAudio ? Icons.mic_none : Icons.image_outlined,
-                    size: 17,
-                    color: const Color(0xFF0057C0),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: EllipsisText(
-                    isAudio ? 'Áudio enviado' : 'Foto enviada',
-                    style: const TextStyle(
-                      color: Color(0xFF414755),
-                      fontSize: 12,
-                      fontWeight: FontWeight.w800,
-                      height: 1.3,
-                    ),
-                  ),
-                ),
-              ],
-            )
-          else
-            EllipsisText(
-              message.text,
-              maxLines: 3,
-              style: const TextStyle(
-                color: Color(0xFF414755),
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                height: 1.3,
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
 /// Esqueleto de carregamento da aba de histórico de vistorias.
 class _HistorySkeleton extends StatelessWidget {
   const _HistorySkeleton();
@@ -3207,8 +3194,8 @@ class _InspectionsHeader extends StatelessWidget {
                         onTap: onToggleSearch,
                         borderRadius: BorderRadius.circular(12),
                         child: SizedBox(
-                          width: 36,
-                          height: 36,
+                          width: 44,
+                          height: 44,
                           child: Icon(
                             isSearching ? Icons.close : Icons.search,
                             color: isSearching
@@ -3233,8 +3220,8 @@ class _InspectionsHeader extends StatelessWidget {
                         onTap: onOpenRanking,
                         borderRadius: BorderRadius.circular(12),
                         child: const SizedBox(
-                          width: 36,
-                          height: 36,
+                          width: 44,
+                          height: 44,
                           child: Icon(
                             Icons.emoji_events_outlined,
                             color: Color(0xFF0057C0),
@@ -4006,6 +3993,46 @@ class _InspectionCardContent extends StatelessWidget {
   }
 }
 
+/// Título de um grupo de documentos do resumo (seguradora ou cliente).
+class _GrupoDocumentosTitulo extends StatelessWidget {
+  final String titulo;
+  final String? descricao;
+
+  const _GrupoDocumentosTitulo({required this.titulo, this.descricao});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            titulo.toUpperCase(),
+            style: const TextStyle(
+              color: Color(0xFF0057C0),
+              fontSize: 12,
+              fontWeight: FontWeight.w900,
+              letterSpacing: .6,
+            ),
+          ),
+          if (descricao != null) ...[
+            const SizedBox(height: 2),
+            Text(
+              descricao!,
+              style: const TextStyle(
+                color: Color(0xFF6B7280),
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 /// Card com o valor e o PDF do orçamento aprovado da vistoria.
 class _OrcamentoAprovadoCard extends StatelessWidget {
   final InspectionCase inspection;
@@ -4090,6 +4117,113 @@ class _OrcamentoAprovadoCard extends StatelessWidget {
   }
 }
 
+/// Card do laudo técnico em PDF (sinistro.laudoTecnico): pronto, gerando ou erro.
+class _LaudoTecnicoCard extends StatelessWidget {
+  final InspectionCase inspection;
+
+  const _LaudoTecnicoCard({required this.inspection});
+
+  @override
+  Widget build(BuildContext context) {
+    final status = inspection.laudoTecnicoStatus;
+    final isPronto = inspection.hasLaudoTecnicoPronto;
+    final isErro = status == 'erro';
+
+    final Color color;
+    final IconData icon;
+    final String message;
+    if (isPronto) {
+      color = const Color(0xFF0057C0);
+      icon = Icons.description_outlined;
+      message = 'Análise técnica da vistoria. Vai para a seguradora.';
+    } else if (isErro) {
+      color = Colors.orange.shade800;
+      icon = Icons.error_outline;
+      message = 'Não foi possível gerar o laudo.';
+    } else {
+      color = const Color(0xFF0057C0);
+      icon = Icons.hourglass_top_outlined;
+      message = 'Laudo em geração. Ele aparecerá aqui quando estiver pronto.';
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: color.withOpacity(.06),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: color.withOpacity(.18)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 20, color: color),
+              const SizedBox(width: 8),
+              Text(
+                'Laudo técnico',
+                style: GoogleFonts.spaceGrotesk(
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            message,
+            style: const TextStyle(
+              color: Color(0xFF414755),
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              height: 1.35,
+            ),
+          ),
+          if (isPronto) ...[
+            const SizedBox(height: 12),
+            _LaudoPdfButton(url: inspection.laudoTecnicoUrl),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Botão "Ver laudo (PDF)" que abre o PDF no visualizador interno.
+class _LaudoPdfButton extends StatelessWidget {
+  final String url;
+
+  const _LaudoPdfButton({required this.url});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: double.infinity,
+      child: ElevatedButton.icon(
+        onPressed: () {
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => PdfViewerPage(url: url, title: 'Laudo técnico'),
+            ),
+          );
+        },
+        icon: const Icon(Icons.picture_as_pdf_outlined, size: 18),
+        label: const Text('Ver laudo (PDF)'),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: const Color(0xFF0057C0),
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Aviso de que a vistoria está em análise humana.
 class _HumanAnalysisNotice extends StatelessWidget {
   const _HumanAnalysisNotice();
@@ -4114,7 +4248,7 @@ class _HumanAnalysisNotice extends StatelessWidget {
           SizedBox(width: 8),
           Expanded(
             child: Text(
-              'Em analise humana. Aprovacao ou reprovacao depende da equipe responsavel.',
+              'Em análise. A aprovação depende da equipe da seguradora.',
               style: TextStyle(
                 color: Color(0xFF414755),
                 fontSize: 12,
@@ -4628,136 +4762,6 @@ class _LinkedVistoriaSummaryCard extends StatelessWidget {
                     fontWeight: FontWeight.w800,
                   ),
                 ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Seção com os dados da vistoria vinculada e atalho para abrir o resumo completo.
-class _LinkedVistoriaPage extends StatelessWidget {
-  final LinkedVistoriaInfo vistoria;
-  final VoidCallback onOpenSummary;
-
-  const _LinkedVistoriaPage({
-    required this.vistoria,
-    required this.onOpenSummary,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final statusColor = vistoria.statusColor;
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 46,
-                height: 46,
-                decoration: BoxDecoration(
-                  color: statusColor.withOpacity(.12),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Icon(
-                  vistoria.statusIcon,
-                  color: statusColor,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    EllipsisText(
-                      vistoria.idvistoria,
-                      style: GoogleFonts.spaceGrotesk(
-                        fontSize: 17,
-                        fontWeight: FontWeight.bold,
-                        color: const Color(0xFF1F2937),
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Sessão de vistoria vinculada',
-                      style: TextStyle(
-                        color: statusColor,
-                        fontWeight: FontWeight.w800,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              _StatusChip(
-                label: vistoria.statusLabel,
-                color: vistoria.statusColor,
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          Row(
-            children: [
-              Expanded(
-                child: _VistoriaMetric(
-                  icon: Icons.chat_bubble_outline,
-                  label: 'Chat',
-                  value: '${vistoria.chatCount}',
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _VistoriaMetric(
-                  icon: Icons.image_outlined,
-                  label: 'Fotos',
-                  value: '${vistoria.imageCount}',
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _VistoriaMetric(
-                  icon: Icons.mic_none,
-                  label: 'Áudios',
-                  value: '${vistoria.audioCount}',
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          _EvidencePreviewBlock(vistoria: vistoria),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Icon(
-                vistoria.hasLaudo
-                    ? Icons.description_outlined
-                    : Icons.pending_actions_outlined,
-                size: 16,
-                color: vistoria.hasLaudo ? Colors.green : Colors.orange,
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: EllipsisText(
-                  vistoria.hasLaudo
-                      ? 'Laudo registrado na vistoria'
-                      : 'Laudo ainda não registrado',
-                  style: const TextStyle(
-                    color: Color(0xFF414755),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-              TextButton.icon(
-                onPressed: onOpenSummary,
-                icon: const Icon(Icons.open_in_new, size: 17),
-                label: const Text('Abrir'),
               ),
             ],
           ),
@@ -5895,6 +5899,577 @@ class _FastPersonAvatar extends StatelessWidget {
                 );
               },
             ),
+    );
+  }
+}
+
+/// Relatório em PDF para o cliente final (veículo, danos, fotos, orçamento e
+/// próximos passos), com o visual da Argos. Gerado no servidor a cada toque,
+/// porque o orçamento pode ter mudado desde a última vez.
+class _RelatorioClienteCard extends StatefulWidget {
+  final String sinistroId;
+  final String vistoriaDocId;
+
+  const _RelatorioClienteCard({
+    required this.sinistroId,
+    required this.vistoriaDocId,
+  });
+
+  @override
+  State<_RelatorioClienteCard> createState() => _RelatorioClienteCardState();
+}
+
+class _RelatorioClienteCardState extends State<_RelatorioClienteCard> {
+  bool _gerando = false;
+
+  Future<void> _gerar() async {
+    final sinistroId = widget.sinistroId;
+    final vistoriaId = widget.vistoriaDocId;
+    final sinistroRef =
+        FirebaseFirestore.instance.collection('sinistro').doc(sinistroId);
+
+    // Antes de gerar, o mecânico escolhe as fotos e a validade.
+    final opcoes = await showModalBottomSheet<_OpcoesRelatorio>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (_) => _RelatorioOpcoesSheet(vistoriaDocId: vistoriaId),
+    );
+    if (opcoes == null || !mounted) return;
+
+    setState(() => _gerando = true);
+
+    try {
+      await FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable('gerarRelatorioCliente')
+          .call<Map<String, dynamic>>({
+        'sinistroId': sinistroId,
+        'vistoriaId': vistoriaId,
+        'fotosExcluidas': opcoes.fotosExcluidas,
+        'validadeDias': opcoes.validadeDias,
+      });
+
+      // A função marca "gerando"; espera o laudo-service trocar para
+      // "pronto" (ou "erro").
+      final snapshot = await sinistroRef
+          .snapshots()
+          .map((doc) => doc.data()?['relatorioCliente'])
+          .where((r) => r is Map && r['status'] != 'gerando')
+          .first
+          .timeout(const Duration(seconds: 90));
+
+      if (!mounted) return;
+
+      final relatorio = Map<String, dynamic>.from(snapshot as Map);
+      final url = relatorio['url']?.toString() ?? '';
+
+      if (relatorio['status'] != 'pronto' || url.isEmpty) {
+        throw Exception('relatório não gerado');
+      }
+
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => PdfViewerPage(url: url, title: 'Relatório do reparo'),
+        ),
+      );
+    } catch (e) {
+      debugPrint('Erro ao gerar relatório do cliente: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Não foi possível gerar o relatório agora. Tente de novo em instantes.',
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _gerando = false);
+    }
+  }
+
+  Widget _botao() {
+    const color = Color(0xFF0057C0);
+
+    return SizedBox(
+      width: double.infinity,
+      child: ElevatedButton.icon(
+        onPressed: _gerando ? null : _gerar,
+        icon: _gerando
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white,
+                ),
+              )
+            : const Icon(Icons.picture_as_pdf_outlined, size: 18),
+        label: Text(_gerando ? 'Gerando relatório...' : 'Gerar relatório (PDF)'),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: color,
+          foregroundColor: Colors.white,
+          disabledBackgroundColor: color.withOpacity(.6),
+          disabledForegroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const color = Color(0xFF0057C0);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: color.withOpacity(.06),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: color.withOpacity(.18)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.ios_share_rounded, size: 20, color: color),
+              const SizedBox(width: 8),
+              Text(
+                'Relatório do reparo',
+                style: GoogleFonts.spaceGrotesk(
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Veículo, danos, fotos e orçamento. Para enviar ao dono do veículo.',
+            style: TextStyle(
+              color: Color(0xFF414755),
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 12),
+          _botao(),
+        ],
+      ),
+    );
+  }
+}
+
+/// O que o mecânico escolheu antes de gerar o relatório do cliente.
+class _OpcoesRelatorio {
+  /// storagePath (ou url) das fotos que NÃO vão para o cliente.
+  final List<String> fotosExcluidas;
+  final int validadeDias;
+
+  const _OpcoesRelatorio({
+    required this.fotosExcluidas,
+    required this.validadeDias,
+  });
+}
+
+/// Antes de gerar o relatório: escolher as fotos que vão para o cliente
+/// (ex.: tirar a foto em que o mecânico aparece) e a validade do orçamento.
+/// A validade escolhida vira o padrão da oficina (gravado pela função).
+class _RelatorioOpcoesSheet extends StatefulWidget {
+  final String vistoriaDocId;
+
+  const _RelatorioOpcoesSheet({required this.vistoriaDocId});
+
+  @override
+  State<_RelatorioOpcoesSheet> createState() => _RelatorioOpcoesSheetState();
+}
+
+class _RelatorioOpcoesSheetState extends State<_RelatorioOpcoesSheet> {
+  static const _validades = [7, 15, 30];
+
+  /// O relatório leva no máximo 9 fotos (MAX_FOTOS_RELATORIO no
+  /// laudo-service); as que passarem disso ficam de fora, na ordem.
+  static const _maxFotosRelatorio = 9;
+
+  bool _carregando = true;
+  final List<MapEntry<String, String>> _fotos = []; // id -> url
+  final Set<String> _excluidas = {};
+  int _validadeDias = 15;
+
+  @override
+  void initState() {
+    super.initState();
+    _carregar();
+  }
+
+  Future<void> _carregar() async {
+    try {
+      final db = FirebaseFirestore.instance;
+      final vistoria =
+          (await db.collection('vistorias').doc(widget.vistoriaDocId).get())
+                  .data() ??
+              const <String, dynamic>{};
+
+      // Mesmo filtro do laudo-service: foto de orçamento pronto não é foto
+      // de dano e já fica de fora do relatório.
+      final idsOrcamento = {
+        for (final id in (vistoria['imagensOrcamentoIds'] as List? ?? const []))
+          id.toString(),
+      };
+      for (final img in (vistoria['images'] as List? ?? const [])) {
+        if (img is! Map) continue;
+        if (idsOrcamento.contains(img['imageId']?.toString())) continue;
+        final url = img['url']?.toString() ?? '';
+        if (url.isEmpty) continue;
+        final storagePath = img['storagePath']?.toString() ?? '';
+        _fotos.add(MapEntry(storagePath.isNotEmpty ? storagePath : url, url));
+      }
+
+      final credenciadoId = vistoria['credenciadoId']?.toString() ?? '';
+      if (credenciadoId.isNotEmpty) {
+        final oficina =
+            (await db.collection('credenciados').doc(credenciadoId).get())
+                .data();
+        final dias = oficina?['validadeOrcamentoDias'];
+        if (dias is num && dias >= 1 && dias <= 180) {
+          _validadeDias = dias.round();
+        }
+      }
+    } catch (e) {
+      debugPrint('Erro ao carregar opções do relatório: $e');
+    }
+
+    if (mounted) setState(() => _carregando = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const color = Color(0xFF0057C0);
+    final validades = {..._validades, _validadeDias}.toList()..sort();
+    final incluidas = _fotos.length - _excluidas.length;
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * .85,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFD1D5DB),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                'Relatório para o cliente',
+                style: GoogleFonts.spaceGrotesk(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: const Color(0xFF1F2937),
+                ),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'Escolha a validade do orçamento e as fotos que vão para o cliente.',
+                style: TextStyle(
+                  color: Color(0xFF6B7280),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 14),
+              if (_carregando)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 32),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Validade do orçamento',
+                          style: TextStyle(
+                            color: Color(0xFF414755),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          children: [
+                            for (final dias in validades)
+                              ChoiceChip(
+                                label: Text('$dias dias'),
+                                selected: _validadeDias == dias,
+                                onSelected: (_) =>
+                                    setState(() => _validadeDias = dias),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          _fotos.isEmpty
+                              ? 'Esta vistoria não tem fotos.'
+                              : 'Fotos ($incluidas de ${_fotos.length}) · toque para tirar ou incluir',
+                          style: const TextStyle(
+                            color: Color(0xFF414755),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        if (_fotos.length > _maxFotosRelatorio) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            incluidas > _maxFotosRelatorio
+                                ? 'O relatório leva até $_maxFotosRelatorio fotos: tire mais ${incluidas - _maxFotosRelatorio} ou só as $_maxFotosRelatorio primeiras entram.'
+                                : 'O relatório leva até $_maxFotosRelatorio fotos.',
+                            style: TextStyle(
+                              color: incluidas > _maxFotosRelatorio
+                                  ? const Color(0xFFB45309)
+                                  : const Color(0xFF6B7280),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 8),
+                        GridView.count(
+                          crossAxisCount: 3,
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          mainAxisSpacing: 8,
+                          crossAxisSpacing: 8,
+                          children: [
+                            for (final foto in _fotos)
+                              _FotoSelecionavel(
+                                url: foto.value,
+                                incluida: !_excluidas.contains(foto.key),
+                                onTap: () => setState(() {
+                                  if (!_excluidas.remove(foto.key)) {
+                                    _excluidas.add(foto.key);
+                                  }
+                                }),
+                              ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _carregando
+                      ? null
+                      : () => Navigator.of(context).pop(
+                            _OpcoesRelatorio(
+                              fotosExcluidas: _excluidas.toList(),
+                              validadeDias: _validadeDias,
+                            ),
+                          ),
+                  icon: const Icon(Icons.picture_as_pdf_outlined, size: 18),
+                  label: const Text('Gerar relatório (PDF)'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: color,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Miniatura de foto com marca de incluída/excluída do relatório.
+class _FotoSelecionavel extends StatelessWidget {
+  final String url;
+  final bool incluida;
+  final VoidCallback onTap;
+
+  const _FotoSelecionavel({
+    required this.url,
+    required this.incluida,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      selected: incluida,
+      label: incluida ? 'Foto incluída no relatório' : 'Foto fora do relatório',
+      child: GestureDetector(
+        onTap: onTap,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.network(
+                url,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) =>
+                    const ColoredBox(color: Color(0xFFE5E7EB)),
+              ),
+              if (!incluida) Container(color: Colors.white.withOpacity(.65)),
+              Positioned(
+                top: 6,
+                right: 6,
+                child: Icon(
+                  incluida ? Icons.check_circle : Icons.remove_circle,
+                  color: incluida
+                      ? const Color(0xFF0057C0)
+                      : const Color(0xFF9CA3AF),
+                  size: 22,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Card do orçamento na aba Vistorias, separado do "Resumo da vistoria":
+/// itens recolhíveis e total. Os PDFs ficam na aba Resumo.
+class _HistoryOrcamentoCard extends StatefulWidget {
+  final LinkedVistoriaInfo vistoria;
+
+  const _HistoryOrcamentoCard({required this.vistoria});
+
+  @override
+  State<_HistoryOrcamentoCard> createState() => _HistoryOrcamentoCardState();
+}
+
+class _HistoryOrcamentoCardState extends State<_HistoryOrcamentoCard> {
+  bool _aberto = false;
+
+  @override
+  Widget build(BuildContext context) {
+    const color = Color(0xFF0057C0);
+    final itens = widget.vistoria.orcamentoItems;
+    final total = itens.fold<double>(0, (soma, item) => soma + item.valorTotal);
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: color.withOpacity(.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: itens.isEmpty ? null : () => setState(() => _aberto = !_aberto),
+            borderRadius: BorderRadius.circular(12),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  const Icon(Icons.request_quote_outlined, color: color, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Orçamento',
+                          style: GoogleFonts.spaceGrotesk(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: color,
+                          ),
+                        ),
+                        Text(
+                          itens.isEmpty
+                              ? 'Nenhum item registrado ainda.'
+                              : '${itens.length} ite${itens.length > 1 ? 'ns' : 'm'} · ${formatCurrencyBRL(total)}',
+                          style: const TextStyle(
+                            color: Color(0xFF6B7280),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (itens.isNotEmpty)
+                    Icon(
+                      _aberto ? Icons.expand_less : Icons.expand_more,
+                      color: color,
+                      semanticLabel: _aberto ? 'Recolher itens' : 'Ver itens',
+                    ),
+                ],
+              ),
+            ),
+          ),
+          if (_aberto) ...[
+            const SizedBox(height: 10),
+            _HistoryOrcamentoPreviewList(vistoria: widget.vistoria),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Rodapé fixo do resumo do sinistro, com a ação principal.
+class _SummaryActionBar extends StatelessWidget {
+  final Widget child;
+
+  const _SummaryActionBar({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(.06),
+              blurRadius: 18,
+              offset: const Offset(0, -6),
+            ),
+          ],
+        ),
+        child: SizedBox(height: 54, width: double.infinity, child: child),
+      ),
     );
   }
 }
