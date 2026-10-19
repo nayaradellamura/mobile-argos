@@ -18,7 +18,10 @@ const int kBulkMaxPhotos = 10;
 const int kBulkMaxAudios = 10;
 
 // Chave fixa do item de texto livre no rascunho (só existe um por vez).
-const String kBulkTextRascunhoKey = '__texto__';
+// Nunca pode começar E terminar com "__": o Firestore recusa esse padrão
+// de nome de campo (reservado internamente) em caminhos tipo
+// 'envioEmMassaRascunho.<chave>.status' usados por markEnvioEmMassaRascunhoItemEnviado.
+const String kBulkTextRascunhoKey = 'bulk_texto_livre';
 
 /// Explica por que o microfone é necessário quando a permissão foi negada e
 /// oferece abrir as configurações do aparelho. Usado aqui e no chat guiado.
