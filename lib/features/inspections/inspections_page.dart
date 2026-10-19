@@ -1,5 +1,6 @@
 import 'dart:async';
 import '../orcamento/orcamento_calculo.dart';
+import '../orcamento/orcamento_table_page.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui';
@@ -1383,6 +1384,36 @@ class _InspectionHistoryTabState extends State<_InspectionHistoryTab> {
         .snapshots();
   }
 
+  /// Abre a tabela de orçamento (pré-preenchida com o rascunho do agente ou
+  /// o que já foi enviado) e salva o resultado ao voltar.
+  Future<void> _abrirOrcamento(LinkedVistoriaInfo vistoria) async {
+    final rascunho = await VistoriaChatSessionService.instance
+        .loadOrcamentoRascunho(vistoriaDocId: vistoria.docId);
+    if (!mounted) return;
+
+    final resultado = await Navigator.of(context).push<List<Map<String, dynamic>>>(
+      MaterialPageRoute(
+        builder: (_) => OrcamentoTablePage(
+          itensIniciais: rascunho.map(OrcamentoItemDraft.fromMap).toList(),
+          modeloVeiculo: vistoria.veiculo,
+          vistoriaDocId: vistoria.docId,
+        ),
+      ),
+    );
+
+    if (resultado == null || !mounted) return;
+
+    await VistoriaChatSessionService.instance.submitOrcamento(
+      vistoriaDocId: vistoria.docId,
+      itens: resultado,
+    );
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Orçamento salvo.')),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
@@ -1476,6 +1507,16 @@ class _InspectionHistoryTabState extends State<_InspectionHistoryTab> {
                                       const SizedBox(height: 10),
                                       _HistoryOrcamentoCard(vistoria: vistoria),
                                     ],
+                                    const SizedBox(height: 10),
+                                    OutlinedButton.icon(
+                                      onPressed: () => _abrirOrcamento(vistoria),
+                                      icon: const Icon(Icons.request_quote_outlined),
+                                      label: Text(
+                                        vistoria.orcamentoItems.isEmpty
+                                            ? 'Montar orçamento'
+                                            : 'Editar orçamento',
+                                      ),
+                                    ),
                                   ],
                                 ),
                               )
