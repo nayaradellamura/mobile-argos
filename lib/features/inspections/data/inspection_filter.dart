@@ -24,7 +24,7 @@ extension InspectionFilterX on InspectionFilter {
       case InspectionFilter.inProgress:
         return 'Andamento';
       case InspectionFilter.aiAnalysis:
-        return 'Analise';
+        return 'Análise';
       case InspectionFilter.revision:
         return 'Revisão';
       case InspectionFilter.cancelled:
@@ -43,7 +43,7 @@ extension InspectionFilterX on InspectionFilter {
       case InspectionFilter.inProgress:
         return 'Aguardando vistoria';
       case InspectionFilter.aiAnalysis:
-        return 'Analise humana';
+        return 'Análise da seguradora';
       case InspectionFilter.revision:
         return 'Retificação/revisão';
       case InspectionFilter.cancelled:
