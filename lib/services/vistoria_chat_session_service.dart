@@ -1014,26 +1014,40 @@ class VistoriaChatSessionService {
     }, SetOptions(merge: true));
   }
 
-  // Adiciona um item de orçamento digitado pelo mecânico (envio em massa).
-  Future<void> appendOrcamentoMecanicoItem({
+  // Grava os itens de orçamento do envio em massa em `orcamentoRascunho`
+  // (origem 'mecanico'), substituindo por `id` os que já existirem. Não usa
+  // arrayUnion: ele descartava itens idênticos (duas peças iguais com o
+  // mesmo valor viravam uma), e por id o reenvio após falha é idempotente.
+  Future<void> salvarOrcamentoMecanicoItens({
     required String vistoriaDocId,
-    required String peca,
-    required String tipoIntervencao,
-    required double valorPeca,
-    required double horasMaoObra,
+    required List<Map<String, dynamic>> itens,
   }) async {
-    await _vistorias.doc(vistoriaDocId).set({
-      'orcamentoRascunho': FieldValue.arrayUnion([
-        {
-          'peca': peca.trim(),
-          'tipoIntervencao': tipoIntervencao.trim(),
-          'valorPeca': valorPeca,
-          'horasMaoObra': horasMaoObra,
-          'origem': 'mecanico',
-        }
-      ]),
-      'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    if (itens.isEmpty) return;
+
+    final ref = _vistorias.doc(vistoriaDocId);
+    final novos = itens
+        .map((item) => <String, dynamic>{
+              ...item,
+              'origem': 'mecanico',
+            }..remove('tipo')..remove('status'))
+        .toList();
+    final novosIds = novos.map((item) => item['id']).toSet();
+
+    await FirebaseFirestore.instance.runTransaction((transaction) async {
+      final snapshot = await transaction.get(ref);
+      final atual = snapshot.data()?['orcamentoRascunho'];
+
+      final mantidos = (atual is List ? atual : const [])
+          .where((item) => !(item is Map &&
+              item['origem'] == 'mecanico' &&
+              novosIds.contains(item['id'])))
+          .toList();
+
+      transaction.set(ref, {
+        'orcamentoRascunho': [...mantidos, ...novos],
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    });
   }
 
   // Grava/atualiza um item do rascunho de envio em massa, por localId.

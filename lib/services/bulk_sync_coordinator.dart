@@ -10,6 +10,22 @@ import 'argos_connectivity_service.dart';
 import 'user_audio_storage_service.dart';
 import 'vistoria_chat_session_service.dart';
 
+// Lançada quando alguma foto/áudio do pacote em massa não subiu; o rascunho
+// fica salvo e a vistoria não é finalizada, pra tentar de novo depois.
+class BulkUploadIncompleteException implements Exception {
+  final int failedPhotos;
+  final int failedAudios;
+
+  const BulkUploadIncompleteException({
+    required this.failedPhotos,
+    required this.failedAudios,
+  });
+
+  @override
+  String toString() => 'BulkUploadIncompleteException('
+      'fotos: $failedPhotos, áudios: $failedAudios)';
+}
+
 // Coordenador único (singleton) do upload e reconciliação de vistorias em
 // massa pendentes, disparado tanto por toque manual quanto por reconexão.
 class BulkSyncCoordinator {
@@ -189,7 +205,14 @@ class BulkSyncCoordinator {
 
       for (final doc in snapshot.docs) {
         final submission = _trySubmitIfPending(doc);
-        if (submission != null) unawaited(submission);
+        if (submission == null) continue;
+
+        // Falha aqui só registra; o rascunho continua pendente pra próxima.
+        unawaited(
+          submission.catchError((e) {
+            debugPrint('Erro ao sincronizar envio em massa pendente: $e');
+          }),
+        );
       }
     } catch (e) {
       debugPrint('Erro ao varrer envios em massa pendentes: $e');
@@ -215,6 +238,9 @@ class BulkSyncCoordinator {
     void Function(String status)? onStatus,
   }) async {
     if (!_tryMarkProcessing(vistoriaDocId)) return;
+
+    var failedPhotos = 0;
+    var failedAudios = 0;
 
     try {
       onStatus?.call('Enviando fotos...');
@@ -256,6 +282,7 @@ class BulkSyncCoordinator {
             localId: photo.localId,
           );
         } catch (e) {
+          failedPhotos++;
           debugPrint('Erro ao subir foto do envio em massa: $e');
         }
       }
@@ -287,6 +314,7 @@ class BulkSyncCoordinator {
               localId: audio.localId,
             );
           } catch (e) {
+            failedAudios++;
             debugPrint('Erro ao subir/transcrever áudio do envio em massa: $e');
           }
         }
@@ -309,23 +337,31 @@ class BulkSyncCoordinator {
       }
 
       if (result.orcamentoItems.isNotEmpty) {
-        onStatus?.call('Calculando o orçamento...');
+        onStatus?.call('Registrando o orçamento...');
+
+        await VistoriaChatSessionService.instance.salvarOrcamentoMecanicoItens(
+          vistoriaDocId: vistoriaDocId,
+          itens: result.orcamentoItems
+              .map((item) => item.toRascunhoItem())
+              .toList(),
+        );
 
         for (final item in result.orcamentoItems) {
-          await VistoriaChatSessionService.instance.appendOrcamentoMecanicoItem(
-            vistoriaDocId: vistoriaDocId,
-            peca: item.peca,
-            tipoIntervencao: item.tipoIntervencao,
-            valorPeca: item.valorPeca,
-            horasMaoObra: item.horasMaoObra,
-          );
-
           await VistoriaChatSessionService.instance
               .markEnvioEmMassaRascunhoItemEnviado(
             vistoriaDocId: vistoriaDocId,
             localId: item.localId,
           );
         }
+      }
+
+      // Alguma evidência não subiu: mantém o rascunho e não finaliza. Os
+      // itens já marcados 'enviado' não são reenviados na próxima tentativa.
+      if (failedPhotos > 0 || failedAudios > 0) {
+        throw BulkUploadIncompleteException(
+          failedPhotos: failedPhotos,
+          failedAudios: failedAudios,
+        );
       }
 
       onStatus?.call('Finalizando...');
