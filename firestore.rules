@@ -1,0 +1,572 @@
+rules_version = '2';
+
+// =============================================================================
+// Regras de segurança do Firestore — projeto fho-argos (Argos TCC)
+// =============================================================================
+//
+// Quem acessa o banco pelo SDK CLIENTE (e portanto passa por estas regras):
+//   - App mobile (Flutter): mecânicos das oficinas credenciadas.
+//   - Painel web (Next.js): analistas — só leituras + aprovação de usuários
+//     (o resto do painel usa as rotas /api com Admin SDK).
+//
+// Quem usa Admin SDK / credencial de servidor e IGNORA estas regras:
+//   - functions/index.js (Cloud Functions), services/laudo-service,
+//     adk_agents e as rotas /api do painel. Tudo que esses componentes
+//     gravam (audios, laudo, status FINALIZADA/REJEITADA, etc.) continua
+//     funcionando independente do que está aqui.
+//
+// Papéis:
+//   - Usuário autenticado: tem conta no Firebase Auth.
+//   - Usuário ATIVO: users/{email}.status == 'ativo' (aprovado pelo admin).
+//   - Mecânico do credenciado X: ativo e (users.credenciadoId == X ou uid em
+//     credenciados/X.funcionariosUids) — mesma regra do
+//     assertCanAccessVistoria das Cloud Functions.
+//   - Analista: custom claim `analista` ou `admin` == true, OU documento
+//     admins/{uid} existente (criado só pelo console/Admin SDK).
+//     Ver docs/REGRAS_FIREBASE.md.
+//
+// Os documentos de users são indexados pelo e-mail em minúsculas
+// (users/{email}); existe um fallback legado users/{uid}.
+// =============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------------------
+    // Funções auxiliares
+    // ---------------------------------------------------------------------
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // E-mail do token normalizado (mesma normalização que o app usa como
+    // id do doc em users).
+    function hasEmail() {
+      return request.auth.token.get('email', '') is string
+        && request.auth.token.get('email', '') != '';
+    }
+
+    function authEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    // users/{email} é o caminho padrão; cai para o doc legado users/{uid}
+    // quando não existe doc por e-mail (mesmo fallback do loadCallerUserDoc
+    // das Cloud Functions e do session_context_service.dart do app).
+    function userPath() {
+      return (hasEmail() && exists(/databases/$(database)/documents/users/$(authEmail())))
+        ? /databases/$(database)/documents/users/$(authEmail())
+        : /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    // Doc do usuário logado em users/{email} ou users/{uid} legado. Só
+    // chamar com signedIn().
+    function userData() {
+      return get(userPath()).data;
+    }
+
+    function isActive() {
+      return signedIn()
+        && exists(userPath())
+        && userData().get('status', '') == 'ativo';
+    }
+
+    // Analista/admin do painel web. Ver docs/REGRAS_FIREBASE.md (setup).
+    function isAnalyst() {
+      return signedIn() && (
+        request.auth.token.get('analista', false) == true
+        || request.auth.token.get('admin', false) == true
+        || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // O usuário ativo pertence ao credenciado `credId`? Primeiro olha
+    // users.credenciadoId (sem leitura extra além do doc do usuário) e só
+    // então cai pro credenciados/{id}.funcionariosUids.
+    function isMemberOf(credId) {
+      return credId is string && credId != '' && (
+        userData().get('credenciadoId', '') == credId
+        || request.auth.uid in get(/databases/$(database)/documents/credenciados/$(credId)).data.get('funcionariosUids', [])
+      );
+    }
+
+    function sinistroCredId(sinistroId) {
+      return get(/databases/$(database)/documents/sinistro/$(sinistroId)).data.get('credenciadoId', '');
+    }
+
+    // Mecânico ativo pode ler a vistoria: é o inspetor dela, é da oficina
+    // gravada na vistoria, ou é da oficina do sinistro da vistoria (as telas
+    // de histórico consultam vistorias só por `sinistroId`).
+    function canReadVistoria(data) {
+      return isActive() && (
+        data.get('inspectorId', '') == request.auth.uid
+        || isMemberOf(data.get('credenciadoId', ''))
+        || (data.get('sinistroId', '') is string
+            && data.get('sinistroId', '') != ''
+            && isMemberOf(sinistroCredId(data.get('sinistroId', ''))))
+      );
+    }
+
+    // Mecânico ativo pode ESCREVER na vistoria: inspetor ou oficina dela.
+    function canWriteVistoria(data) {
+      return isActive() && (
+        data.get('inspectorId', '') == request.auth.uid
+        || isMemberOf(data.get('credenciadoId', ''))
+      );
+    }
+
+    function changed() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // O campo `key` não mudou, ou mudou para `value`.
+    function unchangedOrEquals(key, value) {
+      return !(key in changed()) || request.resource.data.get(key, null) == value;
+    }
+
+    // ---------------------------------------------------------------------
+    // users/{userKey}  (userKey = e-mail em minúsculas; legado: uid)
+    // ---------------------------------------------------------------------
+    match /users/{userKey} {
+
+      function isOwnDoc() {
+        return signedIn() && (
+          (hasEmail() && userKey == authEmail())
+          || userKey == request.auth.uid
+        );
+      }
+
+      // Campos que o próprio usuário pode gravar no login e no cadastro
+      // (login_page.dart / profile_page.dart). NÃO inclui status, nem
+      // aprovadoEm/aprovadoPor/bloqueado*, nem qualquer campo de papel.
+      function selfWritableKeys() {
+        return [
+          'uid', 'authUid', 'email', 'emailKey',
+          'nome', 'displayName', 'photoURL', 'foto',
+          'telefone', 'empresa', 'departamento',
+          'provider', 'tipoAcesso', 'providers', 'authProviderIds',
+          'origem', 'origens',
+          'criadoEm', 'atualizadoEm', 'ultimoLoginEm', 'ultimoProvider', 'ultimoAcesso',
+          'documento', 'cpf', 'tipoDocumento', 'cidade', 'uf',
+          'cadastroCompleto', 'primeiroAcessoConcluido', 'cadastroFinalizadoEm',
+          'credenciadoId', 'credenciadoNome'
+        ];
+      }
+
+      // uid/authUid/email gravados pelo próprio usuário têm que ser os dele.
+      function identityFieldsOk(data) {
+        return data.get('uid', request.auth.uid) == request.auth.uid
+          && data.get('authUid', request.auth.uid) == request.auth.uid
+          && data.get('email', userKey) == userKey
+          && data.get('emailKey', userKey) == userKey;
+      }
+
+      // Na atualização, só valida os campos de identidade que mudaram (docs
+      // antigos podem ter uid vazio até o próximo login).
+      function identityChangesOk() {
+        return unchangedOrEquals('uid', request.auth.uid)
+          && unchangedOrEquals('authUid', request.auth.uid)
+          && unchangedOrEquals('email', userKey)
+          && unchangedOrEquals('emailKey', userKey);
+      }
+
+      // Vínculo com a oficina (onboarding em profile_page.dart): só pode ser
+      // definido UMA vez — enquanto o doc ainda não tem credenciadoId — e
+      // tem que apontar pra um credenciado existente. Depois disso
+      // credenciadoId/credenciadoNome ficam travados para o próprio usuário.
+      function credenciadoLinkOk() {
+        return (!('credenciadoId' in changed()) && !('credenciadoNome' in changed()))
+          || (
+            resource.data.get('credenciadoId', '') == ''
+            && request.resource.data.get('credenciadoId', '') is string
+            && request.resource.data.get('credenciadoId', '') != ''
+            && exists(/databases/$(database)/documents/credenciados/$(request.resource.data.credenciadoId))
+          );
+      }
+
+      // Leitura:
+      //  - o próprio doc (por e-mail ou uid legado) e queries do tipo
+      //    where('uid'|'authUid' == meu uid) / where('email' == meu e-mail)
+      //    (main.dart, sinistro_presence_service.dart, header do painel);
+      //  - analistas leem tudo (tabela de Parceiros do painel);
+      //  - EXCEÇÃO sem login (fluxos de "primeiro acesso" e "senha errada"
+      //    do login_page.dart, que consultam users/{email} antes de logar):
+      //    só `get` de doc INEXISTENTE ou de solicitação 'pendente' criada
+      //    pelo primeiro acesso. Docs ativos/bloqueados não são expostos.
+      allow get: if isOwnDoc()
+        || isAnalyst()
+        || (signedIn() && resource != null && (
+              resource.data.get('uid', '') == request.auth.uid
+              || resource.data.get('authUid', '') == request.auth.uid))
+        || (request.auth == null && (
+              resource == null
+              || (resource.data.get('status', '') == 'pendente'
+                  && resource.data.get('origem', '') == 'primeiro_acesso')));
+
+      allow list: if isAnalyst()
+        || (signedIn() && (
+              resource.data.get('uid', '') == request.auth.uid
+              || resource.data.get('authUid', '') == request.auth.uid
+              || (hasEmail()
+                  && resource.data.get('email', '') == authEmail())));
+
+      // Criação:
+      //  (a) logado, criando o PRÓPRIO doc (login_page.dart) — sempre com
+      //      status 'pendente' e sem vínculo de oficina;
+      //  (b) SEM login, fluxo "primeiro acesso" (login_page.dart): só uma
+      //      solicitação pendente vazia (uid/authUid '') e chave com cara de
+      //      e-mail. Ver riscos residuais em docs/REGRAS_FIREBASE.md.
+      allow create: if (
+          signedIn()
+          && hasEmail()
+          && userKey == authEmail()
+          && request.resource.data.get('status', '') == 'pendente'
+          && request.resource.data.keys().hasOnly(selfWritableKeys().concat(['status']))
+          && !('credenciadoId' in request.resource.data)
+          && identityFieldsOk(request.resource.data)
+        ) || (
+          request.auth == null
+          && userKey.matches('^[^@/\\s]+@[^@/\\s]+$')
+          && request.resource.data.get('status', '') == 'pendente'
+          && request.resource.data.get('origem', '') == 'primeiro_acesso'
+          && request.resource.data.get('uid', '') == ''
+          && request.resource.data.get('authUid', '') == ''
+          && request.resource.data.get('email', '') == userKey
+          && request.resource.data.keys().hasOnly(selfWritableKeys().concat(['status']))
+          && !('credenciadoId' in request.resource.data)
+        );
+
+      // Atualização:
+      //  (a) o próprio usuário: só campos de perfil/login; NUNCA status nem
+      //      campos de aprovação; credenciadoId só uma vez (onboarding);
+      //  (b) analista (painel, parceiros-table.tsx): só status e campos de
+      //      aprovação/bloqueio.
+      allow update: if (
+          isOwnDoc()
+          && changed().hasOnly(selfWritableKeys())
+          && identityChangesOk()
+          && credenciadoLinkOk()
+        ) || (
+          isAnalyst()
+          && changed().hasOnly(['status', 'atualizadoEm', 'aprovadoEm', 'aprovadoPor', 'bloqueadoEm', 'bloqueadoPor'])
+          && request.resource.data.get('status', '') in ['pendente', 'ativo', 'bloqueado']
+        );
+
+      allow delete: if false;
+    }
+
+    // ---------------------------------------------------------------------
+    // admins/{uid} — marcador de analista/admin do painel. Só leitura do
+    // próprio doc; criação apenas pelo console/Admin SDK.
+    // ---------------------------------------------------------------------
+    match /admins/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list, write: if false;
+    }
+
+    // ---------------------------------------------------------------------
+    // credenciados/{credId} — oficinas
+    // ---------------------------------------------------------------------
+    match /credenciados/{credId} {
+      // Qualquer autenticado lista (o onboarding em profile_page.dart
+      // mostra a lista de oficinas, ordenada por `name`).
+      allow read: if signedIn();
+
+      // Escritas de mecânicos (create/delete só pelo painel via Admin SDK):
+      //  (a) funcionário ativo da oficina: só a configuração de valor/hora
+      //      (valores_hora_service.dart);
+      //  (b) onboarding (profile_page.dart, mesmo batch que grava
+      //      users.credenciadoId): adicionar SÓ o próprio uid em
+      //      funcionariosUids, e só se o users/{email} — depois do batch —
+      //      apontar para ESTA oficina;
+      //  (c) re-salvar o perfil quando o uid já está na lista (o arrayUnion
+      //      não muda nada e só `atualizadoEm` é alterado).
+      allow update: if isActive() && (
+          (
+            isMemberOf(credId)
+            && changed().hasOnly(['valoresHoraMaoObra', 'valoresHoraAtualizadoEm'])
+            && request.resource.data.get('valoresHoraMaoObra', {}) is map
+          ) || (
+            changed().hasOnly(['funcionariosUids', 'atualizadoEm'])
+            && getAfter(userPath()).data.get('credenciadoId', '') == credId
+            && request.resource.data.get('funcionariosUids', []) is list
+            && !(request.auth.uid in resource.data.get('funcionariosUids', []))
+            && request.resource.data.funcionariosUids.hasAll(resource.data.get('funcionariosUids', []))
+            && request.resource.data.funcionariosUids.hasAll([request.auth.uid])
+            && request.resource.data.funcionariosUids.size() == resource.data.get('funcionariosUids', []).size() + 1
+          ) || (
+            changed().hasOnly(['atualizadoEm'])
+            && isMemberOf(credId)
+          )
+        );
+
+      allow create, delete: if false;
+    }
+
+    // ---------------------------------------------------------------------
+    // sinistro/{sinistroId}
+    // ---------------------------------------------------------------------
+    match /sinistro/{sinistroId} {
+
+      // Campos que o app grava no sinistro (vistoria_chat_session_service,
+      // sinistro_presence_service, profile_page). Nada de credenciadoId,
+      // stage, laudoTecnico, orcamentoAprovado, prioridade etc.
+      function mechanicSinistroKeys() {
+        return [
+          // espelho da vistoria atual
+          'vistoriaAtualId', 'vistoriaAtualStatus', 'vistoriaAtualTipo',
+          'vistoriaAtualOrigemId', 'retificacaoAtualId', 'ultimaVistoriaAt',
+          // presença (resumo denormalizado dos viewers)
+          'activeViewers', 'activeViewersCount', 'activeViewersUpdatedAt',
+          // check-in / atribuição (claimSinistroForCurrentUser)
+          'assignedToUid', 'assignedToName', 'assignedToEmail', 'assignedToPhotoURL',
+          'assignedAt', 'assignedByAction', 'isAssigned', 'assignedProfileUpdatedAt',
+          'status', 'chatEnabled', 'chatStatus', 'checkInAt', 'statusUpdatedAt'
+        ];
+      }
+
+      // Campos que só podem mudar quando o sinistro fica (ou já está)
+      // atribuído ao próprio mecânico.
+      function assignmentKeys() {
+        return [
+          'assignedToName', 'assignedToEmail', 'assignedToPhotoURL',
+          'assignedAt', 'assignedByAction', 'isAssigned', 'assignedProfileUpdatedAt',
+          'status', 'chatEnabled', 'chatStatus', 'checkInAt', 'statusUpdatedAt'
+        ];
+      }
+
+      function assignmentOk() {
+        return (
+            // assumir: só se estava livre ou já era meu, e sempre para mim
+            !('assignedToUid' in changed())
+            || (resource.data.get('assignedToUid', '') in ['', null, request.auth.uid]
+                && request.resource.data.assignedToUid == request.auth.uid)
+          ) && (
+            // dados da atribuição: só no sinistro atribuído a mim
+            !changed().hasAny(assignmentKeys())
+            || request.resource.data.get('assignedToUid', '') == request.auth.uid
+          )
+          // o único status de sinistro que o app grava é o do check-in
+          && unchangedOrEquals('status', 'EM_ANDAMENTO')
+          && (!('isAssigned' in changed()) || request.resource.data.isAssigned == true)
+          // status espelhado da vistoria: só os que o app produz
+          && (!('vistoriaAtualStatus' in changed())
+              || request.resource.data.vistoriaAtualStatus in
+                   ['EM_ANDAMENTO', 'EM_ANALISE_OPERACIONAL', 'EXPIRADA', 'ABANDONADA']);
+      }
+
+      // Leitura: analista; mecânico ativo da oficina do sinistro (queries
+      // where credenciadoId == minha oficina); ou o mecânico a quem o
+      // sinistro está atribuído (query where assignedToUid == meu uid, usada
+      // pelo profile_page pra replicar nome/foto).
+      allow get: if isAnalyst()
+        || (isActive() && resource == null)
+        || (isActive() && (
+              isMemberOf(resource.data.get('credenciadoId', ''))
+              || resource.data.get('assignedToUid', '') == request.auth.uid));
+
+      allow list: if isAnalyst()
+        || (isActive() && (
+              isMemberOf(resource.data.get('credenciadoId', ''))
+              || resource.data.get('assignedToUid', '') == request.auth.uid));
+
+      // Atualização por mecânico: só os campos que o app grava, sem trocar
+      // a oficina do sinistro.
+      allow update: if isActive()
+        && isMemberOf(resource.data.get('credenciadoId', ''))
+        && changed().hasOnly(mechanicSinistroKeys())
+        && assignmentOk();
+
+      // Criar/excluir sinistro: só o painel (Admin SDK).
+      allow create, delete: if false;
+
+      // Presença em tempo real (sinistro_presence_service.dart).
+      // Antes: qualquer autenticado lia/escrevia. Agora: só quem enxerga o
+      // sinistro lê, e cada um só escreve/apaga o PRÓPRIO doc de viewer.
+      match /viewers/{viewerUid} {
+        function canSeeParent() {
+          return isActive() && (
+            isMemberOf(sinistroCredId(sinistroId))
+            || get(/databases/$(database)/documents/sinistro/$(sinistroId)).data.get('assignedToUid', '') == request.auth.uid
+          );
+        }
+
+        allow read: if isAnalyst() || canSeeParent();
+
+        allow create, update: if viewerUid == request.auth.uid
+          && canSeeParent()
+          && request.resource.data.get('uid', viewerUid) == viewerUid;
+
+        allow delete: if viewerUid == request.auth.uid && canSeeParent();
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // vistorias/{vistoriaId}
+    // ---------------------------------------------------------------------
+    match /vistorias/{vistoriaId} {
+
+      // Campos que o mecânico pode alterar numa vistoria existente
+      // (vistoria_chat_session_service.dart, user_audio_storage_service.dart).
+      // Ficam de fora (só backend/painel): idvistoria, sinistroId,
+      // credenciadoId, inspectorId, tipoVistoria, vistoriaOrigemId, laudo,
+      // laudo_analitico, pdfLaudoUrl, analisadoPorUid, finalizadaEm,
+      // motivoCancelamento, audios (lista) etc.
+      function mechanicVistoriaKeys() {
+        return [
+          'status', 'updatedAt', 'expiredAt', 'abandonedAt', 'submittedAt',
+          'chatmessages', 'agentLastTurnAt', 'agentBusinessExpiresAt',
+          'coletaModo',
+          'orcamentoRascunho', 'orcamentoItensFinais',
+          'envioEmMassaRascunho', 'envioEmMassaConfirmadoOffline',
+          'images', 'lastAudioNumber',
+          // marcação da vistoria ORIGINAL ao iniciar uma retificação
+          'retificacaoAtualId', 'ajustesNecessarios', 'motivoRejeicao', 'rejeitadaEm'
+        ];
+      }
+
+      function retificacaoKeys() {
+        return ['retificacaoAtualId', 'ajustesNecessarios', 'motivoRejeicao', 'rejeitadaEm'];
+      }
+
+      // Transições de status que o app faz. FINALIZADA/REJEITADA/CANCELADA
+      // são do painel/backend (Admin SDK).
+      function statusTransitionOk() {
+        return !('status' in changed())
+          || (resource.data.get('status', '') == 'EM_ANDAMENTO'
+              && request.resource.data.status in ['EXPIRADA', 'ABANDONADA', 'EM_ANALISE_OPERACIONAL'])
+          || (resource.data.get('status', '') == 'EXPIRADA'
+              && request.resource.data.status == 'ABANDONADA');
+      }
+
+      // chatmessages e images são só-acréscimo (arrayUnion): o mecânico não
+      // reescreve nem apaga histórico.
+      function appendOnly(key) {
+        return !(key in changed())
+          || (request.resource.data[key] is list
+              && request.resource.data[key].hasAll(resource.data.get(key, [])));
+      }
+
+      // Campos de análise que nunca podem nascer na criação feita pelo app.
+      function analystOnlyKeys() {
+        return ['analisadoPorUid', 'finalizadaEm', 'motivoCancelamento', 'cancelledAt',
+                'retificacaoAtualId', 'rejeitadaEm', 'motivoRejeicao'];
+      }
+
+      function reconcileDeleteOk() {
+        let sid = resource.data.get('sinistroId', '');
+        let realId = getAfter(/databases/$(database)/documents/sinistro/$(sid)).data.get('vistoriaAtualId', '');
+        let real = getAfter(/databases/$(database)/documents/vistorias/$(realId)).data;
+        return sid is string && sid != ''
+          && realId.matches('^VIS-[0-9]{4}-[0-9]+$')
+          // a vistoria definitiva tem que nascer NESTE batch
+          && !exists(/databases/$(database)/documents/vistorias/$(realId))
+          && real.get('idvistoria', '') == realId
+          && real.get('inspectorId', '') == request.auth.uid
+          && real.get('sinistroId', '') == sid;
+      }
+
+      allow get: if isAnalyst()
+        || (isActive() && resource == null)
+        || canReadVistoria(resource.data);
+
+      allow list: if isAnalyst() || canReadVistoria(resource.data);
+
+      // Criação (início de vistoria, vistoria offline, retificação e a cópia
+      // do doc provisório VIS-OFFLINE-* para o id definitivo):
+      //  - id do doc == idvistoria; inspetor == eu; oficina == minha; o
+      //    sinistro é da mesma oficina.
+      //  - status inicial EM_ANDAMENTO (ou EM_ANALISE_OPERACIONAL, que é o
+      //    caso da reconciliação de uma vistoria em massa já enviada).
+      allow create: if isActive()
+        && request.resource.data.get('idvistoria', '') == vistoriaId
+        && request.resource.data.get('inspectorId', '') == request.auth.uid
+        && request.resource.data.get('status', '') in ['EM_ANDAMENTO', 'EM_ANALISE_OPERACIONAL']
+        && isMemberOf(request.resource.data.get('credenciadoId', ''))
+        && request.resource.data.get('sinistroId', '') is string
+        && request.resource.data.get('sinistroId', '') != ''
+        && sinistroCredId(request.resource.data.sinistroId) == request.resource.data.credenciadoId
+        && !request.resource.data.keys().hasAny(analystOnlyKeys());
+
+      allow update: if canWriteVistoria(resource.data)
+        && changed().hasOnly(mechanicVistoriaKeys())
+        && statusTransitionOk()
+        && appendOnly('chatmessages')
+        && appendOnly('images')
+        && (!changed().hasAny(retificacaoKeys())
+            || resource.data.get('status', '') == 'REJEITADA');
+
+      // Mecânico NÃO exclui vistoria. Única exceção: o doc provisório
+      // VIS-OFFLINE-NNNN apagado no MESMO batch que cria a cópia com o id
+      // definitivo (reconcilePendingVistoriaId) — exigimos que, após o
+      // batch, o sinistro aponte para outra vistoria, definitiva, do mesmo
+      // inspetor e do mesmo sinistro.
+      allow delete: if isActive()
+        && vistoriaId.matches('^VIS-OFFLINE-[0-9]{4}$')
+        && resource.data.get('inspectorId', '') == request.auth.uid
+        && reconcileDeleteOk();
+
+      // Áudios processados (gravados só pela Cloud Function).
+      match /audios/{audioId} {
+        allow read: if isAnalyst()
+          || canReadVistoria(get(/databases/$(database)/documents/vistorias/$(vistoriaId)).data);
+        allow write: if false;
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // counters/{counterId} — sequencial VIS-YYYY-NNNN (_createVistoriaId).
+    // Antes: qualquer autenticado. Agora: usuário ativo, só contadores
+    // vistorias_AAAA e só incrementando de 1 em 1.
+    // ---------------------------------------------------------------------
+    match /counters/{counterId} {
+      allow read: if isActive() || isAnalyst();
+
+      allow create: if isActive()
+        && counterId.matches('^vistorias_[0-9]{4}$')
+        && request.resource.data.keys().hasOnly(['lastNumber', 'year', 'updatedAt'])
+        && request.resource.data.lastNumber == 1;
+
+      allow update: if isActive()
+        && counterId.matches('^vistorias_[0-9]{4}$')
+        && changed().hasOnly(['lastNumber', 'year', 'updatedAt'])
+        && request.resource.data.lastNumber == resource.data.get('lastNumber', 0) + 1;
+
+      allow delete: if false;
+    }
+
+    // ---------------------------------------------------------------------
+    // userDevices/{uid}/tokens/{tokenId} — tokens FCM (mesma regra publicada).
+    // ---------------------------------------------------------------------
+    match /userDevices/{uid}/tokens/{tokenId} {
+      allow read, create, update, delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    // ---------------------------------------------------------------------
+    // tabelaPrecos/** — tabela de referência (tabela_precos_service.dart).
+    // Leitura por usuário ativo/analista; escrita só via Admin SDK.
+    // ---------------------------------------------------------------------
+    match /tabelaPrecos/{document=**} {
+      allow read: if isActive() || isAnalyst();
+      allow write: if false;
+    }
+
+    // ---------------------------------------------------------------------
+    // Cadastros do painel lidos no cliente (lib/services/registros.ts).
+    // ---------------------------------------------------------------------
+    match /clientes/{id} {
+      allow read: if isAnalyst();
+      allow write: if false;
+    }
+
+    match /veiculos/{id} {
+      allow read: if isAnalyst();
+      allow write: if false;
+    }
+
+    // Todo o resto (alertas, seguradoras, _processedEvents, usuarios, ...)
+    // fica fechado para o SDK cliente — só Admin SDK. Não há regra
+    // "match /{document=**}" de propósito.
+  }
+}

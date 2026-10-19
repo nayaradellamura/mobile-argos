@@ -1,0 +1,148 @@
+rules_version = '2';
+
+// =============================================================================
+// Regras de segurança do Cloud Storage — projeto fho-argos (Argos TCC)
+// =============================================================================
+//
+// Caminhos usados pelo SDK cliente (app mobile; o painel web não usa o SDK
+// de Storage no navegador):
+//   vistorias/{vistoriaId}/images/{arquivo}.jpg   fotos (vistoria_chat_session_service.dart)
+//   vistorias/{vistoriaId}/audio/{audioId}.mp3    áudios (user_audio_storage_service.dart)
+//   vistorias/{vistoriaId}/orcamento/{ts}.ext     orçamento importado por arquivo (orcamento_arquivo_service.dart)
+//   vistorias/{vistoriaId}/vistorias/*.pdf        laudo/orçamento (laudo-service, Admin SDK)
+//   users/{emailCodificado}/profile_*.jpg         foto de perfil (profile_page.dart)
+//
+// Observações importantes:
+//   - URLs de download com `?token=` (getDownloadURL, laudo-service) NÃO
+//     passam por estas regras: quem tem a URL baixa o arquivo. Estas regras
+//     controlam upload, listagem e a emissão de novas URLs pelo SDK.
+//   - Cloud Functions, laudo-service e ADK usam credencial de servidor e
+//     ignoram estas regras.
+//   - As regras consultam o Firestore (firestore.get/exists). No deploy, o
+//     Firebase CLI pede para conceder ao Storage a permissão de ler o
+//     Firestore (papel "Firebase Rules Firestore Service Agent") — aceitar.
+// =============================================================================
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function hasEmail() {
+      return request.auth.token.get('email', '') is string
+        && request.auth.token.get('email', '') != '';
+    }
+
+    // users/{email} é o caminho padrão; cai para o doc legado users/{uid}
+    // quando não existe doc por e-mail (mesmo fallback do firestore.rules e
+    // do loadCallerUserDoc das Cloud Functions).
+    function userDocPath() {
+      return (hasEmail() && firestore.exists(/databases/(default)/documents/users/$(request.auth.token.email.lower())))
+        ? /databases/(default)/documents/users/$(request.auth.token.email.lower())
+        : /databases/(default)/documents/users/$(request.auth.uid);
+    }
+
+    function userDoc() {
+      return firestore.get(userDocPath());
+    }
+
+    function isActive() {
+      return signedIn() && firestore.exists(userDocPath()) && userDoc().data.get('status', '') == 'ativo';
+    }
+
+    // Analista do painel (mesmo critério do firestore.rules).
+    function isAnalyst() {
+      return signedIn() && (
+        request.auth.token.get('analista', false) == true
+        || request.auth.token.get('admin', false) == true
+        || firestore.exists(/databases/(default)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Mecânico ativo com acesso à vistoria: é o inspetor dela ou pertence à
+    // oficina gravada nela (users.credenciadoId; se não bater, cai para
+    // credenciados/{id}.funcionariosUids).
+    function canAccessVistoria(vistoriaId) {
+      let v = firestore.get(/databases/(default)/documents/vistorias/$(vistoriaId)).data;
+      let credId = v.get('credenciadoId', '');
+      return isActive() && (
+        v.get('inspectorId', '') == request.auth.uid
+        || (credId != '' && (
+              userDoc().data.get('credenciadoId', '') == credId
+              || request.auth.uid in firestore.get(/databases/(default)/documents/credenciados/$(credId)).data.get('funcionariosUids', [])))
+      );
+    }
+
+    // Id do doc users/{email} codificado com Uri.encodeComponent no app
+    // ('@' vira %40, '+' vira %2B).
+    function ownEmailSegment(segment) {
+      return hasEmail() && (
+        segment == request.auth.token.email.lower()
+        || segment == request.auth.token.email.lower().replace('@', '%40').replace('[+]', '%2B')
+      );
+    }
+
+    // ---------------------------------------------------------------------
+    // Evidências da vistoria
+    // ---------------------------------------------------------------------
+    match /vistorias/{vistoriaId}/{allPaths=**} {
+      // Ler (getDownloadURL / download pelo SDK): analista ou mecânico com
+      // acesso à vistoria. Vale também para os PDFs em vistorias/{id}/vistorias/.
+      allow read: if isAnalyst() || canAccessVistoria(vistoriaId);
+    }
+
+    // Fotos: só criação (nome único img_<timestamp>.jpg), imagem, até 15 MB.
+    match /vistorias/{vistoriaId}/images/{fileName} {
+      allow create: if resource == null
+        && canAccessVistoria(vistoriaId)
+        && request.resource.size > 0
+        && request.resource.size < 15 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|jpg|png|webp|heic|heif)');
+    }
+
+    // Áudios: só criação (id sequencial), MP3/áudio, até 25 MB.
+    match /vistorias/{vistoriaId}/audio/{fileName} {
+      allow create: if resource == null
+        && canAccessVistoria(vistoriaId)
+        && request.resource.size > 0
+        && request.resource.size < 25 * 1024 * 1024
+        && request.resource.contentType.matches('audio/(mpeg|mp3|mp4|aac|m4a|x-m4a|wav|ogg|webm)');
+    }
+
+    // Orçamento importado por arquivo (foto, PDF, planilha ou CSV; lido
+    // pela Cloud Function extrairOrcamentoArquivo — orcamento_arquivo.js):
+    // só criação, até 15 MB, nos tipos que a function sabe processar.
+    match /vistorias/{vistoriaId}/orcamento/{fileName} {
+      allow create: if resource == null
+        && canAccessVistoria(vistoriaId)
+        && request.resource.size > 0
+        && request.resource.size < 15 * 1024 * 1024
+        && request.resource.contentType.matches(
+            'image/(jpeg|jpg|png|webp|heic|heif)'
+            + '|application/pdf'
+            + '|text/(csv|plain|comma-separated-values)'
+            + '|application/(csv|vnd[.]openxmlformats-officedocument[.]spreadsheetml[.]sheet)');
+    }
+
+    // PDFs de laudo/orçamento (vistorias/{id}/vistorias/...) são gravados só
+    // pelo laudo-service (Admin SDK): nenhuma regra de escrita aqui.
+
+    // ---------------------------------------------------------------------
+    // Foto de perfil: users/{e-mail codificado}/profile_<ts>.jpg
+    // ---------------------------------------------------------------------
+    match /users/{emailSegment}/{fileName} {
+      allow read: if ownEmailSegment(emailSegment) || isAnalyst();
+
+      allow create: if resource == null
+        && ownEmailSegment(emailSegment)
+        && fileName.matches('profile_[0-9]+\\.(jpg|jpeg|png|webp)')
+        && request.resource.size > 0
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|jpg|png|webp)');
+    }
+
+    // Qualquer outro caminho: negado (não há regra genérica).
+  }
+}
