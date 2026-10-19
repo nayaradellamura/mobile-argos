@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
+import '../features/orcamento/orcamento_calculo.dart';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
@@ -1133,6 +1135,57 @@ class VistoriaChatSessionService {
       fileName: fileName,
       contentType: 'image/jpeg',
       sizeBytes: bytes,
+    );
+  }
+
+  // Marca/modelo do veículo gravado na vistoria (usado na tabela de preços).
+  Future<String> loadVeiculoDaVistoria(String vistoriaDocId) async {
+    final doc = await _vistorias.doc(vistoriaDocId).get();
+    final veiculo = doc.data()?['veiculo'];
+    return veiculo is String ? veiculo : '';
+  }
+
+  /// Lê os itens pra pré-popular a tabela de orçamento: prefere o que o
+  /// mecânico já enviou (`orcamentoItensFinais`) e só cai pro rascunho
+  /// original da IA (`orcamentoRascunho`, do `OrcamentoOficinaAgent`/ADK) se
+  /// ainda não há nada enviado — senão, pedir correção reabria a tabela com
+  /// o rascunho velho da IA e descartava a edição do mecânico.
+  Future<List<Map<String, dynamic>>> loadOrcamentoRascunho({
+    required String vistoriaDocId,
+  }) async {
+    final doc = await _vistorias.doc(vistoriaDocId).get();
+    final data = doc.data() ?? <String, dynamic>{};
+
+    final itensFinais = data['orcamentoItensFinais'];
+    final fonte = (itensFinais is List && itensFinais.isNotEmpty)
+        ? itensFinais
+        : data['orcamentoRascunho'];
+
+    if (fonte is! List) return [];
+
+    return fonte
+        .whereType<Map>()
+        .map((item) => item.map((key, value) => MapEntry(key.toString(), value)))
+        .toList();
+  }
+
+  /// Grava a lista final e completa de itens do orçamento numa única
+  /// escrita e confirma no chat com uma única mensagem.
+  Future<void> submitOrcamento({
+    required String vistoriaDocId,
+    required List<Map<String, dynamic>> itens,
+  }) async {
+    await _vistorias.doc(vistoriaDocId).set({
+      'orcamentoItensFinais': itens,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await appendChatMessage(
+      vistoriaDocId: vistoriaDocId,
+      role: 'system',
+      text: 'Orçamento enviado: ${itens.length} '
+          'ite${itens.length > 1 ? 'ns' : 'm'}, total de '
+          '${formatCurrencyBRL(somarItensOrcamento(itens))}.',
     );
   }
 

@@ -91,6 +91,103 @@ function createSessionId(uid, inspectionId) {
     .slice(0, 32);
 }
 
+// ── Acesso por oficina (callables) ──────────────────────────────────────────
+//
+// Custo: no máximo 2 leituras por chamada (doc do usuário + doc do
+// credenciado), e a do credenciado só acontece se o credenciadoId do usuário
+// não bater de cara. O sinistro/vistoria já foram lidos por quem chama.
+const VISTORIA_ACCESS_DENIED_MESSAGE =
+  "Você não tem permissão para acessar esta vistoria.";
+
+function resolveOwnerCredenciadoId({ vistoria = {}, sinistro = {} }) {
+  const s = asObject(sinistro);
+  const v = asObject(vistoria);
+
+  return str(
+    s.credenciadoId ||
+      s.credenciadoID ||
+      s.workshopId ||
+      s.oficinaId ||
+      v.credenciadoId
+  );
+}
+
+async function loadCallerUserDoc({ db, uid, email }) {
+  const cleanEmail = str(email).toLowerCase();
+
+  if (cleanEmail) {
+    const byEmail = await db.collection("users").doc(cleanEmail).get();
+    if (byEmail.exists) return byEmail.data() || {};
+  }
+
+  // Mesmo fallback do session_context_service.dart (doc legado keyed por uid).
+  const byUid = await db.collection("users").doc(uid).get();
+  return byUid.exists ? byUid.data() || {} : null;
+}
+
+// Lança HttpsError('permission-denied') se o usuário não puder agir sobre a
+// vistoria. `vistoria`/`sinistro` são os dados JÁ carregados pelo chamador --
+// o `sinistro` só deve ser passado se veio de uma fonte confiável (o
+// sinistroId gravado na vistoria, ou o próprio id da chamada), nunca de um
+// sinistroId solto mandado pelo app, senão dá pra parear uma vistoria alheia
+// com um sinistro da própria oficina.
+//
+// DESLIGADO por decisão do grupo (2026-10-15): enquanto a regra de acesso
+// por usuário não for revista, as callables voltam a atender qualquer
+// usuário autenticado, como antes. Para religar, troque para true.
+const VERIFICAR_ACESSO_POR_OFICINA = false;
+
+async function assertCanAccessVistoria({ uid, email, vistoria = {}, sinistro = {}, logContext = {} }) {
+  if (!VERIFICAR_ACESSO_POR_OFICINA) return;
+
+  const db = admin.firestore();
+  const logInfo = { uid, ...logContext };
+
+  const user = await loadCallerUserDoc({ db, uid, email });
+
+  if (!user) {
+    console.warn("Acesso negado: usuário sem documento em users.", logInfo);
+    throw new HttpsError("permission-denied", VISTORIA_ACCESS_DENIED_MESSAGE);
+  }
+
+  const status = str(user.status).toLowerCase() || "pendente";
+
+  if (status !== "ativo") {
+    console.warn("Acesso negado: usuário com status não ativo.", { ...logInfo, status });
+    throw new HttpsError(
+      "permission-denied",
+      status === "bloqueado"
+        ? "Seu acesso foi bloqueado pelo administrador."
+        : "Seu acesso está pendente de aprovação pelo administrador."
+    );
+  }
+
+  const ownerCredenciadoId = resolveOwnerCredenciadoId({ vistoria, sinistro });
+
+  if (!ownerCredenciadoId) {
+    console.warn(
+      "Acesso negado: vistoria/sinistro sem credenciadoId (dado legado ou inexistente).",
+      logInfo
+    );
+    throw new HttpsError("permission-denied", VISTORIA_ACCESS_DENIED_MESSAGE);
+  }
+
+  if (str(user.credenciadoId) === ownerCredenciadoId) return;
+
+  const credenciadoSnap = await db.collection("credenciados").doc(ownerCredenciadoId).get();
+  const funcionariosUids = credenciadoSnap.exists
+    ? credenciadoSnap.data()?.funcionariosUids
+    : null;
+
+  if (Array.isArray(funcionariosUids) && funcionariosUids.includes(uid)) return;
+
+  console.warn("Acesso negado: usuário não pertence à oficina da vistoria.", {
+    ...logInfo,
+    ownerCredenciadoId,
+    userCredenciadoId: str(user.credenciadoId) || null,
+  });
+  throw new HttpsError("permission-denied", VISTORIA_ACCESS_DENIED_MESSAGE);
+}
 
 exports.sendArgosMessage = onCall(
   {
@@ -2425,5 +2522,134 @@ exports.dailyDigest = onSchedule(
     ].filter(Boolean);
 
     await sendTelegramMessage(lines.join("\n"));
+  }
+);
+
+// ── Orçamento pronto por arquivo ───────────────────────────────────────────
+//
+// Botão "Importar orçamento" da tabela de orçamento do app: o mecânico manda
+// foto, print, PDF, planilha (xlsx) ou CSV do orçamento que já tem, o app
+// sobe em `vistorias/{id}/orcamento/` e chama esta função. Os itens voltam
+// para a tabela para conferência — esta função não grava orçamento nenhum,
+// só registra o que foi lido (auditoria) em `orcamentoImportado`.
+const orcamentoArquivo = require("./orcamento_arquivo");
+
+exports.extrairOrcamentoArquivo = onCall(
+  {
+    region: "us-central1",
+    timeoutSeconds: 120,
+    memory: "1GiB",
+  },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Usuário precisa estar autenticado.");
+    }
+
+    const data = request.data || {};
+    const idvistoria = str(data.idvistoria);
+    const storagePath = str(data.storagePath);
+    const mimeType = str(data.mimeType);
+    const nomeArquivo = str(data.nomeArquivo);
+
+    const prefixo = `vistorias/${idvistoria}/orcamento/`;
+    if (
+      !idvistoria ||
+      idvistoria.includes("/") ||
+      !storagePath.startsWith(prefixo) ||
+      storagePath.includes("..") ||
+      storagePath.length === prefixo.length
+    ) {
+      throw new HttpsError("invalid-argument", "Arquivo inválido para esta vistoria.");
+    }
+
+    const tipo = orcamentoArquivo.tipoDoArquivo(mimeType, nomeArquivo || storagePath);
+    if (tipo === "xls") {
+      throw new HttpsError(
+        "invalid-argument",
+        "Planilha no formato antigo (.xls). Salve como .xlsx ou .csv e envie de novo."
+      );
+    }
+    if (!tipo) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Formato não suportado. Envie foto, PDF, planilha (.xlsx) ou CSV."
+      );
+    }
+
+    const db = admin.firestore();
+    const vistoriaRef = db.collection("vistorias").doc(idvistoria);
+    const vistoriaSnap = await vistoriaRef.get();
+    if (!vistoriaSnap.exists) {
+      throw new HttpsError("not-found", "Vistoria não encontrada.");
+    }
+
+    const vistoria = vistoriaSnap.data() || {};
+    const sinistroId = str(vistoria.sinistroId);
+    const sinistroSnap = sinistroId
+      ? await db.collection("sinistro").doc(sinistroId).get()
+      : null;
+
+    await assertCanAccessVistoria({
+      uid: request.auth.uid,
+      email: request.auth.token?.email,
+      vistoria,
+      sinistro: sinistroSnap?.exists ? sinistroSnap.data() || {} : {},
+      logContext: { callable: "extrairOrcamentoArquivo", idvistoria },
+    });
+
+    // Bucket fixo do projeto (mesmo motivo do áudio: não aceitar bucket do app).
+    const file = admin
+      .storage()
+      .bucket(`${FIREBASE_PROJECT_ID}.firebasestorage.app`)
+      .file(storagePath);
+
+    const [existe] = await file.exists();
+    if (!existe) throw new HttpsError("not-found", "Arquivo não encontrado.");
+
+    const [metadata] = await file.getMetadata();
+    if (Number(metadata.size || 0) > orcamentoArquivo.MAX_BYTES) {
+      throw new HttpsError("invalid-argument", "Arquivo grande demais (máximo 15 MB).");
+    }
+
+    const [buffer] = await file.download();
+
+    let resultado;
+    try {
+      resultado = await orcamentoArquivo.extrairOrcamento({
+        client: getGenAIClient(),
+        model: GEMINI_REVIEW_MODEL,
+        tipo,
+        buffer,
+        mimeType: mimeType || metadata.contentType,
+      });
+    } catch (e) {
+      console.error("Falha ao ler orçamento por arquivo:", { idvistoria, tipo, erro: e.message });
+      throw new HttpsError("internal", "Não foi possível ler o arquivo agora. Tente de novo.");
+    }
+
+    await vistoriaRef.set(
+      {
+        orcamentoImportado: {
+          origem: "arquivo",
+          tipo,
+          storagePath,
+          itens: resultado.itens,
+          totalDocumento: resultado.totalDocumento,
+          legivel: resultado.legivel,
+          lidoPor: request.auth.uid,
+          lidoEm: admin.firestore.FieldValue.serverTimestamp(),
+        },
+      },
+      { merge: true }
+    );
+
+    console.log("Orçamento por arquivo lido:", {
+      idvistoria,
+      tipo,
+      itens: resultado.itens.length,
+      legivel: resultado.legivel,
+    });
+
+    return resultado;
   }
 );
