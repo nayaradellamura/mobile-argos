@@ -26,6 +26,199 @@ function formatDate(value) {
   });
 }
 
+// Valor da hora usado só para itens antigos, gravados antes de cada oficina
+// configurar o seu (`credenciados/{id}.valoresHoraMaoObra`). Itens novos já
+// chegam com `valorHora` congelado pelo app — ver
+// lib/features/orcamento/orcamento_calculo.dart no app mobile.
+const VALOR_HORA_LEGADO = 90;
+
+function num(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Normaliza um item vindo de qualquer fonte para o mesmo formato e recalcula
+// os totais a partir dos campos base (nunca confia num total pronto).
+function normalizarItem({ peca, quantidade, valorPeca, tipoServico, horasMaoObra, valorHora, maoObraEmValor, tipoIntervencao }) {
+  const qtd = Math.max(1, Math.round(num(quantidade)) || 1);
+  const horas = num(horasMaoObra);
+  const hora = valorHora === undefined || valorHora === null ? VALOR_HORA_LEGADO : num(valorHora);
+  const unitario = num(valorPeca);
+  const valorPecas = unitario * qtd;
+  const valorMaoObra = horas * hora;
+
+  return {
+    peca: str(peca),
+    quantidade: qtd,
+    valorPeca: unitario,
+    valorPecas,
+    tipoServico: str(tipoServico),
+    horasMaoObra: horas,
+    valorHora: hora,
+    valorMaoObra,
+    valorTotal: valorPecas + valorMaoObra,
+    // Mão de obra informada em reais (gravada como 1 h ao valor), não por hora.
+    ...(maoObraEmValor === true ? { maoObraEmValor: true } : {}),
+    ...(str(tipoIntervencao) ? { tipoIntervencao: str(tipoIntervencao) } : {}),
+  };
+}
+
+// Nome digitado todo em maiúsculas (comum em orçamento lido de papel) vira
+// "Primeira maiúscula"; o resto fica como o mecânico escreveu.
+function nomeLegivel(texto) {
+  const s = str(texto);
+  const letras = s.replace(/[^A-Za-zÀ-ÿ]/g, "");
+  if (letras.length < 4 || letras !== letras.toUpperCase()) return s;
+  const minusculo = s.toLocaleLowerCase("pt-BR");
+  return minusculo.charAt(0).toLocaleUpperCase("pt-BR") + minusculo.slice(1);
+}
+
+function formatarReais(valor) {
+  return (Number(valor) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// "Troca de pastilhas" / "Reparo do para-choque": nome do serviço de mão de
+// obra de uma peça, para ele aparecer uma vez só, na lista de serviços.
+function nomeServicoDaPeca(nome, tipoIntervencao) {
+  const minusculo = nome ? nome.charAt(0).toLocaleLowerCase("pt-BR") + nome.slice(1) : "";
+  if (tipoIntervencao === "reparo") return `Reparo: ${minusculo}`;
+  if (tipoIntervencao === "substituicao" || tipoIntervencao === "troca") return `Troca: ${minusculo}`;
+  return `Mão de obra: ${minusculo}`;
+}
+
+/**
+ * Orçamento no formato do relatório do cliente, como num orçamento de oficina:
+ * "Peças" só com o valor das peças e "Serviços" com toda a mão de obra — a da
+ * troca/reparo de cada peça vira uma linha de serviço própria, para nunca
+ * aparecer em dois lugares. Horas explícitas quando a oficina cobra por hora.
+ */
+function orcamentoRelatorio(orcamentoCampo) {
+  const detalheHoras = (item) =>
+    !item.maoObraEmValor && item.horasMaoObra > 0
+      ? `${String(Math.round(item.horasMaoObra * 10) / 10).replace(".", ",")} h × R$ ${formatarReais(item.valorHora)}`
+      : "";
+
+  const itens = Array.isArray(orcamentoCampo?.itens) ? orcamentoCampo.itens : [];
+  const pecas = [];
+  const servicos = [];
+
+  for (const item of itens) {
+    const nome = nomeLegivel(item.peca);
+    if (item.valorPecas > 0) {
+      pecas.push({
+        nome,
+        quantidade: item.quantidade,
+        valorUnitario: item.valorPeca,
+        valorTotal: item.valorPecas,
+      });
+      if (item.valorMaoObra > 0) {
+        servicos.push({
+          nome: nomeServicoDaPeca(nome, item.tipoIntervencao),
+          detalheHoras: detalheHoras(item),
+          valorTotal: item.valorMaoObra,
+        });
+      }
+    } else {
+      servicos.push({ nome, detalheHoras: detalheHoras(item), valorTotal: item.valorTotal });
+    }
+  }
+
+  const soma = (lista) => lista.reduce((total, item) => total + item.valorTotal, 0);
+
+  return {
+    pecas,
+    servicos,
+    totalPecas: soma(pecas),
+    totalServicos: soma(servicos),
+    total: soma(pecas) + soma(servicos),
+  };
+}
+
+const VALIDADE_PADRAO_DIAS = 15;
+
+// Opções do relatório escolhidas pelo mecânico no app e gravadas pela
+// função gerarRelatorioCliente em sinistro.relatorioCliente.
+function opcoesRelatorio(sinistro) {
+  const relatorio = asObject(sinistro?.relatorioCliente);
+  const excluidas = Array.isArray(relatorio.fotosExcluidas) ? relatorio.fotosExcluidas.map((f) => str(f)).filter(Boolean) : [];
+  const dias = Math.round(num(relatorio.validadeDias));
+  return {
+    fotosExcluidas: excluidas,
+    validadeDias: dias >= 1 && dias <= 180 ? dias : VALIDADE_PADRAO_DIAS,
+  };
+}
+
+/**
+ * Orçamento registrado em campo, com o total calculado sempre da mesma forma
+ * (peças × quantidade + horas × valor da hora), venha de qual fluxo vier.
+ * Fontes, em ordem de prioridade:
+ *
+ * 1. `orcamentoItensFinais` — tabela confirmada no chat guiado (escrita pelo
+ *    app, não pelo modelo, então não sofre erro de transcrição do LLM).
+ * 2. `orcamentoRascunho` com origem 'mecanico' — envio em massa (o ADK nunca
+ *    participa desse fluxo).
+ * 3. `agentParameters.itens_orcamento` — vistorias antigas do chat guiado,
+ *    de antes da tabela gravar `orcamentoItensFinais`.
+ *
+ * É passado ao Gemini como referência NÃO verificada, não como veredito,
+ * para evitar ancoragem do laudo no que o campo já concluiu.
+ */
+function buildOrcamentoCampo({ vistoria, agentParameters }) {
+  const daTabela = (lista) =>
+    lista
+      .filter((item) => item && typeof item === "object")
+      .map((item) =>
+        normalizarItem({
+          peca: item.peca,
+          quantidade: item.quantidade,
+          valorPeca: item.valorPeca,
+          tipoServico: item.tipoServico,
+          horasMaoObra: item.horasMaoObra,
+          valorHora: item.valorHora,
+          maoObraEmValor: item.maoObraEmValor,
+          tipoIntervencao: item.tipoIntervencao,
+        })
+      )
+      .filter((item) => item.peca);
+
+  let itens = [];
+
+  if (Array.isArray(vistoria.orcamentoItensFinais) && vistoria.orcamentoItensFinais.length > 0) {
+    itens = daTabela(vistoria.orcamentoItensFinais);
+  }
+
+  if (itens.length === 0 && Array.isArray(vistoria.orcamentoRascunho)) {
+    itens = daTabela(vistoria.orcamentoRascunho.filter((item) => item && item.origem === "mecanico"));
+  }
+
+  if (itens.length === 0 && Array.isArray(agentParameters.itens_orcamento)) {
+    itens = agentParameters.itens_orcamento
+      .filter((item) => item && typeof item === "object")
+      .map((item) =>
+        normalizarItem({
+          peca: item.peca,
+          quantidade: item.quantidade,
+          valorPeca: item.valor_peca,
+          tipoServico: item.tipo_servico,
+          horasMaoObra: item.horas_mao_obra,
+          valorHora: item.valor_hora,
+          maoObraEmValor: item.mao_obra_em_valor,
+          tipoIntervencao: item.tipo_intervencao,
+        })
+      )
+      .filter((item) => item.peca);
+  }
+
+  const soma = (campo) => itens.reduce((total, item) => total + item[campo], 0);
+
+  return {
+    itens,
+    valorPecas: soma("valorPecas"),
+    valorMaoObra: soma("valorMaoObra"),
+    valorTotal: soma("valorTotal"),
+  };
+}
+
 /**
  * Junta tudo que o laudo precisa: dados do sinistro (snapshots denormalizados
  * de cliente/veículo/seguradora/credenciado), da vistoria (fotos, mensagens
@@ -34,6 +227,74 @@ function formatDate(value) {
  * Mesma fonte de dados que o InspectionCase do app mobile lê — ver
  * lib/features/inspections/data/inspection_case.dart no argos_app.
  */
+// Fotos que entram no laudo. Foto de orçamento pronto (lida pelo agente na
+// etapa de orçamento, em imagensOrcamentoIds) não é foto de dano.
+function fotosDeDano(vistoria) {
+  const idsOrcamento = new Set(
+    Array.isArray(vistoria?.imagensOrcamentoIds) ? vistoria.imagensOrcamentoIds : []
+  );
+  const images = Array.isArray(vistoria?.images) ? vistoria.images : [];
+  return images.filter((img) => !idsOrcamento.has(img?.imageId));
+}
+
+// Danos que a vistoria registrou (agentParameters.danos_externos e
+// danos_estruturais), como lista de textos sem repetição.
+function listaDeDanos(agentParameters) {
+  const vistos = new Set();
+  const danos = [];
+  for (const campo of ["danos_externos", "danos_estruturais"]) {
+    const valor = agentParameters?.[campo];
+    const itens = Array.isArray(valor) ? valor : str(valor).split(/[;,\n]/);
+    for (const item of itens) {
+      const texto = (typeof item === "object" && item ? str(item.peca || item.nome || item.descricao) : str(item)).trim();
+      const chave = texto.toLowerCase();
+      if (texto && !vistos.has(chave)) {
+        vistos.add(chave);
+        danos.push(texto.charAt(0).toUpperCase() + texto.slice(1));
+      }
+    }
+  }
+  return danos.slice(0, 30);
+}
+
+// Ajustes pedidos pelo analista e o que foi feito em cada um, quando a
+// vistoria é uma retificação (ver retificacao_tool.py nos agentes ADK).
+function dadosRetificacao(vistoria) {
+  if (str(vistoria?.tipoVistoria).toUpperCase() !== "RETIFICACAO") return null;
+
+  const STATUS = { resolvido: "Resolvido", nao_aplicavel: "Não se aplica", pendente: "Pendente" };
+  const respostas = Object.values(asObject(vistoria.respostasRetificacao))
+    .filter((r) => r && typeof r === "object")
+    .map((r) => ({
+      numero: Number(r.numero) || 0,
+      ajuste: str(r.ajuste),
+      status: str(r.status),
+      statusLabel: STATUS[str(r.status)] || str(r.status),
+      resposta: str(r.resposta),
+    }))
+    .sort((a, b) => a.numero - b.numero);
+
+  return {
+    vistoriaOrigemId: str(vistoria.vistoriaOrigemId),
+    ajustesNecessarios: str(vistoria.ajustesNecessarios),
+    respostas,
+  };
+}
+
+// Etapas mostradas ao cliente, com a atual destacada pelo status da vistoria.
+function etapasRelatorio(statusVistoria) {
+  const status = str(statusVistoria).toUpperCase();
+  let atual = 1;
+  if (status.includes("ANALISE")) atual = 2;
+  if (status.includes("APROVAD") || status === "FINALIZADA") atual = 3;
+
+  return [
+    { numero: 1, titulo: "Vistoria e orçamento", descricao: "A oficina registrou os danos e montou o orçamento do reparo." },
+    { numero: 2, titulo: "Análise da seguradora", descricao: "A seguradora confere a vistoria e aprova os valores." },
+    { numero: 3, titulo: "Reparo", descricao: "Com a aprovação, a oficina agenda e executa o conserto." },
+  ].map((etapa) => ({ ...etapa, atual: etapa.numero === atual }));
+}
+
 async function loadLaudoContext({ sinistroId, vistoriaId }) {
   const db = admin.firestore();
 
@@ -81,7 +342,7 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
   const credenciadoSnapshot = asObject(sinistro.credenciadoSnapshot);
   const seguradoraSnapshot = asObject(sinistro.seguradoraSnapshot);
 
-  const images = Array.isArray(vistoria.images) ? vistoria.images : [];
+  const images = fotosDeDano(vistoria);
   const chatmessages = Array.isArray(vistoria.chatmessages) ? vistoria.chatmessages : [];
 
   // Narração do mecânico e respostas da IA, na ordem em que aconteceram —
@@ -94,44 +355,7 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
     }))
     .filter((m) => m.texto);
 
-  // Orçamento que o agente ADK já rascunhou ao vivo durante o chat (tool
-  // `salvar_estado_vistoria`) — passado como referência NÃO verificada pro
-  // Gemini cruzar com as fotos, não como severidade/veredito pronto (isso
-  // evitaria o efeito de ancoragem: o laudo só repetindo o que o agente de
-  // campo já concluiu, em vez de reanalisar de fato).
-  //
-  // itensAgente vem do chat guiado (agentParameters, só o ADK escreve).
-  // itensMecanico vem do envio em massa (vistoria.orcamentoRascunho,
-  // origem: 'mecanico', gravado por appendOrcamentoMecanicoItem no app
-  // mobile) -- o ADK nunca participa desse fluxo, então
-  // agentParameters.itens_orcamento sempre ficava vazio pra essas vistorias
-  // e o orçamento do mecânico nunca chegava na IA (bug real, achado
-  // 2026-10-02 verificando o pipeline fim a fim).
-  const itensAgente = Array.isArray(agentParameters.itens_orcamento)
-    ? agentParameters.itens_orcamento
-        .filter((item) => item && typeof item === "object")
-        .map((item) => ({
-          peca: str(item.peca),
-          valor: Number(item.valor_peca) || 0,
-          horasMaoObra: Number(item.horas_mao_obra) || 0,
-        }))
-        .filter((item) => item.peca)
-    : [];
-
-  const orcamentoRascunho = Array.isArray(vistoria.orcamentoRascunho)
-    ? vistoria.orcamentoRascunho
-    : [];
-
-  const itensMecanico = orcamentoRascunho
-    .filter((item) => item && typeof item === "object" && item.origem === "mecanico")
-    .map((item) => ({
-      peca: str(item.peca),
-      valor: Number(item.valorPeca) || 0,
-      horasMaoObra: Number(item.horasMaoObra) || 0,
-    }))
-    .filter((item) => item.peca);
-
-  const valorTotalMecanico = itensMecanico.reduce((sum, item) => sum + item.valor, 0);
+  const orcamentoCampo = buildOrcamentoCampo({ vistoria, agentParameters });
 
   return {
     sinistroId,
@@ -159,6 +383,8 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
     oficinaCidade: [str(credenciadoSnapshot.city), str(credenciadoSnapshot.uf)]
       .filter(Boolean)
       .join("/"),
+    oficinaTelefone: str(credenciadoSnapshot.phone),
+    oficinaEmail: str(credenciadoSnapshot.email),
 
     mecanicoNome: str(sinistro.assignedToName, "Não informado"),
     mecanicoEmail: str(sinistro.assignedToEmail),
@@ -179,13 +405,30 @@ async function loadLaudoContext({ sinistroId, vistoriaId }) {
 
     transcricao,
 
-    orcamentoCampo: {
-      itens: [...itensAgente, ...itensMecanico],
-      valorTotal: itensAgente.length > 0
-        ? Number(agentParameters.valor_total_final) || 0
-        : valorTotalMecanico,
-    },
+    orcamentoCampo,
+
+    statusVistoria: str(vistoria.status),
+    danosIdentificados: listaDeDanos(agentParameters),
+
+    retificacao: dadosRetificacao(vistoria),
+
+    relatorioOpcoes: opcoesRelatorio(sinistro),
   };
 }
 
-module.exports = { loadLaudoContext };
+// buildOrcamentoCampo, normalizarItem e VALOR_HORA_LEGADO são exportados só
+// para os testes (test/data.test.js) — o servidor usa apenas loadLaudoContext.
+module.exports = {
+  loadLaudoContext,
+  buildOrcamentoCampo,
+  orcamentoRelatorio,
+  opcoesRelatorio,
+  nomeLegivel,
+  VALIDADE_PADRAO_DIAS,
+  normalizarItem,
+  fotosDeDano,
+  listaDeDanos,
+  etapasRelatorio,
+  dadosRetificacao,
+  VALOR_HORA_LEGADO,
+};

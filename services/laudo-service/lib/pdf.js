@@ -3,6 +3,8 @@ const path = require("path");
 const Handlebars = require("handlebars");
 const puppeteer = require("puppeteer");
 
+const { orcamentoRelatorio } = require("./data");
+
 const TEMPLATE_PATH = path.join(__dirname, "..", "templates", "laudo.html");
 const ORCAMENTO_TEMPLATE_PATH = path.join(__dirname, "..", "templates", "orcamento-aprovado.html");
 const LOGO_PATH = path.join(__dirname, "..", "assets", "argos_icon.png");
@@ -67,6 +69,7 @@ async function renderLaudoPdf({ context, achados }) {
     // dentro de um atributo class vira sopa de sintaxe difícil de revisar.
     precisaRevisaoManual:
       achados.incongruenciaDetectada === true || achados.evidenciasSuficientes === false,
+    orcamentoRelatorio: orcamentoRelatorio(context.orcamentoCampo),
     dataEmissao: dataEmissaoAgora(),
     logoDataUri: getLogoDataUri(),
   });

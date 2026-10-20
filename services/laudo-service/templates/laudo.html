@@ -3,76 +3,102 @@
 <head>
 <meta charset="utf-8" />
 <title>Laudo Técnico — {{protocolo}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet" />
 <style>
-  /* Títulos 12pt, conteúdo 10pt. Margem de página só na faixa do cabeçalho
-     (numeração), aplicada via Puppeteer (page.pdf margin + headerTemplate) —
-     ver services/laudo-service/lib/pdf.js. O restante do espaçamento é feito
-     aqui mesmo, pelo padding do .page. */
+  /* Mesma linguagem visual do relatório do cliente (templates/relatorio-cliente.html):
+     hero com gradiente, cartão de veículo sobreposto, seções com barra
+     colorida, tabela de itens. O conteúdo aqui é o do analista (severidade,
+     incongruência, confiança, transcrição completa) -- o relatório do
+     cliente deliberadamente não tem nada disso.
+     Numeração de página via Puppeteer (page.pdf headerTemplate) — ver
+     services/laudo-service/lib/pdf.js. */
+  :root {
+    --azul: #0057C0;
+    --azul-claro: #E5F6FF;
+    --fundo: #F3FBFF;
+    --texto: #1F2937;
+    --cinza: #6B7280;
+    --borda: #DCE8F5;
+    --alerta: #D9364A;
+    --alerta-fundo: #FDF1F1;
+  }
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
-    color: #1a2733;
+    font-family: "Inter", Arial, Helvetica, sans-serif;
+    color: var(--texto);
     font-size: 10pt;
     line-height: 1.5;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
-  .page { padding: 28px 40px 40px; }
+  h1, h2, .num { font-family: "Space Grotesk", Arial, sans-serif; }
 
-  .header {
+  .hero {
+    background: linear-gradient(135deg, #0057C0 0%, #0A73E8 100%);
+    color: #fff;
+    padding: 30px 40px 34px;
+  }
+  .hero .top { display: flex; justify-content: space-between; align-items: center; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand img { width: 42px; height: 42px; border-radius: 10px; background: #fff; }
+  .brand .nome { font-family: "Space Grotesk", Arial, sans-serif; font-size: 18pt; font-weight: 700; letter-spacing: .02em; }
+  .brand .sub { font-size: 8.5pt; opacity: .85; }
+  .hero .emissao { text-align: right; font-size: 8.5pt; opacity: .9; }
+  .hero h1 { font-size: 22pt; margin: 26px 0 4px; font-weight: 700; }
+  .hero .lead { font-size: 10.5pt; opacity: .92; margin: 0; }
+
+  .veiculo {
+    margin: -22px 40px 0;
+    background: #fff;
+    border-radius: 18px;
+    box-shadow: 0 8px 24px rgba(0, 87, 192, .12);
+    padding: 18px 22px;
+    display: grid;
+    grid-template-columns: 1.6fr 1fr 1fr 1fr;
+    gap: 14px;
+  }
+  .campo .rotulo { color: var(--cinza); font-size: 7.5pt; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; }
+  .campo .valor { font-size: 11pt; font-weight: 700; margin-top: 2px; }
+  .placa {
+    display: inline-block;
+    border: 2px solid var(--texto);
+    border-radius: 6px;
+    padding: 1px 8px;
+    font-family: "Space Grotesk", Arial, sans-serif;
+    letter-spacing: .08em;
+  }
+
+  .conteudo { padding: 8px 40px 30px; }
+  h2 {
+    font-size: 12.5pt;
+    color: var(--azul);
+    margin: 26px 0 10px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    border-bottom: 3px solid #0057C0;
-    padding-bottom: 14px;
-    margin-bottom: 22px;
-  }
-  .header .brand { display: flex; align-items: center; gap: 12px; }
-  .header .brand img { width: 40px; height: 40px; border-radius: 8px; }
-  .header .brand .title { font-size: 16pt; font-weight: 700; color: #0057C0; }
-  .header .brand .subtitle { font-size: 9pt; color: #667685; }
-  .header .meta { text-align: right; font-size: 9pt; color: #667685; }
-  .header .meta .protocolo { font-size: 12pt; font-weight: 700; color: #1a2733; }
-
-  /* Evita título "órfão" no fim da página com o conteúdo dele pulando pra
-     próxima — Chromium respeita break-after/page-break-after em impressão. */
-  h2.section-title {
-    font-size: 12pt;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: #0057C0;
-    border-bottom: 1px solid #dbe4ee;
-    padding-bottom: 6px;
-    margin: 22px 0 10px;
+    gap: 8px;
     break-after: avoid;
     page-break-after: avoid;
   }
+  h2::before {
+    content: "";
+    width: 6px;
+    height: 18px;
+    border-radius: 3px;
+    background: var(--azul);
+  }
+  h3.subtitulo { font-size: 9pt; color: var(--cinza); text-transform: uppercase; letter-spacing: .05em; margin: 16px 0 6px; }
 
-  /* Blocos pequenos que não devem ser cortados ao meio por uma quebra de página. */
-  .summary-box,
-  .severity-block,
-  .field,
-  .foto-card,
-  table.danos tr {
+  .caixa {
+    background: var(--fundo);
+    border: 1px solid var(--borda);
+    border-radius: 14px;
+    padding: 14px 16px;
     break-inside: avoid;
     page-break-inside: avoid;
   }
-
-  .grid-2 {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 6px 24px;
-  }
-  .field .label { color: #667685; font-size: 8pt; text-transform: uppercase; letter-spacing: 0.03em; line-height: 1.2; }
-  .field .value { font-size: 10pt; font-weight: 600; line-height: 1.3; }
-
-  .summary-box {
-    background: #f2f7fd;
-    border-left: 4px solid #0057C0;
-    padding: 12px 14px;
-    border-radius: 6px;
-    font-size: 10pt;
-  }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 24px; }
 
   .severity-badge {
     display: inline-flex;
@@ -85,47 +111,45 @@
     color: #fff;
     background: {{severityColor classificacaoContran}};
   }
-  .severity-justificativa { margin-top: 8px; font-size: 10pt; color: #3a4855; }
+  .severity-justificativa { margin-top: 10px; font-size: 10pt; color: var(--texto); }
 
   /* Mesmo peso visual da faixa de severidade — a incongruência não pode
      ficar menos visível que uma informação de rotina, senão o analista
      passa direto por ela como aconteceu antes desta seção existir. */
-  .alert-box {
-    background: #fdf1f1;
-    border-left: 4px solid #d9364a;
+  .alerta {
+    background: var(--alerta-fundo);
+    border-left: 4px solid var(--alerta);
+    border-radius: 10px;
     padding: 12px 14px;
-    border-radius: 6px;
     font-size: 10pt;
     margin-top: 10px;
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
-  .alert-box .alert-title {
+  .alerta .titulo {
     font-weight: 700;
-    color: #d9364a;
+    color: var(--alerta);
     text-transform: uppercase;
     font-size: 9pt;
-    letter-spacing: 0.03em;
+    letter-spacing: .03em;
     margin-bottom: 6px;
   }
 
-  table.danos { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  table.danos { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 9.5pt; margin-top: 6px; }
   table.danos th {
     text-align: left;
-    font-size: 8pt;
+    color: var(--cinza);
+    font-size: 7.5pt;
     text-transform: uppercase;
-    color: #667685;
-    border-bottom: 1px solid #dbe4ee;
-    padding: 6px 8px;
+    letter-spacing: .05em;
+    padding: 0 10px 8px;
+    border-bottom: 2px solid var(--borda);
   }
-  table.danos td {
-    padding: 8px;
-    font-size: 10pt;
-    line-height: 1.35;
-    border-bottom: 1px solid #eef2f6;
-    vertical-align: top;
-  }
+  table.danos td { padding: 9px 10px; border-bottom: 1px solid var(--borda); vertical-align: top; }
+  table.danos tr { break-inside: avoid; page-break-inside: avoid; }
   .gravidade-pill {
     display: inline-block;
-    padding: 2px 8px;
+    padding: 2px 10px;
     border-radius: 999px;
     font-size: 8pt;
     font-weight: 700;
@@ -133,99 +157,226 @@
   }
   .gravidade-leve { background: #2e9e5b; }
   .gravidade-moderada { background: #d97706; }
-  .gravidade-grave { background: #d9364a; }
+  .gravidade-grave { background: var(--alerta); }
 
-  .fotos-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 10px;
-    margin-top: 8px;
+  table.itens { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 9.5pt; }
+  table.itens th {
+    text-align: left;
+    color: var(--cinza);
+    font-size: 7.5pt;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    padding: 0 10px 8px;
+    border-bottom: 2px solid var(--borda);
   }
-  .foto-card { border: 1px solid #dbe4ee; border-radius: 8px; overflow: hidden; }
-  .foto-card img { width: 100%; height: 130px; object-fit: cover; display: block; }
-  .foto-card .caption { padding: 4px 8px; font-size: 8pt; color: #667685; }
+  table.itens td { padding: 9px 10px; border-bottom: 1px solid var(--borda); }
+  table.itens tr { break-inside: avoid; page-break-inside: avoid; }
+  table.itens td.num, table.itens th.num { text-align: right; white-space: nowrap; }
+  table.itens td.peca { font-weight: 600; }
+  table.itens .horas { display: block; color: var(--cinza); font-size: 7.5pt; font-weight: 500; }
+  table.itens td.traco { color: var(--cinza); }
+
+  .totais {
+    margin-top: 14px;
+    margin-left: auto;
+    width: 300px;
+    break-inside: avoid;
+  }
+  .totais .linha { display: flex; justify-content: space-between; padding: 4px 0; color: var(--cinza); }
+  .totais .total {
+    margin-top: 6px;
+    background: var(--azul);
+    color: #fff;
+    border-radius: 12px;
+    padding: 10px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 700;
+  }
+  .totais .total .num { font-size: 15pt; }
+
+  .fotos-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 8px; }
+  .foto-card {
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--borda);
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .foto-card img { width: 100%; height: 140px; object-fit: cover; display: block; }
+  .foto-card .caption { font-size: 8pt; color: var(--cinza); padding: 4px 8px; }
 
   .transcricao { margin-top: 6px; }
-  .transcricao .linha { padding: 5px 0; border-bottom: 1px dashed #eef2f6; font-size: 10pt; }
-  .transcricao .autor { font-weight: 700; color: #0057C0; }
+  .transcricao .linha { padding: 6px 0; border-bottom: 1px dashed var(--borda); font-size: 10pt; break-inside: avoid; page-break-inside: avoid; }
+  .transcricao .autor { font-weight: 700; color: var(--azul); }
   .transcricao .autor.ia { color: #7a4fd1; }
 
-  .footer {
-    margin-top: 30px;
+  .rodape {
+    margin-top: 28px;
     padding-top: 12px;
-    border-top: 1px solid #dbe4ee;
+    border-top: 1px solid var(--borda);
+    color: var(--cinza);
     font-size: 8pt;
     line-height: 1.4;
-    color: #8a97a3;
-    text-align: center;
   }
-  .footer strong { color: #667685; }
+  .rodape strong { color: var(--texto); }
+  .vazio { color: var(--cinza); font-style: italic; }
 </style>
 </head>
 <body>
-  <div class="page">
-    <div class="header">
+  <div class="hero">
+    <div class="top">
       <div class="brand">
         <img src="{{logoDataUri}}" alt="Argos" />
         <div>
-          <div class="title">Argos</div>
-          <div class="subtitle">Laudo Técnico de Vistoria — gerado por IA</div>
+          <div class="nome">ARGOS</div>
+          <div class="sub">Vistoria digital</div>
         </div>
       </div>
-      <div class="meta">
-        <div class="protocolo">{{protocolo}}</div>
-        <div>Emitido em {{dataEmissao}}</div>
+      <div class="emissao">
+        Emitido em {{dataEmissao}}<br />
+        Protocolo {{protocolo}}
       </div>
     </div>
+    <h1>Laudo Técnico de Vistoria</h1>
+    <p class="lead">Gerado por IA a partir das evidências coletadas em campo — sujeito à revisão de um analista humano.</p>
+  </div>
 
-    <h2 class="section-title">Resumo</h2>
-    <div class="summary-box">{{resumoExecutivo}}</div>
+  <div class="veiculo">
+    <div class="campo">
+      <div class="rotulo">Veículo</div>
+      <div class="valor">{{#if veiculoModelo}}{{veiculoModelo}}{{else}}Não informado{{/if}}{{#if veiculoAno}} ({{veiculoAno}}){{/if}}</div>
+    </div>
+    <div class="campo">
+      <div class="rotulo">Placa</div>
+      <div class="valor">{{#if veiculoPlaca}}<span class="placa">{{veiculoPlaca}}</span>{{else}}—{{/if}}</div>
+    </div>
+    <div class="campo">
+      <div class="rotulo">Cor</div>
+      <div class="valor">{{#if veiculoCor}}{{veiculoCor}}{{else}}—{{/if}}</div>
+    </div>
+    <div class="campo">
+      <div class="rotulo">Chassi</div>
+      <div class="valor">{{#if veiculoChassi}}{{veiculoChassi}}{{else}}—{{/if}}</div>
+    </div>
+  </div>
 
-    <h2 class="section-title">Classificação de Severidade</h2>
-    <div class="severity-block">
+  <div class="conteudo">
+    <h2>Resumo</h2>
+    <div class="caixa">{{resumoExecutivo}}</div>
+
+    {{#if retificacao}}
+    <h2>Retificação</h2>
+    <div class="caixa">
+      <p style="margin:0 0 6px"><strong>Vistoria de origem:</strong> {{retificacao.vistoriaOrigemId}}</p>
+      <p style="margin:0 0 6px"><strong>Ajustes pedidos pelo analista:</strong> {{retificacao.ajustesNecessarios}}</p>
+      {{#each retificacao.respostas}}
+      <p style="margin:6px 0 0"><strong>{{numero}}. {{ajuste}}</strong> — {{statusLabel}}. {{resposta}}</p>
+      {{/each}}
+    </div>
+    {{/if}}
+
+    <h2>Classificação de Severidade</h2>
+    <div class="caixa">
       <span class="severity-badge">{{classificacaoContran}}</span>
       <div class="severity-justificativa">{{justificativaClassificacao}}</div>
     </div>
 
     {{#if incongruenciaDetectada}}
-    <div class="alert-box">
-      <div class="alert-title">⚠ Incongruência detectada — leitura obrigatória antes de aprovar</div>
+    <div class="alerta">
+      <div class="titulo">⚠ Incongruência detectada — leitura obrigatória antes de aprovar</div>
       {{detalhesIncongruencia}}
     </div>
     {{/if}}
 
     {{#unless evidenciasSuficientes}}
-    <div class="alert-box">
-      <div class="alert-title">⚠ Evidências fotográficas insuficientes</div>
+    <div class="alerta">
+      <div class="titulo">⚠ Evidências fotográficas insuficientes</div>
       A quantidade e/ou o enquadramento das fotos enviadas não sustentam com segurança a classificação de severidade acima.
     </div>
     {{/unless}}
 
-    <h2 class="section-title">Dados do Sinistro</h2>
-    <div class="grid-2">
-      <div class="field"><div class="label">Seguradora</div><div class="value">{{seguradoraNome}}</div></div>
-      <div class="field"><div class="label">Tipo de sinistro</div><div class="value">{{tipoSinistro}}</div></div>
-      <div class="field"><div class="label">Cliente</div><div class="value">{{clienteNome}}</div></div>
-      <div class="field"><div class="label">Documento</div><div class="value">{{clienteDocumento}}</div></div>
-      <div class="field"><div class="label">Veículo</div><div class="value">{{veiculoModelo}} ({{veiculoAno}})</div></div>
-      <div class="field"><div class="label">Placa / Cor</div><div class="value">{{veiculoPlaca}} — {{veiculoCor}}</div></div>
+    <h2>Dados do Sinistro</h2>
+    <div class="caixa grid-2">
+      <div class="campo"><div class="rotulo">Seguradora</div><div class="valor">{{seguradoraNome}}</div></div>
+      <div class="campo"><div class="rotulo">Tipo de sinistro</div><div class="valor">{{tipoSinistro}}</div></div>
+      <div class="campo"><div class="rotulo">Cliente</div><div class="valor">{{clienteNome}}</div></div>
+      <div class="campo"><div class="rotulo">Documento</div><div class="valor">{{clienteDocumento}}</div></div>
     </div>
-    <div class="field" style="margin-top:6px;">
-      <div class="label">Descrição inicial do sinistro (reportada antes da vistoria)</div>
-      <div class="value">{{#if danosDescritos}}{{danosDescritos}}{{else}}Não informada{{/if}}</div>
+    <div class="campo" style="margin-top:10px;">
+      <div class="rotulo">Descrição inicial do sinistro (reportada antes da vistoria)</div>
+      <div class="valor">{{#if danosDescritos}}{{danosDescritos}}{{else}}Não informada{{/if}}</div>
     </div>
 
-    <h2 class="section-title">Dados da Vistoria</h2>
-    <div class="grid-2">
-      <div class="field"><div class="label">Oficina credenciada</div><div class="value">{{oficinaNome}}</div></div>
-      <div class="field"><div class="label">Localização</div><div class="value">{{oficinaCidade}}</div></div>
-      <div class="field"><div class="label">Mecânico responsável</div><div class="value">{{mecanicoNome}}</div></div>
-      <div class="field"><div class="label">Contato</div><div class="value">{{mecanicoEmail}}</div></div>
-      <div class="field"><div class="label">Check-in</div><div class="value">{{checkInEm}}</div></div>
-      <div class="field"><div class="label">Finalizada em</div><div class="value">{{finalizadoEm}}</div></div>
+    <h2>Dados da Vistoria</h2>
+    <div class="caixa grid-2">
+      <div class="campo"><div class="rotulo">Oficina credenciada</div><div class="valor">{{oficinaNome}}</div></div>
+      <div class="campo"><div class="rotulo">Localização</div><div class="valor">{{oficinaCidade}}</div></div>
+      <div class="campo"><div class="rotulo">Mecânico responsável</div><div class="valor">{{mecanicoNome}}</div></div>
+      <div class="campo"><div class="rotulo">Contato</div><div class="valor">{{mecanicoEmail}}</div></div>
+      <div class="campo"><div class="rotulo">Check-in</div><div class="valor">{{checkInEm}}</div></div>
+      <div class="campo"><div class="rotulo">Finalizada em</div><div class="valor">{{finalizadoEm}}</div></div>
     </div>
 
-    <h2 class="section-title">Danos Identificados</h2>
+    <h2>Orçamento</h2>
+    {{#if orcamentoCampo.itens.length}}
+    {{#if orcamentoRelatorio.pecas.length}}
+    <h3 class="subtitulo">Peças</h3>
+    <table class="itens">
+      <thead>
+        <tr>
+          <th>Peça</th>
+          <th class="num">Qtd.</th>
+          <th class="num">Valor unit.</th>
+          <th class="num">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{#each orcamentoRelatorio.pecas}}
+        <tr>
+          <td class="peca">{{nome}}</td>
+          <td class="num">{{quantidade}}</td>
+          <td class="num">R$ {{currency valorUnitario}}</td>
+          <td class="num"><strong>R$ {{currency valorTotal}}</strong></td>
+        </tr>
+        {{/each}}
+      </tbody>
+    </table>
+    {{/if}}
+    {{#if orcamentoRelatorio.servicos.length}}
+    <h3 class="subtitulo">Serviços (mão de obra)</h3>
+    <table class="itens">
+      <thead>
+        <tr>
+          <th>Serviço</th>
+          <th class="num">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{#each orcamentoRelatorio.servicos}}
+        <tr>
+          <td class="peca">{{nome}}{{#if detalheHoras}}<span class="horas">{{detalheHoras}}</span>{{/if}}</td>
+          {{#if valorTotal}}
+          <td class="num"><strong>R$ {{currency valorTotal}}</strong></td>
+          {{else}}
+          <td class="num traco">—</td>
+          {{/if}}
+        </tr>
+        {{/each}}
+      </tbody>
+    </table>
+    {{/if}}
+    <div class="totais">
+      <div class="linha"><span>Peças</span><span>R$ {{currency orcamentoRelatorio.totalPecas}}</span></div>
+      <div class="linha"><span>Serviços (mão de obra)</span><span>R$ {{currency orcamentoRelatorio.totalServicos}}</span></div>
+      <div class="total"><span>Total</span><span class="num">R$ {{currency orcamentoRelatorio.total}}</span></div>
+    </div>
+    {{else}}
+    <div class="caixa vazio">Nenhum item de orçamento foi registrado durante a vistoria.</div>
+    {{/if}}
+
+    <h2>Danos Identificados</h2>
     <table class="danos">
       <thead>
         <tr><th>Local</th><th>Descrição</th><th>Gravidade</th><th>Foto</th></tr>
@@ -243,14 +394,14 @@
     </table>
 
     {{#if observacoesAdicionais}}
-    <h2 class="section-title">Observações Adicionais</h2>
-    <div class="summary-box">{{observacoesAdicionais}}</div>
+    <h2>Observações Adicionais</h2>
+    <div class="caixa">{{observacoesAdicionais}}</div>
     {{/if}}
 
-    <h2 class="section-title">Recomendação</h2>
-    <div class="{{#if precisaRevisaoManual}}alert-box{{else}}summary-box{{/if}}">{{recomendacoes}}</div>
+    <h2>Recomendação</h2>
+    <div class="{{#if precisaRevisaoManual}}alerta{{else}}caixa{{/if}}">{{recomendacoes}}</div>
 
-    <h2 class="section-title">Evidências Fotográficas ({{fotos.length}})</h2>
+    <h2>Evidências Fotográficas ({{fotos.length}})</h2>
     <div class="fotos-grid">
       {{#each fotos}}
       <div class="foto-card">
@@ -260,14 +411,14 @@
       {{/each}}
     </div>
 
-    <h2 class="section-title">Transcrição da Vistoria</h2>
+    <h2>Transcrição da Vistoria</h2>
     <div class="transcricao">
       {{#each transcricao}}
       <div class="linha"><span class="autor{{#if (eq autor "IA")}} ia{{/if}}">{{autor}}:</span> {{texto}}</div>
       {{/each}}
     </div>
 
-    <div class="footer">
+    <div class="rodape">
       <strong>Nível de confiança da IA: {{nivelConfianca}}.</strong>
       Este laudo foi gerado automaticamente pelo agente de IA do Argos a partir das evidências
       coletadas em campo. Está sujeito à revisão e aprovação de um analista humano antes de
