@@ -14,8 +14,7 @@ class EyeProcessingAnimation extends StatefulWidget {
   const EyeProcessingAnimation({super.key, required this.statusText});
 
   @override
-  State<EyeProcessingAnimation> createState() =>
-      _EyeProcessingAnimationState();
+  State<EyeProcessingAnimation> createState() => _EyeProcessingAnimationState();
 }
 
 class _EyeProcessingAnimationState extends State<EyeProcessingAnimation>
@@ -71,7 +70,9 @@ class _EyeProcessingAnimationState extends State<EyeProcessingAnimation>
                       shape: BoxShape.circle,
                       boxShadow: [
                         BoxShadow(
-                          color: const Color(0xFF0057C0).withOpacity(_glow.value),
+                          color: const Color(
+                            0xFF0057C0,
+                          ).withOpacity(_glow.value),
                           blurRadius: 42,
                           spreadRadius: 14,
                         ),
@@ -133,6 +134,8 @@ class _EyeProcessingAnimationState extends State<EyeProcessingAnimation>
                   textAlign: TextAlign.center,
                   style: GoogleFonts.spaceGrotesk(
                     fontWeight: FontWeight.w700,
+                    fontSize: 15,
+                    height: 1.35,
                     color: const Color(0xFF1F2937),
                   ),
                 ),

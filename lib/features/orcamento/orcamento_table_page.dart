@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -434,9 +435,8 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
     if (_itensPreenchidos.isNotEmpty) {
       final escolha = await showDialog<bool>(
         context: context,
-        builder: (dialogContext) => _SubstituirOuAdicionarDialog(
-          quantidade: drafts.length,
-        ),
+        builder: (dialogContext) =>
+            _SubstituirOuAdicionarDialog(quantidade: drafts.length),
       );
       if (escolha == null || !mounted) return;
       substituir = escolha;
@@ -780,12 +780,7 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
           ),
           if (_importando)
             Positioned.fill(
-              child: Container(
-                color: Colors.white.withOpacity(.94),
-                child: Center(
-                  child: EyeProcessingAnimation(statusText: _statusImportacao),
-                ),
-              ),
+              child: _LendoOrcamentoScreen(statusText: _statusImportacao),
             ),
         ],
       ),
@@ -1129,7 +1124,10 @@ class _SubstituirOuAdicionarDialog extends StatelessWidget {
             const Text(
               'Quer substituir os itens da tabela pelos do orçamento ou '
               'adicionar ao final?',
-              style: TextStyle(color: Color(0xFF6B7280), fontWeight: FontWeight.w600),
+              style: TextStyle(
+                color: Color(0xFF6B7280),
+                fontWeight: FontWeight.w600,
+              ),
             ),
             const SizedBox(height: 20),
             TextButton(
@@ -1199,7 +1197,10 @@ class _SairSemSalvarDialog extends StatelessWidget {
               quantidade == 1
                   ? 'O item da tabela não será salvo.'
                   : 'Os $quantidade itens da tabela não serão salvos.',
-              style: const TextStyle(color: Color(0xFF6B7280), fontWeight: FontWeight.w600),
+              style: const TextStyle(
+                color: Color(0xFF6B7280),
+                fontWeight: FontWeight.w600,
+              ),
             ),
             const SizedBox(height: 20),
             Row(
@@ -1230,6 +1231,28 @@ class _SairSemSalvarDialog extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Tela de "lendo o orçamento", no mesmo layout de fundo esbranquiçado e
+/// cheio da tela de conversão de vistoria (ai_chat_page.dart,
+/// _ConvertingToOfflineBulkScreen) -- antes era um overlay translúcido por
+/// cima da tabela, que deixava o texto de status sem largura nenhuma pra
+/// quebrar linha.
+class _LendoOrcamentoScreen extends StatelessWidget {
+  final ValueListenable<String> statusText;
+
+  const _LendoOrcamentoScreen({required this.statusText});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      padding: const EdgeInsets.fromLTRB(24, 32, 24, 28),
+      color: const Color(0xFFF3FBFF),
+      child: Center(child: EyeProcessingAnimation(statusText: statusText)),
     );
   }
 }
