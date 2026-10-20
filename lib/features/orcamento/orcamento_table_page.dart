@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../services/argos_connectivity_service.dart';
 import '../../services/orcamento_arquivo_service.dart';
 import '../../services/tabela_precos_service.dart';
 import '../../services/valores_hora_service.dart';
@@ -670,8 +671,15 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
                       separatorBuilder: (_, __) => const SizedBox(height: 12),
                       itemBuilder: (context, rawIndex) {
                         if (_podeImportar && rawIndex == 0) {
-                          return _ImportarOrcamentoButton(
-                            onTap: _importarOrcamento,
+                          return ValueListenableBuilder<bool>(
+                            valueListenable:
+                                ArgosConnectivityService.instance.isOnline,
+                            builder: (context, online, _) {
+                              return _ImportarOrcamentoButton(
+                                enabled: online,
+                                onTap: _importarOrcamento,
+                              );
+                            },
                           );
                         }
 
@@ -2027,25 +2035,34 @@ class _AddItemButton extends StatelessWidget {
 }
 
 /// Atalho opcional para preencher a tabela a partir de um orçamento pronto.
+/// Precisa de internet de verdade (chama o Gemini via Cloud Function) —
+/// [enabled] trava o botão offline em vez de deixar o mecânico tocar e
+/// esbarrar num erro de rede.
 class _ImportarOrcamentoButton extends StatelessWidget {
   final VoidCallback onTap;
+  final bool enabled;
 
-  const _ImportarOrcamentoButton({required this.onTap});
+  const _ImportarOrcamentoButton({required this.onTap, this.enabled = true});
 
   @override
   Widget build(BuildContext context) {
+    final color = enabled ? const Color(0xFF0057C0) : const Color(0xFF94A3B8);
+
     return Material(
-      color: const Color(0xFFE5F6FF),
+      color: enabled ? const Color(0xFFE5F6FF) : const Color(0xFFF1F5F9),
       borderRadius: BorderRadius.circular(20),
       child: InkWell(
-        onTap: onTap,
+        onTap: enabled ? onTap : null,
         borderRadius: BorderRadius.circular(20),
-        child: const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           child: Row(
             children: [
-              Icon(Icons.document_scanner_outlined, color: Color(0xFF0057C0)),
-              SizedBox(width: 12),
+              Icon(
+                enabled ? Icons.document_scanner_outlined : Icons.cloud_off,
+                color: color,
+              ),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -2053,21 +2070,27 @@ class _ImportarOrcamentoButton extends StatelessWidget {
                     Text(
                       'Importar orçamento pronto',
                       style: TextStyle(
-                        color: Color(0xFF0057C0),
+                        color: color,
                         fontWeight: FontWeight.w800,
                         fontSize: 14,
                       ),
                     ),
-                    SizedBox(height: 2),
+                    const SizedBox(height: 2),
                     Text(
-                      'Opcional: foto ou print do orçamento da oficina. '
-                      'A IA preenche a tabela para você conferir.',
-                      style: TextStyle(color: Color(0xFF475569), fontSize: 12),
+                      enabled
+                          ? 'Opcional: foto ou print do orçamento da oficina. '
+                                'A IA preenche a tabela para você conferir.'
+                          : 'Indisponível offline — volta assim que a '
+                                'internet reconectar.',
+                      style: const TextStyle(
+                        color: Color(0xFF475569),
+                        fontSize: 12,
+                      ),
                     ),
                   ],
                 ),
               ),
-              Icon(Icons.chevron_right, color: Color(0xFF0057C0)),
+              if (enabled) Icon(Icons.chevron_right, color: color),
             ],
           ),
         ),
