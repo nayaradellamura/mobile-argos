@@ -941,6 +941,15 @@ class _AiChatPageState extends State<AiChatPage> {
           if (!mounted) return;
 
           if (resumeChoice == ColetaModo.guiado) {
+            // O diálogo promete "descarta o pacote" -- sem isso o rascunho
+            // em massa (fotos/áudios/orçamento ainda não enviados) ficava
+            // órfão no Firestore, podendo reaparecer se o mecânico voltasse
+            // pro modo em massa nessa mesma vistoria depois.
+            unawaited(
+              VistoriaChatSessionService.instance.clearEnvioEmMassaRascunho(
+                vistoriaDocId: openSession.docId,
+              ),
+            );
             unawaited(
               VistoriaChatSessionService.instance.setColetaModo(
                 vistoriaDocId: openSession.docId,
