@@ -3288,6 +3288,9 @@ class _AiChatPageState extends State<AiChatPage> {
       onCameraTap: _openCamera,
       onSendTap: _sendTextMessage,
       onMicTap: _startRecording,
+      onOrcamentoTap: (currentSession == null || isInspectionCompleted)
+          ? null
+          : _openOrcamentoTable,
     );
   }
 
@@ -5729,6 +5732,7 @@ class _TextComposer extends StatelessWidget {
   final VoidCallback onCameraTap;
   final VoidCallback onSendTap;
   final VoidCallback onMicTap;
+  final VoidCallback? onOrcamentoTap;
 
   const _TextComposer({
     super.key,
@@ -5740,6 +5744,7 @@ class _TextComposer extends StatelessWidget {
     required this.onCameraTap,
     required this.onSendTap,
     required this.onMicTap,
+    this.onOrcamentoTap,
   });
 
   @override
@@ -5757,6 +5762,10 @@ class _TextComposer extends StatelessWidget {
             pulsing: cameraPulsing,
             onTap: onCameraTap,
           ),
+          if (onOrcamentoTap != null) ...[
+            const SizedBox(width: 8),
+            _OrcamentoQuickButton(onTap: onOrcamentoTap!),
+          ],
           Expanded(
             child: TextField(
               controller: controller,
@@ -5906,6 +5915,45 @@ class _CameraReleaseButtonState extends State<_CameraReleaseButton>
         tooltip: widget.unlocked
             ? 'Anexar fotos'
             : 'Câmera travada: libera quando o Argos pedir as fotos',
+      ),
+    );
+  }
+}
+
+/// Botão manual pra abrir a tabela de orçamento no passo a passo. Existe
+/// porque o gatilho automático (_openOrcamentoAfterRelease) depende do
+/// agente falar uma frase exata ("liberei... tela de orçamento") — se a
+/// resposta dele variar um pouco, o mecânico não fica sem jeito de montar o
+/// orçamento manualmente.
+class _OrcamentoQuickButton extends StatelessWidget {
+  final VoidCallback onTap;
+
+  const _OrcamentoQuickButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: 'Montar orçamento',
+      child: Material(
+        color: Colors.transparent,
+        shape: CircleBorder(
+          side: BorderSide(color: const Color(0xFF0057C0).withOpacity(.5)),
+        ),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: const SizedBox(
+            width: 48,
+            height: 48,
+            child: Center(
+              child: Icon(
+                Icons.request_quote_outlined,
+                color: Color(0xFF0057C0),
+                size: 21,
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
