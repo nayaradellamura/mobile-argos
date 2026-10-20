@@ -36,7 +36,7 @@ class _MainShellState extends State<MainShell> {
   bool profileCompletionRequired = false;
 
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
-      _accountStatusSubscription;
+  _accountStatusSubscription;
   bool _accountBlockedDialogShown = false;
 
   // Sinistro selecionado quando o Chat IA é aberto a partir do sumário da vistoria.
@@ -85,8 +85,9 @@ class _MainShellState extends State<MainShell> {
     final listener = _notificationOpenListener;
 
     if (listener != null) {
-      ArgosPushNotificationService.instance.openedSinistroId
-          .removeListener(listener);
+      ArgosPushNotificationService.instance.openedSinistroId.removeListener(
+        listener,
+      );
     }
 
     _accountStatusSubscription?.cancel();
@@ -106,19 +107,19 @@ class _MainShellState extends State<MainShell> {
         .doc(email)
         .snapshots()
         .listen(
-      (snapshot) {
-        if (!mounted || _accountBlockedDialogShown) return;
+          (snapshot) {
+            if (!mounted || _accountBlockedDialogShown) return;
 
-        final status = snapshot.data()?['status']?.toString() ?? '';
+            final status = snapshot.data()?['status']?.toString() ?? '';
 
-        if (status.isNotEmpty && status != 'ativo') {
-          _showAccountBlockedDialog(status);
-        }
-      },
-      onError: (error) {
-        debugPrint('Account status watch error: $error');
-      },
-    );
+            if (status.isNotEmpty && status != 'ativo') {
+              _showAccountBlockedDialog(status);
+            }
+          },
+          onError: (error) {
+            debugPrint('Account status watch error: $error');
+          },
+        );
   }
 
   /// Mostra o diálogo de conta bloqueada/pendente e desloga ao confirmar.
@@ -201,7 +202,7 @@ class _MainShellState extends State<MainShell> {
   void _handleNotificationSinistroOpened() {
     final sinistroId =
         ArgosPushNotificationService.instance.openedSinistroId.value?.trim() ??
-            '';
+        '';
 
     if (sinistroId.isEmpty || !mounted) return;
 
@@ -226,9 +227,9 @@ class _MainShellState extends State<MainShell> {
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Notificação recebida para o sinistro $sinistroId.'),
-        backgroundColor: const Color(0xFF0057C0),
+      const SnackBar(
+        content: Text('Nova atualização em uma vistoria. Abrindo...'),
+        backgroundColor: Color(0xFF0057C0),
       ),
     );
   }
@@ -331,7 +332,8 @@ class _MainShellState extends State<MainShell> {
 
   /// Monta (e cacheia) as 3 páginas do IndexedStack, só recriando quando algo relevante muda.
   List<Widget> get pages {
-    final needsRebuild = _cachedPages == null ||
+    final needsRebuild =
+        _cachedPages == null ||
         _cachedPagesSinistroKey != selectedSinistroIdForChat ||
         _cachedPagesNotificationSinistroId != notificationSinistroIdToOpen ||
         _cachedPagesProfileCompletionRequired != profileCompletionRequired ||
@@ -382,14 +384,20 @@ class _MainShellState extends State<MainShell> {
 
     _selectedIndexNotifier.value = selectedIndex;
 
+    // Com o teclado aberto a barra de navegação ficava em cima dele e
+    // sobrava pouco espaço para a conversa no chat.
+    final tecladoAberto = MediaQuery.viewInsetsOf(context).bottom > 0;
+
     return Scaffold(
       backgroundColor: const Color(0xFFF3FBFF),
       body: IndexedStack(index: selectedIndex, children: pages),
-      bottomNavigationBar: _ArgosBottomNav(
-        currentIndex: selectedIndex,
-        completionRequired: profileCompletionRequired,
-        onTap: _handleNavTap,
-      ),
+      bottomNavigationBar: tecladoAberto
+          ? null
+          : _ArgosBottomNav(
+              currentIndex: selectedIndex,
+              completionRequired: profileCompletionRequired,
+              onTap: _handleNavTap,
+            ),
     );
   }
 }
