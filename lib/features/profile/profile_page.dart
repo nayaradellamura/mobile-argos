@@ -8,9 +8,11 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import '../../services/bulk_sync_coordinator.dart';
+import '../../services/ibge_http_client.dart';
 import '../../services/session_context_service.dart';
+import '../../services/vistoria_chat_session_service.dart';
 
 // Tela de perfil do usuário: visualiza/edita dados pessoais e completa o cadastro.
 class ProfilePage extends StatefulWidget {
@@ -154,7 +156,14 @@ class _ProfilePageState extends State<ProfilePage> {
     });
 
     try {
-      await Future.wait([_loadCredenciados(), _loadBrazilianCities()]);
+      // Cidades vêm de uma API externa (IBGE): se falhar, o perfil carrega do
+      // mesmo jeito e só a busca de cidade fica indisponível.
+      await Future.wait([
+        _loadCredenciados(),
+        _loadBrazilianCities().catchError((Object e) {
+          debugPrint('Erro ao carregar cidades do IBGE: $e');
+        }),
+      ]);
 
       await _loadProfileData();
 
@@ -225,7 +234,7 @@ class _ProfilePageState extends State<ProfilePage> {
       'https://servicodados.ibge.gov.br/api/v1/localidades/municipios',
     );
 
-    final response = await http.get(uri);
+    final response = await IbgeHttpClient.get(uri);
 
     if (response.statusCode != 200) {
       throw Exception('Erro ao buscar cidades do IBGE.');
@@ -445,49 +454,44 @@ class _ProfilePageState extends State<ProfilePage> {
 
   // Replica nome/e-mail/foto atualizados pros sinistros já atribuídos a este usuário, em lotes.
   Future<void> _syncAssignedProfileToSinistros({
-  required String uid,
-  required String name,
-  required String email,
-  required String photoURL,
-}) async {
-  final db = FirebaseFirestore.instance;
+    required String uid,
+    required String name,
+    required String email,
+    required String photoURL,
+  }) async {
+    final db = FirebaseFirestore.instance;
 
-  final snap = await db
-      .collection('sinistro')
-      .where('assignedToUid', isEqualTo: uid)
-      .get();
+    final snap = await db
+        .collection('sinistro')
+        .where('assignedToUid', isEqualTo: uid)
+        .get();
 
-  if (snap.docs.isEmpty) return;
+    if (snap.docs.isEmpty) return;
 
-  WriteBatch batch = db.batch();
-  int operationCount = 0;
+    WriteBatch batch = db.batch();
+    int operationCount = 0;
 
-  for (final doc in snap.docs) {
-    batch.set(
-      doc.reference,
-      {
+    for (final doc in snap.docs) {
+      batch.set(doc.reference, {
         'assignedToName': name,
         'assignedToEmail': email,
         'assignedToPhotoURL': photoURL,
         'assignedProfileUpdatedAt': FieldValue.serverTimestamp(),
-      },
-      SetOptions(merge: true),
-    );
+      }, SetOptions(merge: true));
 
-    operationCount++;
+      operationCount++;
 
-    if (operationCount == 450) {
+      if (operationCount == 450) {
+        await batch.commit();
+        batch = db.batch();
+        operationCount = 0;
+      }
+    }
+
+    if (operationCount > 0) {
       await batch.commit();
-      batch = db.batch();
-      operationCount = 0;
     }
   }
-
-  if (operationCount > 0) {
-    await batch.commit();
-  }
-}
-
 
   bool _hasProfilePhoto() {
     if (selectedPhoto != null) return true;
@@ -517,9 +521,10 @@ class _ProfilePageState extends State<ProfilePage> {
     if (!mounted) return;
 
     try {
-      await precacheImage(provider, context).timeout(
-        const Duration(seconds: 4),
-      );
+      await precacheImage(
+        provider,
+        context,
+      ).timeout(const Duration(seconds: 4));
     } catch (e) {
       debugPrint('Precache profile photo error: $e');
     }
@@ -670,10 +675,10 @@ class _ProfilePageState extends State<ProfilePage> {
       }
 
       if (uploadedPhotoURL != null &&
-    uploadedPhotoURL.isNotEmpty &&
-    widget.user.photoURL != uploadedPhotoURL) {
-  await widget.user.updatePhotoURL(uploadedPhotoURL);
-}
+          uploadedPhotoURL.isNotEmpty &&
+          widget.user.photoURL != uploadedPhotoURL) {
+        await widget.user.updatePhotoURL(uploadedPhotoURL);
+      }
 
       await _syncAssignedProfileToSinistros(
         uid: widget.user.uid,
@@ -727,11 +732,81 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
-  // Desloga o usuário atual.
+  // Desloga o usuário atual, após confirmação.
   Future<void> _logout() async {
+    final hasPending = await _hasPendingBulkSends();
+    if (!mounted) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+          ),
+          title: Text(
+            'Sair da conta?',
+            style: GoogleFonts.spaceGrotesk(
+              fontWeight: FontWeight.bold,
+              color: const Color(0xFF1F2937),
+            ),
+          ),
+          content: Text(
+            hasPending
+                ? 'Há envios de vistoria pendentes neste aparelho. Eles só '
+                      'serão concluídos quando você entrar novamente.'
+                : 'Você precisará entrar novamente para usar o app.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancelar'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
+              child: const Text('Sair'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) return;
     await SessionContextService.instance.logout();
   }
 
+  // Verifica (só no cache local, sem rede) se há pacote em massa sendo
+  // enviado ou com rascunho ainda não enviado.
+  Future<bool> _hasPendingBulkSends() async {
+    if (BulkSyncCoordinator.instance.syncingVistoriaIds.value.isNotEmpty) {
+      return true;
+    }
+
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('vistorias')
+          .where('inspectorId', isEqualTo: widget.user.uid)
+          .where(
+            'status',
+            isEqualTo: VistoriaChatSessionService.statusEmAndamento,
+          )
+          .where('coletaModo', isEqualTo: 'em_massa')
+          .get(const GetOptions(source: Source.cache))
+          .timeout(const Duration(seconds: 3));
+
+      return snapshot.docs.any((doc) {
+        final rascunho = doc.data()['envioEmMassaRascunho'];
+        if (rascunho is! Map) return false;
+        return rascunho.values.any(
+          (item) => item is Map && item['status'] != 'enviado',
+        );
+      });
+    } catch (e) {
+      debugPrint('Erro ao verificar envios pendentes antes de sair: $e');
+      return false;
+    }
+  }
 
   // Decoração padrão (bordas, cores) dos campos de texto do formulário.
   InputDecoration _fieldDecoration({
@@ -984,9 +1059,9 @@ class _ProfilePageState extends State<ProfilePage> {
     final avatarImage = selectedPhoto != null
         ? FileImage(selectedPhoto!) as ImageProvider
         : cachedProfileImage ??
-            (photoURL != null && photoURL!.isNotEmpty
-                ? NetworkImage(photoURL!) as ImageProvider
-                : null);
+              (photoURL != null && photoURL!.isNotEmpty
+                  ? NetworkImage(photoURL!) as ImageProvider
+                  : null);
 
     return SafeArea(
       child: SingleChildScrollView(
@@ -1406,7 +1481,6 @@ class CityOption {
 
   String get label => '$name - $uf';
 }
-
 
 // Remove o sufixo " - UF" de um nome de cidade digitado, se presente.
 String _cleanCityName(String value) {

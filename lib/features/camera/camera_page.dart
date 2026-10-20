@@ -165,9 +165,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
 
     _disposeScheduled = true;
 
-    unawaited(
-      _disposeCamera(delay: const Duration(seconds: 2)),
-    );
+    unawaited(_disposeCamera(delay: const Duration(seconds: 2)));
   }
 
   /// Desliga o flash e libera o controller atual da câmera.
@@ -202,13 +200,62 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
 
     if (requestedStatus.isGranted || requestedStatus.isLimited) return;
 
-    if (requestedStatus.isPermanentlyDenied) {
-      throw Exception(
-        'Permissão de câmera negada permanentemente. Libere o acesso nas configurações do aplicativo.',
-      );
-    }
+    throw _CameraPermissionDeniedException(
+      permanently: requestedStatus.isPermanentlyDenied,
+    );
+  }
 
-    throw Exception('Permissão de câmera necessária para capturar evidências.');
+  bool _isPermissionDialogOpen = false;
+
+  /// Explica por que a câmera é necessária e oferece abrir as configurações
+  /// (negada de vez) ou tentar de novo; "Voltar" fecha a tela.
+  Future<void> _showCameraPermissionDialog({required bool permanently}) async {
+    if (_isPermissionDialogOpen) return;
+    _isPermissionDialogOpen = true;
+
+    final action = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Câmera sem permissão'),
+        content: Text(
+          permanently
+              ? 'O acesso à câmera está bloqueado. Para fotografar as '
+                    'evidências da vistoria, libere a câmera nas configurações '
+                    'do aparelho.'
+              : 'O Argos precisa da câmera para fotografar as evidências da '
+                    'vistoria. Permita o acesso para continuar.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop('voltar'),
+            child: const Text('Voltar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(
+              dialogContext,
+            ).pop(permanently ? 'configuracoes' : 'tentar'),
+            child: Text(permanently ? 'Abrir configurações' : 'Tentar de novo'),
+          ),
+        ],
+      ),
+    );
+
+    _isPermissionDialogOpen = false;
+
+    if (!mounted) return;
+
+    switch (action) {
+      case 'configuracoes':
+        // Ao voltar das configurações, o resumed reinicializa a câmera.
+        await openAppSettings();
+        break;
+      case 'tentar':
+        await _initializeCamera(_selectedCameraIndex);
+        break;
+      default:
+        await _closePage();
+    }
   }
 
   /// Inicializa (ou reinicializa) o controller da câmera no índice indicado, com retry em caso de falha.
@@ -323,9 +370,18 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
         _isInitializing = false;
       });
 
+      if (e is _CameraPermissionDeniedException) {
+        await _showCameraPermissionDialog(permanently: e.permanently);
+        return;
+      }
+
+      debugPrint('Erro ao inicializar câmera: $e');
+
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Erro ao inicializar câmera: $e'),
+        const SnackBar(
+          content: Text(
+            'Não foi possível abrir a câmera. Feche e tente novamente.',
+          ),
           backgroundColor: Colors.redAccent,
         ),
       );
@@ -403,8 +459,8 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
 
     if (_photos.length >= maxPhotos) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Limite máximo de 10 fotos atingido.'),
+        SnackBar(
+          content: Text('Limite máximo de $maxPhotos fotos atingido.'),
           backgroundColor: Colors.orange,
         ),
       );
@@ -439,11 +495,13 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
         ),
       );
     } catch (e) {
+      debugPrint('Erro ao capturar foto: $e');
+
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Erro ao capturar foto: $e'),
+        const SnackBar(
+          content: Text('Não foi possível capturar a foto. Tente novamente.'),
           backgroundColor: Colors.redAccent,
         ),
       );
@@ -999,7 +1057,9 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
                       onPressed: _isPickingFromGallery
                           ? null
                           : _handleFinishButtonPressed,
-                      icon: Icon(canFinish ? Icons.check_circle : Icons.lock_outline),
+                      icon: Icon(
+                        canFinish ? Icons.check_circle : Icons.lock_outline,
+                      ),
                       label: Text(
                         canFinish
                             ? 'Usar $photoCount foto${photoCount > 1 ? 's' : ''} ${widget.destino}'
@@ -1357,4 +1417,11 @@ class _CameraOptionButton extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Permissão de câmera negada; `permanently` indica bloqueio pelo sistema.
+class _CameraPermissionDeniedException implements Exception {
+  final bool permanently;
+
+  const _CameraPermissionDeniedException({required this.permanently});
 }
