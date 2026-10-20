@@ -42,12 +42,19 @@
   }
   .hero .top { display: flex; justify-content: space-between; align-items: center; }
   .brand { display: flex; align-items: center; gap: 12px; }
-  .brand img { width: 42px; height: 42px; border-radius: 10px; background: #fff; }
+  .brand img {
+    width: 42px;
+    height: 42px;
+    border-radius: 10px;
+    background: #fff;
+    /* Contorno bem leve pra logo não se perder no gradiente do fundo. */
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, .4);
+  }
   .brand .nome { font-family: "Space Grotesk", Arial, sans-serif; font-size: 18pt; font-weight: 700; letter-spacing: .02em; }
-  .brand .sub { font-size: 8.5pt; opacity: .85; }
-  .hero .emissao { text-align: right; font-size: 8.5pt; opacity: .9; }
+  .brand .sub { font-size: 8.5pt; font-weight: 600; opacity: .95; }
+  .hero .emissao { text-align: right; font-size: 9pt; font-weight: 600; line-height: 1.5; }
   .hero h1 { font-size: 22pt; margin: 26px 0 4px; font-weight: 700; }
-  .hero .lead { font-size: 10.5pt; opacity: .92; margin: 0; }
+  .hero .lead { font-size: 10.5pt; font-weight: 500; opacity: .98; margin: 0; }
 
   .veiculo {
     margin: -22px 40px 0;
@@ -58,7 +65,10 @@
     display: grid;
     grid-template-columns: 1.6fr 1fr 1fr 1fr;
     gap: 14px;
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
+  .campo { break-inside: avoid; page-break-inside: avoid; }
   .campo .rotulo { color: var(--cinza); font-size: 7.5pt; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; }
   .campo .valor { font-size: 11pt; font-weight: 700; margin-top: 2px; }
   .placa {
@@ -88,7 +98,16 @@
     border-radius: 3px;
     background: var(--azul);
   }
-  h3.subtitulo { font-size: 9pt; color: var(--cinza); text-transform: uppercase; letter-spacing: .05em; margin: 16px 0 6px; }
+  h3.subtitulo {
+    font-size: 9pt;
+    font-weight: 700;
+    color: var(--cinza);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin: 16px 0 6px;
+    break-after: avoid;
+    page-break-after: avoid;
+  }
 
   .caixa {
     background: var(--fundo);
@@ -140,6 +159,7 @@
     text-align: left;
     color: var(--cinza);
     font-size: 7.5pt;
+    font-weight: 700;
     text-transform: uppercase;
     letter-spacing: .05em;
     padding: 0 10px 8px;
@@ -164,6 +184,7 @@
     text-align: left;
     color: var(--cinza);
     font-size: 7.5pt;
+    font-weight: 700;
     text-transform: uppercase;
     letter-spacing: .05em;
     padding: 0 10px 8px;
@@ -173,8 +194,8 @@
   table.itens tr { break-inside: avoid; page-break-inside: avoid; }
   table.itens td.num, table.itens th.num { text-align: right; white-space: nowrap; }
   table.itens td.peca { font-weight: 600; }
-  table.itens .horas { display: block; color: var(--cinza); font-size: 7.5pt; font-weight: 500; }
-  table.itens td.traco { color: var(--cinza); }
+  table.itens .horas { display: block; color: var(--cinza); font-size: 7.5pt; font-weight: 600; }
+  table.itens td.traco { color: var(--cinza); font-weight: 600; }
 
   .totais {
     margin-top: 14px;
@@ -205,7 +226,7 @@
     page-break-inside: avoid;
   }
   .foto-card img { width: 100%; height: 140px; object-fit: cover; display: block; }
-  .foto-card .caption { font-size: 8pt; color: var(--cinza); padding: 4px 8px; }
+  .foto-card .caption { font-size: 8pt; font-weight: 600; color: var(--cinza); padding: 4px 8px; }
 
   .transcricao { margin-top: 6px; }
   .transcricao .linha { padding: 6px 0; border-bottom: 1px dashed var(--borda); font-size: 10pt; break-inside: avoid; page-break-inside: avoid; }
@@ -218,7 +239,10 @@
     border-top: 1px solid var(--borda);
     color: var(--cinza);
     font-size: 8pt;
+    font-weight: 600;
     line-height: 1.4;
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
   .rodape strong { color: var(--texto); }
   .vazio { color: var(--cinza); font-style: italic; }
