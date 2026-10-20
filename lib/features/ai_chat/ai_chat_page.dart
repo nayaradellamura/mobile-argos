@@ -211,7 +211,6 @@ class _AiChatPageState extends State<AiChatPage> {
   /// Controla o travamento da câmera e o pulso visual de "recém-liberada".
   bool cameraUnlocked = false;
   bool cameraPulsing = false;
-  bool autoOrcamentoOpenedForRelease = false;
 
   Timer? recordingTimer;
   int recordingSeconds = 0;
@@ -469,18 +468,6 @@ class _AiChatPageState extends State<AiChatPage> {
     } catch (e) {
       debugPrint('Erro ao montar o resumo do orçamento: $e');
     }
-  }
-
-  void _openOrcamentoAfterRelease(String text) {
-    if (autoOrcamentoOpenedForRelease) return;
-    if (!_isOrcamentoReleaseText(text)) return;
-
-    autoOrcamentoOpenedForRelease = true;
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || isInspectionCompleted) return;
-      _openOrcamentoTable();
-    });
   }
 
   void _listenToVistoriaCompletion(VistoriaSession session) {
@@ -1815,7 +1802,6 @@ class _AiChatPageState extends State<AiChatPage> {
       });
 
       _openCameraAfterPhotoRelease(reply);
-      _openOrcamentoAfterRelease(reply);
       unawaited(_mostrarResumoOrcamento(reply));
       _scrollToBottom();
     } catch (e) {
@@ -1836,7 +1822,6 @@ class _AiChatPageState extends State<AiChatPage> {
     completedLaudoPending = false;
     cameraUnlocked = session.isRetificacao;
     cameraPulsing = false;
-    autoOrcamentoOpenedForRelease = false;
     _listenToVistoriaCompletion(session);
 
     final loadedMessages = <ChatMessage>[];
@@ -2164,7 +2149,6 @@ class _AiChatPageState extends State<AiChatPage> {
       });
 
       _openCameraAfterPhotoRelease(reply);
-      _openOrcamentoAfterRelease(reply);
       unawaited(_mostrarResumoOrcamento(reply));
       _scrollToBottom();
     } on FirebaseFunctionsException catch (e) {
@@ -2586,7 +2570,6 @@ class _AiChatPageState extends State<AiChatPage> {
     });
 
     _openCameraAfterPhotoRelease(texto);
-    _openOrcamentoAfterRelease(texto);
     unawaited(_mostrarResumoOrcamento(texto));
     _scrollToBottom();
   }
@@ -2823,12 +2806,7 @@ class _AiChatPageState extends State<AiChatPage> {
           ),
         );
 
-    // Fechou sem enviar: libera pra tabela reabrir na próxima vez que o
-    // agente pedir.
-    if (result == null || result.isEmpty) {
-      autoOrcamentoOpenedForRelease = false;
-      return;
-    }
+    if (result == null || result.isEmpty) return;
     if (!mounted) return;
 
     try {
@@ -2836,10 +2814,6 @@ class _AiChatPageState extends State<AiChatPage> {
         vistoriaDocId: session.docId,
         itens: result,
       );
-
-      // Se o mecânico pedir correção na confirmação final, o agente libera a
-      // tabela de novo — sem isso ela só abriria uma vez por sessão.
-      autoOrcamentoOpenedForRelease = false;
 
       if (!mounted) return;
 
@@ -3165,7 +3139,6 @@ class _AiChatPageState extends State<AiChatPage> {
       });
 
       _openCameraAfterPhotoRelease(audioResult.reply);
-      _openOrcamentoAfterRelease(audioResult.reply);
       unawaited(_mostrarResumoOrcamento(audioResult.reply));
       _scrollToBottom();
     } on FirebaseFunctionsException catch (e) {
@@ -3288,9 +3261,6 @@ class _AiChatPageState extends State<AiChatPage> {
       onCameraTap: _openCamera,
       onSendTap: _sendTextMessage,
       onMicTap: _startRecording,
-      onOrcamentoTap: (currentSession == null || isInspectionCompleted)
-          ? null
-          : _openOrcamentoTable,
     );
   }
 
@@ -3409,6 +3379,9 @@ class _AiChatPageState extends State<AiChatPage> {
                             final isCameraReleaseMessage =
                                 message.type == ChatMessageType.ai &&
                                 _isPhotoReleaseText(message.text);
+                            final isOrcamentoReleaseMessage =
+                                message.type == ChatMessageType.ai &&
+                                _isOrcamentoReleaseText(message.text);
 
                             return Padding(
                               padding: const EdgeInsets.only(bottom: 16),
@@ -3428,6 +3401,9 @@ class _AiChatPageState extends State<AiChatPage> {
                                     : null,
                                 onOpenCamera: isCameraReleaseMessage
                                     ? _openCamera
+                                    : null,
+                                onOpenOrcamento: isOrcamentoReleaseMessage
+                                    ? _openOrcamentoTable
                                     : null,
                                 onRetryPhoto:
                                     message.photoStatus ==
@@ -4290,6 +4266,9 @@ class _ChatBubble extends StatelessWidget {
   /// Não-nulo apenas na bolha que liberou a câmera.
   final VoidCallback? onOpenCamera;
 
+  /// Não-nulo apenas na bolha onde o agente liberou a tela de orçamento.
+  final VoidCallback? onOpenOrcamento;
+
   /// Não-nulo apenas na bolha da pergunta bifurcada, pra renderizar os botões inline.
   final void Function(ColetaModo)? onChooseColetaModo;
 
@@ -4302,6 +4281,7 @@ class _ChatBubble extends StatelessWidget {
   const _ChatBubble({
     required this.message,
     this.onOpenCamera,
+    this.onOpenOrcamento,
     this.onChooseColetaModo,
     this.acaoOuvir,
     this.onRetryPhoto,
@@ -4324,6 +4304,7 @@ class _ChatBubble extends StatelessWidget {
           createdAt: message.createdAt,
           acaoOuvir: acaoOuvir,
           onOpenCamera: onOpenCamera,
+          onOpenOrcamento: onOpenOrcamento,
           isColetaModoPrompt: message.isColetaModoPrompt,
           selectedColetaModo: message.selectedColetaModo,
           onChooseColetaModo: onChooseColetaModo,
@@ -4362,6 +4343,7 @@ class _AiBubble extends StatelessWidget {
   final List<int> boldLineIndexes;
   final DateTime? createdAt;
   final VoidCallback? onOpenCamera;
+  final VoidCallback? onOpenOrcamento;
   final bool isColetaModoPrompt;
   final ColetaModo? selectedColetaModo;
   final void Function(ColetaModo)? onChooseColetaModo;
@@ -4373,6 +4355,7 @@ class _AiBubble extends StatelessWidget {
     this.createdAt,
     this.acaoOuvir,
     this.onOpenCamera,
+    this.onOpenOrcamento,
     this.isColetaModoPrompt = false,
     this.selectedColetaModo,
     this.onChooseColetaModo,
@@ -4436,6 +4419,42 @@ class _AiBubble extends StatelessWidget {
                           SizedBox(width: 6),
                           Text(
                             'Abrir câmera',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 12.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+                if (onOpenOrcamento != null) ...[
+                  const SizedBox(height: 10),
+                  InkWell(
+                    onTap: onOpenOrcamento,
+                    borderRadius: BorderRadius.circular(999),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0057C0),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.request_quote_outlined,
+                            color: Colors.white,
+                            size: 16,
+                          ),
+                          SizedBox(width: 6),
+                          Text(
+                            'Abrir orçamento',
                             style: TextStyle(
                               color: Colors.white,
                               fontWeight: FontWeight.w700,
@@ -5732,7 +5751,6 @@ class _TextComposer extends StatelessWidget {
   final VoidCallback onCameraTap;
   final VoidCallback onSendTap;
   final VoidCallback onMicTap;
-  final VoidCallback? onOrcamentoTap;
 
   const _TextComposer({
     super.key,
@@ -5744,7 +5762,6 @@ class _TextComposer extends StatelessWidget {
     required this.onCameraTap,
     required this.onSendTap,
     required this.onMicTap,
-    this.onOrcamentoTap,
   });
 
   @override
@@ -5762,10 +5779,6 @@ class _TextComposer extends StatelessWidget {
             pulsing: cameraPulsing,
             onTap: onCameraTap,
           ),
-          if (onOrcamentoTap != null) ...[
-            const SizedBox(width: 8),
-            _OrcamentoQuickButton(onTap: onOrcamentoTap!),
-          ],
           Expanded(
             child: TextField(
               controller: controller,
@@ -5915,45 +5928,6 @@ class _CameraReleaseButtonState extends State<_CameraReleaseButton>
         tooltip: widget.unlocked
             ? 'Anexar fotos'
             : 'Câmera travada: libera quando o Argos pedir as fotos',
-      ),
-    );
-  }
-}
-
-/// Botão manual pra abrir a tabela de orçamento no passo a passo. Existe
-/// porque o gatilho automático (_openOrcamentoAfterRelease) depende do
-/// agente falar uma frase exata ("liberei... tela de orçamento") — se a
-/// resposta dele variar um pouco, o mecânico não fica sem jeito de montar o
-/// orçamento manualmente.
-class _OrcamentoQuickButton extends StatelessWidget {
-  final VoidCallback onTap;
-
-  const _OrcamentoQuickButton({required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return Tooltip(
-      message: 'Montar orçamento',
-      child: Material(
-        color: Colors.transparent,
-        shape: CircleBorder(
-          side: BorderSide(color: const Color(0xFF0057C0).withOpacity(.5)),
-        ),
-        child: InkWell(
-          customBorder: const CircleBorder(),
-          onTap: onTap,
-          child: const SizedBox(
-            width: 48,
-            height: 48,
-            child: Center(
-              child: Icon(
-                Icons.request_quote_outlined,
-                color: Color(0xFF0057C0),
-                size: 21,
-              ),
-            ),
-          ),
-        ),
       ),
     );
   }
