@@ -51,12 +51,18 @@ class ArgosAiService {
 
   /// Manda uma mensagem de sistema (ex.: aviso de que as fotos subiram) e
   /// retorna a resposta do agente.
+  ///
+  /// Com [persistirResposta], o servidor também grava a resposta no
+  /// histórico da vistoria (com o [turnoId]), para ela não se perder se a
+  /// conexão cair antes de o agente terminar.
   Future<String> sendBackgroundMessage({
     required String text,
     required String inspectionId,
     bool isRetificacao = false,
     String? ajustesNecessarios,
     String? contextoVistoriaAnterior,
+    bool persistirResposta = false,
+    String? turnoId,
   }) async {
     final cleanText = text.trim();
 
@@ -75,6 +81,8 @@ class ArgosAiService {
         'ajustesNecessarios': ajustesNecessarios ?? '',
         'contextoVistoriaAnterior': contextoVistoriaAnterior ?? '',
       },
+      if (persistirResposta) 'persistirResposta': true,
+      if (turnoId != null) 'turnoId': turnoId,
     });
 
     return result.data['reply']?.toString() ?? '';
@@ -155,17 +163,21 @@ class ArgosAudioMessageResult {
   factory ArgosAudioMessageResult.fromMap(Map<String, dynamic> data) {
     return ArgosAudioMessageResult(
       audioId: data['audioId']?.toString() ?? '',
-      idvistoria: data['idvistoria']?.toString() ??
+      idvistoria:
+          data['idvistoria']?.toString() ??
           data['inspectionId']?.toString() ??
           '',
-      originalTranscript: data['originalTranscript']?.toString() ??
+      originalTranscript:
+          data['originalTranscript']?.toString() ??
           data['transcricaoOriginal']?.toString() ??
           '',
-      revisedTranscript: data['revisedTranscript']?.toString() ??
+      revisedTranscript:
+          data['revisedTranscript']?.toString() ??
           data['transcricaoRevisada']?.toString() ??
           data['transcript']?.toString() ??
           '',
-      reply: data['reply']?.toString() ??
+      reply:
+          data['reply']?.toString() ??
           'Entendi. Pode continuar descrevendo a vistoria.',
     );
   }

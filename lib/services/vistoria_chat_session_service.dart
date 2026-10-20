@@ -42,6 +42,8 @@ class VistoriaChatSessionService {
       _db.collection('sinistro');
 
   // Observa o status da vistoria e se o laudo analítico já foi preenchido.
+  // Conclui assim que a vistoria é enviada pra análise (ou já passou disso),
+  // sem esperar o laudo; outros status só contam se o laudo já existir.
   Stream<VistoriaChatCompletionState> watchCompletionState({
     required String vistoriaDocId,
   }) {
@@ -52,11 +54,22 @@ class VistoriaChatSessionService {
 
       return VistoriaChatCompletionState(
         status: status,
-        isCompleted: status.isNotEmpty &&
+        hasAnalyticalReport: hasAnalyticalReport,
+        isCompleted:
+            status.isNotEmpty &&
             status != statusEmAndamento &&
-            hasAnalyticalReport,
+            (_isSubmittedStatus(status) || hasAnalyticalReport),
       );
     });
+  }
+
+  // Status que indicam que a coleta terminou e a vistoria seguiu adiante.
+  static bool _isSubmittedStatus(String status) {
+    final normalized = status.toUpperCase();
+
+    return normalized == statusEmAnaliseOperacional ||
+        normalized == statusFinalizada ||
+        normalized.contains('APROVAD');
   }
 
   // Busca a vistoria EM_ANDAMENTO mais recente do inspetor atual (opcionalmente
@@ -100,7 +113,7 @@ class VistoriaChatSessionService {
   // Lista os sinistros com check-in atribuídos ao mecânico atual que ainda
   // podem receber uma vistoria nova (fonte de dados do picker do Argos IA).
   Future<List<SinistroVistoriaOption>>
-      listCheckedInSinistrosForCurrentUser() async {
+  listCheckedInSinistrosForCurrentUser() async {
     final ctx = await _currentContext();
 
     if (ctx.credenciadoId.isEmpty) return [];
@@ -113,11 +126,14 @@ class VistoriaChatSessionService {
         .where((doc) {
           final data = doc.data();
           final assignedToUid = _str(data['assignedToUid']);
-          final vistoriaStatus = _str(data['vistoriaAtualStatus']).toUpperCase();
+          final vistoriaStatus = _str(
+            data['vistoriaAtualStatus'],
+          ).toUpperCase();
 
           final isMine = assignedToUid == ctx.uid;
 
-          final isBlocked = vistoriaStatus.contains('ANALISE') ||
+          final isBlocked =
+              vistoriaStatus.contains('ANALISE') ||
               vistoriaStatus.contains('FINALIZADA') ||
               vistoriaStatus.contains('FINALIZADO') ||
               vistoriaStatus.contains('APROVADA') ||
@@ -193,10 +209,7 @@ class VistoriaChatSessionService {
 
     final placa = _str(
       veiculoSnapshot['placa'],
-      fallback: _str(
-        sinistro['plate'],
-        fallback: _str(sinistro['placa']),
-      ),
+      fallback: _str(sinistro['plate'], fallback: _str(sinistro['placa'])),
     );
 
     final veiculo = _vehicleName(
@@ -212,20 +225,14 @@ class VistoriaChatSessionService {
 
     final cliente = _str(
       clienteSnapshot['nomeCompleto'],
-      fallback: _str(
-        sinistro['owner'],
-        fallback: _str(sinistro['cliente']),
-      ),
+      fallback: _str(sinistro['owner'], fallback: _str(sinistro['cliente'])),
     );
 
     final credenciado = _str(
       credenciadoSnapshot['name'],
       fallback: _str(
         sinistro['credenciadoNome'],
-        fallback: _str(
-          sinistro['workshop'],
-          fallback: ctx.credenciadoNome,
-        ),
+        fallback: _str(sinistro['workshop'], fallback: ctx.credenciadoNome),
       ),
     );
 
@@ -311,18 +318,14 @@ class VistoriaChatSessionService {
     final batch = _db.batch();
 
     batch.set(_vistorias.doc(idvistoria), data);
-    batch.set(
-      _sinistros.doc(cleanSinistroId),
-      {
-        'vistoriaAtualId': idvistoria,
-        'vistoriaAtualStatus': statusEmAndamento,
-        'vistoriaAtualTipo': tipoOriginal,
-        'vistoriaAtualOrigemId': FieldValue.delete(),
-        'retificacaoAtualId': FieldValue.delete(),
-        'ultimaVistoriaAt': FieldValue.serverTimestamp(),
-      },
-      SetOptions(merge: true),
-    );
+    batch.set(_sinistros.doc(cleanSinistroId), {
+      'vistoriaAtualId': idvistoria,
+      'vistoriaAtualStatus': statusEmAndamento,
+      'vistoriaAtualTipo': tipoOriginal,
+      'vistoriaAtualOrigemId': FieldValue.delete(),
+      'retificacaoAtualId': FieldValue.delete(),
+      'ultimaVistoriaAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
 
     await batch.commit();
 
@@ -419,10 +422,7 @@ class VistoriaChatSessionService {
 
     final placa = _str(
       veiculoSnapshot['placa'],
-      fallback: _str(
-        sinistro['plate'],
-        fallback: _str(sinistro['placa']),
-      ),
+      fallback: _str(sinistro['plate'], fallback: _str(sinistro['placa'])),
     );
 
     final veiculo = _vehicleName(
@@ -438,20 +438,14 @@ class VistoriaChatSessionService {
 
     final cliente = _str(
       clienteSnapshot['nomeCompleto'],
-      fallback: _str(
-        sinistro['owner'],
-        fallback: _str(sinistro['cliente']),
-      ),
+      fallback: _str(sinistro['owner'], fallback: _str(sinistro['cliente'])),
     );
 
     final credenciado = _str(
       credenciadoSnapshot['name'],
       fallback: _str(
         sinistro['credenciadoNome'],
-        fallback: _str(
-          sinistro['workshop'],
-          fallback: ctx.credenciadoNome,
-        ),
+        fallback: _str(sinistro['workshop'], fallback: ctx.credenciadoNome),
       ),
     );
 
@@ -520,18 +514,14 @@ class VistoriaChatSessionService {
     final batch = _db.batch();
 
     batch.set(_vistorias.doc(tempId), data);
-    batch.set(
-      _sinistros.doc(cleanSinistroId),
-      {
-        'vistoriaAtualId': tempId,
-        'vistoriaAtualStatus': statusEmAndamento,
-        'vistoriaAtualTipo': tipoOriginal,
-        'vistoriaAtualOrigemId': FieldValue.delete(),
-        'retificacaoAtualId': FieldValue.delete(),
-        'ultimaVistoriaAt': Timestamp.fromDate(now),
-      },
-      SetOptions(merge: true),
-    );
+    batch.set(_sinistros.doc(cleanSinistroId), {
+      'vistoriaAtualId': tempId,
+      'vistoriaAtualStatus': statusEmAndamento,
+      'vistoriaAtualTipo': tipoOriginal,
+      'vistoriaAtualOrigemId': FieldValue.delete(),
+      'retificacaoAtualId': FieldValue.delete(),
+      'ultimaVistoriaAt': Timestamp.fromDate(now),
+    }, SetOptions(merge: true));
 
     await _writeNoWaitOffline(
       () => batch.commit(),
@@ -570,9 +560,9 @@ class VistoriaChatSessionService {
 
     final data = Map<String, dynamic>.from(doc.data() ?? {});
 
-    final rascunhoAindaPendente = _asMap(data['envioEmMassaRascunho'])
-        .values
-        .any((item) => item is Map && item['status'] != 'enviado');
+    final rascunhoAindaPendente = _asMap(
+      data['envioEmMassaRascunho'],
+    ).values.any((item) => item is Map && item['status'] != 'enviado');
 
     if (rascunhoAindaPendente) return tempDocId;
 
@@ -584,10 +574,7 @@ class VistoriaChatSessionService {
     final agentParameters = _asMap(data['agentParameters']);
 
     if (agentParameters.isNotEmpty) {
-      data['agentParameters'] = {
-        ...agentParameters,
-        'id_vistoria': realId,
-      };
+      data['agentParameters'] = {...agentParameters, 'id_vistoria': realId};
     }
 
     final batch = _db.batch();
@@ -705,18 +692,14 @@ class VistoriaChatSessionService {
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
 
-    batch.set(
-      _sinistros.doc(original.sinistroId),
-      {
-        'vistoriaAtualId': newId,
-        'vistoriaAtualStatus': statusEmAndamento,
-        'vistoriaAtualTipo': tipoRetificacao,
-        'vistoriaAtualOrigemId': original.idvistoria,
-        'retificacaoAtualId': newId,
-        'ultimaVistoriaAt': FieldValue.serverTimestamp(),
-      },
-      SetOptions(merge: true),
-    );
+    batch.set(_sinistros.doc(original.sinistroId), {
+      'vistoriaAtualId': newId,
+      'vistoriaAtualStatus': statusEmAndamento,
+      'vistoriaAtualTipo': tipoRetificacao,
+      'vistoriaAtualOrigemId': original.idvistoria,
+      'retificacaoAtualId': newId,
+      'ultimaVistoriaAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
 
     await batch.commit();
 
@@ -852,9 +835,7 @@ class VistoriaChatSessionService {
   }
 
   // Marca a vistoria como EXPIRADA e sincroniza o status no sinistro.
-  Future<void> _expireVistoria({
-    required String vistoriaDocId,
-  }) async {
+  Future<void> _expireVistoria({required String vistoriaDocId}) async {
     await _vistorias.doc(vistoriaDocId).set({
       'status': statusExpirada,
       'expiredAt': FieldValue.serverTimestamp(),
@@ -987,7 +968,18 @@ class VistoriaChatSessionService {
   }) async {
     final cleanText = text.trim();
 
-    if (cleanText.isEmpty && role != 'audio') return;
+    // O resumo do orçamento não tem texto: os itens vão em `extraData`.
+    if (cleanText.isEmpty && role != 'audio' && role != 'orcamento_resumo') {
+      return;
+    }
+
+    // TTL de sessão (24h úteis) é renovado aqui, no app — não depende de
+    // nenhuma Cloud Function/backend do agente escrever isso de volta.
+    // Antes disso, só o Cloud Function do Dialogflow CX recalculava
+    // `agentBusinessExpiresAt` a cada turno; com o corte pro ADK isso
+    // ficaria sem dono. Mantendo client-side, o comportamento continua
+    // igual independente de qual backend está respondendo.
+    final now = DateTime.now();
 
     await _vistorias.doc(vistoriaDocId).set({
       'chatmessages': FieldValue.arrayUnion([
@@ -996,9 +988,10 @@ class VistoriaChatSessionService {
           'text': cleanText,
           if (extraData != null) ...extraData,
           'createdAt': Timestamp.now(),
-        }
+        },
       ]),
       'agentLastTurnAt': FieldValue.serverTimestamp(),
+      'agentBusinessExpiresAt': Timestamp.fromDate(_addBusinessHours(now, 24)),
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
   }
@@ -1026,10 +1019,11 @@ class VistoriaChatSessionService {
 
     final ref = _vistorias.doc(vistoriaDocId);
     final novos = itens
-        .map((item) => <String, dynamic>{
-              ...item,
-              'origem': 'mecanico',
-            }..remove('tipo')..remove('status'))
+        .map(
+          (item) => <String, dynamic>{...item, 'origem': 'mecanico'}
+            ..remove('tipo')
+            ..remove('status'),
+        )
         .toList();
     final novosIds = novos.map((item) => item['id']).toSet();
 
@@ -1038,9 +1032,12 @@ class VistoriaChatSessionService {
       final atual = snapshot.data()?['orcamentoRascunho'];
 
       final mantidos = (atual is List ? atual : const [])
-          .where((item) => !(item is Map &&
-              item['origem'] == 'mecanico' &&
-              novosIds.contains(item['id'])))
+          .where(
+            (item) =>
+                !(item is Map &&
+                    item['origem'] == 'mecanico' &&
+                    novosIds.contains(item['id'])),
+          )
           .toList();
 
       transaction.set(ref, {
@@ -1117,6 +1114,9 @@ class VistoriaChatSessionService {
     }, SetOptions(merge: true));
   }
 
+  // Desempata ids de fotos que sobem em paralelo no mesmo instante.
+  int _seqImagem = 0;
+
   // Sobe uma foto pro Storage e retorna seus metadados de evidência.
   Future<UploadedImageEvidence> uploadImageFile({
     required String vistoriaDocId,
@@ -1129,16 +1129,16 @@ class VistoriaChatSessionService {
     }
 
     final bytes = await file.length();
-    final imageId = 'img_${DateTime.now().millisecondsSinceEpoch}';
+    // O app sobe as fotos de uma leva em paralelo: só o timestamp em ms
+    // poderia repetir, e o Storage recusa sobrescrever (regra `create`).
+    final imageId =
+        'img_${DateTime.now().millisecondsSinceEpoch}_${_seqImagem++}';
     final fileName = '$imageId.jpg';
     final storagePath = 'vistorias/$vistoriaDocId/images/$fileName';
 
     final ref = _storage.ref(storagePath);
 
-    await ref.putFile(
-      file,
-      SettableMetadata(contentType: 'image/jpeg'),
-    );
+    await ref.putFile(file, SettableMetadata(contentType: 'image/jpeg'));
 
     final url = await ref.getDownloadURL();
 
@@ -1179,7 +1179,9 @@ class VistoriaChatSessionService {
 
     return fonte
         .whereType<Map>()
-        .map((item) => item.map((key, value) => MapEntry(key.toString(), value)))
+        .map(
+          (item) => item.map((key, value) => MapEntry(key.toString(), value)),
+        )
         .toList();
   }
 
@@ -1197,7 +1199,8 @@ class VistoriaChatSessionService {
     await appendChatMessage(
       vistoriaDocId: vistoriaDocId,
       role: 'system',
-      text: 'Orçamento enviado: ${itens.length} '
+      text:
+          'Orçamento enviado: ${itens.length} '
           'ite${itens.length > 1 ? 'ns' : 'm'}, total de '
           '${formatCurrencyBRL(somarItensOrcamento(itens))}.',
     );
@@ -1225,7 +1228,7 @@ class VistoriaChatSessionService {
           'contentType': contentType,
           'sizeBytes': sizeBytes,
           'createdAt': Timestamp.now(),
-        }
+        },
       ]),
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
@@ -1253,9 +1256,7 @@ class VistoriaChatSessionService {
 
   // Remove campos legados de transcrição de todos os docs de vistoria,
   // paginando a coleção inteira.
-  Future<void> cleanupRootTranscriptionFields({
-    int batchSize = 450,
-  }) async {
+  Future<void> cleanupRootTranscriptionFields({int batchSize = 450}) async {
     Query<Map<String, dynamic>> query = _vistorias
         .orderBy(FieldPath.documentId)
         .limit(batchSize);
@@ -1306,8 +1307,9 @@ class VistoriaChatSessionService {
         'vistoriaAtualId': _str(data['idvistoria'], fallback: vistoriaDocId),
         'vistoriaAtualStatus': status,
         'vistoriaAtualTipo': tipoVistoria,
-        'vistoriaAtualOrigemId':
-            origemId.isEmpty ? FieldValue.delete() : origemId,
+        'vistoriaAtualOrigemId': origemId.isEmpty
+            ? FieldValue.delete()
+            : origemId,
         'ultimaVistoriaAt': FieldValue.serverTimestamp(),
         ...extra,
       }, SetOptions(merge: true)),
@@ -1353,28 +1355,26 @@ class VistoriaChatSessionService {
     final year = DateTime.now().year;
     final counterRef = _db.collection('counters').doc('vistorias_$year');
 
-    final nextNumber = await _db.runTransaction<int>((transaction) async {
-      final snapshot = await transaction.get(counterRef);
-      final data = snapshot.data();
+    final nextNumber = await _db
+        .runTransaction<int>((transaction) async {
+          final snapshot = await transaction.get(counterRef);
+          final data = snapshot.data();
 
-      final current = snapshot.exists && data != null
-          ? (data['lastNumber'] as int? ?? 0)
-          : 0;
+          final current = snapshot.exists && data != null
+              ? (data['lastNumber'] as int? ?? 0)
+              : 0;
 
-      final next = current + 1;
+          final next = current + 1;
 
-      transaction.set(
-        counterRef,
-        {
-          'lastNumber': next,
-          'year': year,
-          'updatedAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
+          transaction.set(counterRef, {
+            'lastNumber': next,
+            'year': year,
+            'updatedAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
 
-      return next;
-    }).timeout(const Duration(seconds: 15));
+          return next;
+        })
+        .timeout(const Duration(seconds: 15));
 
     return 'VIS-$year-${nextNumber.toString().padLeft(4, '0')}';
   }
@@ -1408,10 +1408,7 @@ class VistoriaChatSessionService {
 
   // Verifica se o doc já tem algum campo de laudo analítico preenchido.
   static bool _hasFilledAnalyticalReport(Map<String, dynamic> data) {
-    const candidateFields = [
-      'laudo_analitico',
-      'laudoAnalitico',
-    ];
+    const candidateFields = ['laudo_analitico', 'laudoAnalitico'];
 
     return candidateFields.any((field) => _hasAnyFilledValue(data[field]));
   }
@@ -1488,10 +1485,7 @@ class VistoriaChatSessionService {
   }
 
   // Monta o nome de exibição do veículo a partir de marca e modelo.
-  static String _vehicleName({
-    required String marca,
-    required String modelo,
-  }) {
+  static String _vehicleName({required String marca, required String modelo}) {
     if (marca.isEmpty && modelo.isEmpty) return '';
     if (marca.isEmpty) return modelo;
     if (modelo.isEmpty) return marca;
@@ -1525,10 +1519,12 @@ class VistoriaChatSessionService {
 class VistoriaChatCompletionState {
   final String status;
   final bool isCompleted;
+  final bool hasAnalyticalReport;
 
   const VistoriaChatCompletionState({
     required this.status,
     required this.isCompleted,
+    this.hasAnalyticalReport = false,
   });
 }
 
@@ -1592,7 +1588,8 @@ class VistoriaSession {
 
   // Se a sessão do agente (ADK) já passou do prazo de expiração.
   bool get isAgentSessionExpired {
-    final expiresAt = agentBusinessExpiresAt ??
+    final expiresAt =
+        agentBusinessExpiresAt ??
         (agentLastTurnAt == null
             ? null
             : VistoriaChatSessionService._addBusinessHours(
@@ -1613,13 +1610,12 @@ class VistoriaSession {
 
     final messages = rawMessages is List
         ? rawMessages
-            .whereType<Map>()
-            .map(
-              (item) => item.map(
-                (key, value) => MapEntry(key.toString(), value),
-              ),
-            )
-            .toList()
+              .whereType<Map>()
+              .map(
+                (item) =>
+                    item.map((key, value) => MapEntry(key.toString(), value)),
+              )
+              .toList()
         : <Map<String, dynamic>>[];
 
     return VistoriaSession(
@@ -1647,9 +1643,7 @@ class VistoriaSession {
       contextoVistoriaAnterior: VistoriaChatSessionService._str(
         data['contextoVistoriaAnterior'],
       ),
-      motivoRejeicao: VistoriaChatSessionService._str(
-        data['motivoRejeicao'],
-      ),
+      motivoRejeicao: VistoriaChatSessionService._str(data['motivoRejeicao']),
       chatMessages: messages,
       agentLastTurnAt: VistoriaChatSessionService._dateValueOrNull(
         data['agentLastTurnAt'],
@@ -1739,7 +1733,9 @@ class SinistroVistoriaOption {
       cliente: cliente,
       checkInAt: VistoriaChatSessionService._str(data['checkInAt']),
       status: VistoriaChatSessionService._str(data['status']),
-      vistoriaStatus: VistoriaChatSessionService._str(data['vistoriaAtualStatus']),
+      vistoriaStatus: VistoriaChatSessionService._str(
+        data['vistoriaAtualStatus'],
+      ),
     );
   }
 
