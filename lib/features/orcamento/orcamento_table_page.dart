@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +9,8 @@ import 'package:image_picker/image_picker.dart';
 import '../../services/orcamento_arquivo_service.dart';
 import '../../services/tabela_precos_service.dart';
 import '../../services/valores_hora_service.dart';
+import '../ai_chat/eye_processing_animation.dart';
+import '../camera/camera_page.dart';
 import 'orcamento_calculo.dart';
 
 int _idCounter = 0;
@@ -145,6 +149,13 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
   Map<String, double> _valoresHora = {};
   bool _carregandoValoresHora = true;
 
+  /// Mostra a animação do olho (mesma do envio em massa) por cima da tabela
+  /// enquanto o Gemini lê o orçamento importado por arquivo.
+  bool _importando = false;
+  final ValueNotifier<String> _statusImportacao = ValueNotifier(
+    'Lendo o orçamento...',
+  );
+
   /// Lista compacta (uma linha por item; toque abre o card para editar).
   late bool _compacto = widget.itensIniciais.length > 4;
   String? _expandidoId;
@@ -171,6 +182,7 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
     for (final item in _itens) {
       item.dispose();
     }
+    _statusImportacao.dispose();
     super.dispose();
   }
 
@@ -273,6 +285,7 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
+          backgroundColor: Colors.orange,
           content: Text(
             'Os valores serão usados neste orçamento, mas não foi possível '
             'salvá-los na oficina.',
@@ -287,84 +300,60 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
   /// Atalho opcional: lê um orçamento pronto (foto ou print) com o Gemini e
   /// preenche a tabela. O mecânico confere e corrige antes de salvar.
   Future<void> _importarOrcamento() async {
-    final source = await showModalBottomSheet<ImageSource>(
+    final source = await showModalBottomSheet<_FonteOrcamento>(
       context: context,
+      backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
       ),
-      builder: (sheetContext) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(8, 16, 8, 8),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Padding(
-                padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
-                child: Text(
-                  'Importar orçamento pronto',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
-                ),
-              ),
-              ListTile(
-                leading: const Icon(Icons.photo_camera_outlined),
-                title: const Text('Tirar foto do orçamento'),
-                onTap: () => Navigator.of(sheetContext).pop(ImageSource.camera),
-              ),
-              ListTile(
-                leading: const Icon(Icons.photo_library_outlined),
-                title: const Text('Escolher imagem ou print'),
-                subtitle: const Text(
-                  'Foto do papel, print do PDF ou da planilha',
-                ),
-                onTap: () =>
-                    Navigator.of(sheetContext).pop(ImageSource.gallery),
-              ),
-            ],
-          ),
-        ),
-      ),
+      builder: (sheetContext) => const _ImportarOrcamentoSheet(),
     );
 
     if (source == null || !mounted) return;
 
-    final XFile? arquivo;
+    final Uint8List bytes;
+    final String nomeArquivo;
+    final String mimeType;
     try {
-      arquivo = await ImagePicker().pickImage(
-        source: source,
-        imageQuality: 85,
-        maxWidth: 2400,
-      );
+      if (source == _FonteOrcamento.camera) {
+        final fotos = await Navigator.of(context).push<List<XFile>>(
+          MaterialPageRoute(
+            builder: (_) => const CameraPage(
+              maxPhotos: 1,
+              titulo: 'Foto do orçamento',
+              destino: 'para importar',
+            ),
+          ),
+        );
+        if (fotos == null || fotos.isEmpty || !mounted) return;
+        final foto = fotos.first;
+        bytes = await foto.readAsBytes();
+        nomeArquivo = 'orcamento.jpg';
+        mimeType = 'image/jpeg';
+      } else {
+        final arquivo = await ImagePicker().pickImage(
+          source: ImageSource.gallery,
+          imageQuality: 85,
+          maxWidth: 2400,
+        );
+        if (arquivo == null || !mounted) return;
+        bytes = await arquivo.readAsBytes();
+        nomeArquivo = arquivo.name.isEmpty ? 'orcamento.jpg' : arquivo.name;
+        mimeType = arquivo.mimeType ?? 'image/jpeg';
+      }
     } catch (e) {
       debugPrint('Erro ao escolher imagem do orçamento: $e');
-      _mostrarAviso('Não foi possível abrir a câmera ou a galeria.');
+      _mostrarAviso(
+        'Não foi possível abrir a câmera ou a galeria.',
+        backgroundColor: Colors.redAccent,
+      );
       return;
     }
 
-    if (arquivo == null || !mounted) return;
-
-    final bytes = await arquivo.readAsBytes();
     if (!mounted) return;
 
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const PopScope(
-        canPop: false,
-        child: AlertDialog(
-          content: Row(
-            children: [
-              SizedBox(
-                width: 22,
-                height: 22,
-                child: CircularProgressIndicator(strokeWidth: 2.5),
-              ),
-              SizedBox(width: 16),
-              Expanded(child: Text('Lendo o orçamento...')),
-            ],
-          ),
-        ),
-      ),
-    );
+    _statusImportacao.value = 'Lendo o orçamento...';
+    setState(() => _importando = true);
 
     OrcamentoArquivoResultado? resultado;
     String? erro;
@@ -372,8 +361,8 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
       resultado = await OrcamentoArquivoService.instance.importar(
         vistoriaDocId: widget.vistoriaDocId!.trim(),
         bytes: bytes,
-        nomeArquivo: arquivo.name.isEmpty ? 'orcamento.jpg' : arquivo.name,
-        mimeType: arquivo.mimeType ?? 'image/jpeg',
+        nomeArquivo: nomeArquivo,
+        mimeType: mimeType,
       );
     } on FirebaseFunctionsException catch (e) {
       debugPrint('Erro ao importar orçamento: ${e.code} ${e.message}');
@@ -386,10 +375,10 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
     }
 
     if (!mounted) return;
-    Navigator.of(context, rootNavigator: true).pop();
+    setState(() => _importando = false);
 
     if (erro != null) {
-      _mostrarAviso(erro);
+      _mostrarAviso(erro, backgroundColor: Colors.redAccent);
       return;
     }
 
@@ -397,6 +386,7 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
       _mostrarAviso(
         'Não deu para ler os itens. Tente uma foto mais nítida, com o '
         'orçamento inteiro e bem iluminado.',
+        backgroundColor: Colors.orange,
       );
       return;
     }
@@ -444,26 +434,8 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
     if (_itensPreenchidos.isNotEmpty) {
       final escolha = await showDialog<bool>(
         context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: Text('${drafts.length} itens lidos'),
-          content: const Text(
-            'Quer substituir os itens da tabela pelos do orçamento ou '
-            'adicionar ao final?',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('Cancelar'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('Adicionar'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const Text('Substituir'),
-            ),
-          ],
+        builder: (dialogContext) => _SubstituirOuAdicionarDialog(
+          quantidade: drafts.length,
         ),
       );
       if (escolha == null || !mounted) return;
@@ -497,15 +469,24 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
         'Total no documento: ${formatCurrencyBRL(resultado.totalDocumento!)}.',
       if ((resultado.observacao ?? '').isNotEmpty) resultado.observacao!,
     ];
-    _mostrarAviso(avisos.join(' '), duracao: const Duration(seconds: 6));
+    _mostrarAviso(
+      avisos.join(' '),
+      duracao: const Duration(seconds: 6),
+      backgroundColor: Colors.green,
+    );
   }
 
-  void _mostrarAviso(String texto, {Duration? duracao}) {
+  void _mostrarAviso(
+    String texto, {
+    Duration? duracao,
+    Color backgroundColor = const Color(0xFF0057C0),
+  }) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(texto),
         duration: duracao ?? const Duration(seconds: 4),
+        backgroundColor: backgroundColor,
       ),
     );
   }
@@ -568,25 +549,7 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
 
     final descartar = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Sair sem salvar?'),
-        content: Text(
-          quantidade == 1
-              ? 'O item da tabela não será salvo.'
-              : 'Os $quantidade itens da tabela não serão salvos.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Continuar editando'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
-            child: const Text('Sair sem salvar'),
-          ),
-        ],
-      ),
+      builder: (dialogContext) => _SairSemSalvarDialog(quantidade: quantidade),
     );
 
     return descartar ?? false;
@@ -681,133 +644,150 @@ class _OrcamentoTablePageState extends State<OrcamentoTablePage> {
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) _closePage();
       },
-      child: Scaffold(
-        backgroundColor: const Color(0xFFF3FBFF),
-        body: SafeArea(
-          child: Column(
-            children: [
-              _OrcamentoHeader(
-                itemCount: preenchidos.length,
-                compacto: _compacto,
-                onClose: _closePage,
-                onConfigurarValorHora: () => _configurarValoresHora(),
-                onAlternarVisualizacao: () => setState(() {
-                  _compacto = !_compacto;
-                  _expandidoId = null;
-                }),
-              ),
-              if (faltaValorHora)
-                _ValorHoraBanner(onTap: () => _configurarValoresHora()),
-              Expanded(
-                child: ListView.separated(
-                  padding: const EdgeInsets.fromLTRB(18, 18, 18, 100),
-                  itemCount: _itens.length + 1 + (_podeImportar ? 1 : 0),
-                  separatorBuilder: (_, __) => const SizedBox(height: 12),
-                  itemBuilder: (context, rawIndex) {
-                    if (_podeImportar && rawIndex == 0) {
-                      return _ImportarOrcamentoButton(
-                        onTap: _importarOrcamento,
-                      );
-                    }
+      child: Stack(
+        children: [
+          Scaffold(
+            backgroundColor: const Color(0xFFF3FBFF),
+            body: SafeArea(
+              child: Column(
+                children: [
+                  _OrcamentoHeader(
+                    itemCount: preenchidos.length,
+                    compacto: _compacto,
+                    onClose: _closePage,
+                    onConfigurarValorHora: () => _configurarValoresHora(),
+                    onAlternarVisualizacao: () => setState(() {
+                      _compacto = !_compacto;
+                      _expandidoId = null;
+                    }),
+                  ),
+                  if (faltaValorHora)
+                    _ValorHoraBanner(onTap: () => _configurarValoresHora()),
+                  Expanded(
+                    child: ListView.separated(
+                      padding: const EdgeInsets.fromLTRB(18, 18, 18, 100),
+                      itemCount: _itens.length + 1 + (_podeImportar ? 1 : 0),
+                      separatorBuilder: (_, __) => const SizedBox(height: 12),
+                      itemBuilder: (context, rawIndex) {
+                        if (_podeImportar && rawIndex == 0) {
+                          return _ImportarOrcamentoButton(
+                            onTap: _importarOrcamento,
+                          );
+                        }
 
-                    final index = rawIndex - (_podeImportar ? 1 : 0);
+                        final index = rawIndex - (_podeImportar ? 1 : 0);
 
-                    if (index == _itens.length) {
-                      return _AddItemButton(onTap: _addBlankItem);
-                    }
+                        if (index == _itens.length) {
+                          return _AddItemButton(onTap: _addBlankItem);
+                        }
 
-                    final item = _itens[index];
+                        final item = _itens[index];
 
-                    if (_compacto && item.id != _expandidoId) {
-                      return _OrcamentoItemLinha(
-                        item: item,
-                        maoObra: _maoObraDoItem(item),
-                        total: _totalDoItem(item),
-                        erro: _erroDoItem(item),
-                        onTap: () => setState(() => _expandidoId = item.id),
-                      );
-                    }
+                        if (_compacto && item.id != _expandidoId) {
+                          return _OrcamentoItemLinha(
+                            item: item,
+                            maoObra: _maoObraDoItem(item),
+                            total: _totalDoItem(item),
+                            erro: _erroDoItem(item),
+                            onTap: () => setState(() => _expandidoId = item.id),
+                          );
+                        }
 
-                    return _OrcamentoItemCard(
-                      item: item,
-                      valorHora: _valoresHora[item.tipoServico],
-                      onEditarValorHora: () =>
-                          _configurarValoresHora(tipoFoco: item.tipoServico),
-                      total: _totalDoItem(item),
-                      erro: _erroDoItem(item),
-                      onChanged: () => setState(() {}),
-                      onRecolher: _compacto
-                          ? () => setState(() => _expandidoId = null)
-                          : null,
-                      onRemove: _itens.length > 1
-                          ? () => _removeItem(index)
-                          : null,
-                    );
-                  },
-                ),
-              ),
-            ],
-          ),
-        ),
-        bottomNavigationBar: SafeArea(
-          child: Container(
-            padding: const EdgeInsets.fromLTRB(18, 12, 18, 16),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(.06),
-                  blurRadius: 18,
-                  offset: const Offset(0, -6),
-                ),
-              ],
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _TotalRow(label: 'Peças', value: formatCurrencyBRL(totalPecas)),
-                const SizedBox(height: 2),
-                _TotalRow(
-                  label: totalHoras > 0
-                      ? 'Mão de obra (${formatHoras(totalHoras)})'
-                      : 'Mão de obra',
-                  value: formatCurrencyBRL(totalMaoObra),
-                ),
-                const SizedBox(height: 4),
-                _TotalRow(
-                  label: 'Total',
-                  value: formatCurrencyBRL(totalPecas + totalMaoObra),
-                  destaque: true,
-                ),
-                const SizedBox(height: 10),
-                SizedBox(
-                  width: double.infinity,
-                  height: 54,
-                  child: ElevatedButton.icon(
-                    onPressed: canSubmit
-                        ? _submit
-                        : (comErro > 0 && _compacto
-                              ? _abrirPrimeiroErro
-                              : null),
-                    icon: Icon(
-                      canSubmit ? Icons.check_circle : Icons.lock_outline,
-                    ),
-                    label: Text(submitText),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF0057C0),
-                      foregroundColor: Colors.white,
-                      disabledBackgroundColor: const Color(0xFFE5F6FF),
-                      disabledForegroundColor: const Color(0xFF94A3B8),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(18),
-                      ),
+                        return _OrcamentoItemCard(
+                          item: item,
+                          valorHora: _valoresHora[item.tipoServico],
+                          onEditarValorHora: () => _configurarValoresHora(
+                            tipoFoco: item.tipoServico,
+                          ),
+                          total: _totalDoItem(item),
+                          erro: _erroDoItem(item),
+                          onChanged: () => setState(() {}),
+                          onRecolher: _compacto
+                              ? () => setState(() => _expandidoId = null)
+                              : null,
+                          onRemove: _itens.length > 1
+                              ? () => _removeItem(index)
+                              : null,
+                        );
+                      },
                     ),
                   ),
+                ],
+              ),
+            ),
+            bottomNavigationBar: SafeArea(
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(18, 12, 18, 16),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(.06),
+                      blurRadius: 18,
+                      offset: const Offset(0, -6),
+                    ),
+                  ],
                 ),
-              ],
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _TotalRow(
+                      label: 'Peças',
+                      value: formatCurrencyBRL(totalPecas),
+                    ),
+                    const SizedBox(height: 2),
+                    _TotalRow(
+                      label: totalHoras > 0
+                          ? 'Mão de obra (${formatHoras(totalHoras)})'
+                          : 'Mão de obra',
+                      value: formatCurrencyBRL(totalMaoObra),
+                    ),
+                    const SizedBox(height: 4),
+                    _TotalRow(
+                      label: 'Total',
+                      value: formatCurrencyBRL(totalPecas + totalMaoObra),
+                      destaque: true,
+                    ),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 54,
+                      child: ElevatedButton.icon(
+                        onPressed: canSubmit
+                            ? _submit
+                            : (comErro > 0 && _compacto
+                                  ? _abrirPrimeiroErro
+                                  : null),
+                        icon: Icon(
+                          canSubmit ? Icons.check_circle : Icons.lock_outline,
+                        ),
+                        label: Text(submitText),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF0057C0),
+                          foregroundColor: Colors.white,
+                          disabledBackgroundColor: const Color(0xFFE5F6FF),
+                          disabledForegroundColor: const Color(0xFF94A3B8),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(18),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
-        ),
+          if (_importando)
+            Positioned.fill(
+              child: Container(
+                color: Colors.white.withOpacity(.94),
+                child: Center(
+                  child: EyeProcessingAnimation(statusText: _statusImportacao),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -977,6 +957,279 @@ class _TotalRow extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+enum _FonteOrcamento { camera, galeria }
+
+/// Bottom sheet de origem do arquivo pra "Importar orçamento pronto", no
+/// mesmo estilo dos outros sheets do app (título Space Grotesk, opções em
+/// cartão com ícone redondo azul, em vez do ListTile padrão do Material).
+class _ImportarOrcamentoSheet extends StatelessWidget {
+  const _ImportarOrcamentoSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Container(
+                width: 46,
+                height: 5,
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(.16),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            Text(
+              'Importar orçamento pronto',
+              style: GoogleFonts.spaceGrotesk(
+                fontSize: 19,
+                fontWeight: FontWeight.bold,
+                color: const Color(0xFF1F2937),
+              ),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'O Argos lê os itens pra você conferir antes de salvar.',
+              style: TextStyle(
+                color: Color(0xFF6B7280),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 18),
+            _ImportSourceTile(
+              icon: Icons.photo_camera_rounded,
+              titulo: 'Tirar foto do orçamento',
+              subtitulo: 'Com a câmera do Argos',
+              onTap: () => Navigator.of(context).pop(_FonteOrcamento.camera),
+            ),
+            const SizedBox(height: 10),
+            _ImportSourceTile(
+              icon: Icons.photo_library_rounded,
+              titulo: 'Escolher imagem ou print',
+              subtitulo: 'Foto do papel, print do PDF ou da planilha',
+              onTap: () => Navigator.of(context).pop(_FonteOrcamento.galeria),
+            ),
+            const SizedBox(height: 12),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ImportSourceTile extends StatelessWidget {
+  final IconData icon;
+  final String titulo;
+  final String subtitulo;
+  final VoidCallback onTap;
+
+  const _ImportSourceTile({
+    required this.icon,
+    required this.titulo,
+    required this.subtitulo,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const color = Color(0xFF0057C0);
+
+    return Material(
+      color: const Color(0xFFF3FBFF),
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(18),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            children: [
+              Container(
+                width: 46,
+                height: 46,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE5F6FF),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(icon, color: color),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      titulo,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 15,
+                        color: Color(0xFF1F2937),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitulo,
+                      style: const TextStyle(
+                        color: Color(0xFF6B7280),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right_rounded, color: color),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Pergunta se os itens lidos do arquivo substituem a tabela ou entram
+/// no final dela — mesmo estilo de diálogo do resto do app (cantos
+/// arredondados, título Space Grotesk, ação principal em azul sólido).
+class _SubstituirOuAdicionarDialog extends StatelessWidget {
+  final int quantidade;
+
+  const _SubstituirOuAdicionarDialog({required this.quantidade});
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 24, 24, 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '$quantidade ite${quantidade > 1 ? 'ns' : 'm'} lido${quantidade > 1 ? 's' : ''}',
+              style: GoogleFonts.spaceGrotesk(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: const Color(0xFF1F2937),
+              ),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              'Quer substituir os itens da tabela pelos do orçamento ou '
+              'adicionar ao final?',
+              style: TextStyle(color: Color(0xFF6B7280), fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 20),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancelar'),
+            ),
+            const SizedBox(height: 6),
+            OutlinedButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFF0057C0),
+                side: const BorderSide(color: Color(0xFF0057C0)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                minimumSize: const Size.fromHeight(46),
+              ),
+              child: const Text('Adicionar ao final'),
+            ),
+            const SizedBox(height: 10),
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF0057C0),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                minimumSize: const Size.fromHeight(46),
+              ),
+              child: const Text('Substituir tabela'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Confirma a saída sem salvar quando a tabela já tem itens preenchidos.
+class _SairSemSalvarDialog extends StatelessWidget {
+  final int quantidade;
+
+  const _SairSemSalvarDialog({required this.quantidade});
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 24, 24, 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Sair sem salvar?',
+              style: GoogleFonts.spaceGrotesk(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: const Color(0xFF1F2937),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              quantidade == 1
+                  ? 'O item da tabela não será salvo.'
+                  : 'Os $quantidade itens da tabela não serão salvos.',
+              style: const TextStyle(color: Color(0xFF6B7280), fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: TextButton(
+                    onPressed: () => Navigator.of(context).pop(false),
+                    child: const Text('Continuar editando'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.of(context).pop(true),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.redAccent,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      minimumSize: const Size.fromHeight(46),
+                    ),
+                    child: const Text('Sair sem salvar'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

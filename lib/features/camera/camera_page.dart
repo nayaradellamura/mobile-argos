@@ -9,7 +9,22 @@ import 'package:permission_handler/permission_handler.dart';
 
 /// Tela de captura de fotos com a câmera do dispositivo, devolvendo a lista de `XFile` capturados.
 class CameraPage extends StatefulWidget {
-  const CameraPage({super.key});
+  /// Quantas fotos no máximo essa sessão de captura aceita (ex: 1 pra
+  /// importar um orçamento pronto, o padrão de 10 pra evidências de vistoria).
+  final int maxPhotos;
+
+  /// Título no topo da tela.
+  final String titulo;
+
+  /// Complemento do botão de concluir: "Usar 2 fotos $destino".
+  final String destino;
+
+  const CameraPage({
+    super.key,
+    this.maxPhotos = 10,
+    this.titulo = 'Captura de Evidências',
+    this.destino = 'na vistoria',
+  });
 
   @override
   State<CameraPage> createState() => _CameraPageState();
@@ -17,7 +32,7 @@ class CameraPage extends StatefulWidget {
 
 /// Controla o ciclo de vida da câmera (inicialização, zoom, flash, lente) e a lista de fotos capturadas.
 class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
-  static const int maxPhotos = 10;
+  int get maxPhotos => widget.maxPhotos;
 
   CameraController? _controller;
   List<CameraDescription> _cameras = [];
@@ -901,7 +916,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      'Captura de Evidências',
+                      widget.titulo,
                       style: GoogleFonts.spaceGrotesk(
                         color: Colors.white,
                         fontSize: 22,
@@ -987,7 +1002,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
                       icon: Icon(canFinish ? Icons.check_circle : Icons.lock_outline),
                       label: Text(
                         canFinish
-                            ? 'Usar $photoCount foto${photoCount > 1 ? 's' : ''} na vistoria'
+                            ? 'Usar $photoCount foto${photoCount > 1 ? 's' : ''} ${widget.destino}'
                             : 'Capture pelo menos 1 foto',
                       ),
                       style: ElevatedButton.styleFrom(
