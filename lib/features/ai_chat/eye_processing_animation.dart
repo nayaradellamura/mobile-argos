@@ -117,22 +117,28 @@ class _EyeProcessingAnimationState extends State<EyeProcessingAnimation>
           ),
         ),
         const SizedBox(height: 18),
-        ValueListenableBuilder<String>(
-          valueListenable: widget.statusText,
-          builder: (context, text, _) {
-            return AnimatedSwitcher(
-              duration: const Duration(milliseconds: 300),
-              child: Text(
-                text,
-                key: ValueKey(text),
-                textAlign: TextAlign.center,
-                style: GoogleFonts.spaceGrotesk(
-                  fontWeight: FontWeight.w700,
-                  color: const Color(0xFF1F2937),
+        ConstrainedBox(
+          // Sem isso, o Text fica sem largura nenhuma pra quebrar linha (o
+          // Center/Column ao redor dão largura infinita) e qualquer status
+          // um pouco mais longo estoura a tela em vez de quebrar.
+          constraints: const BoxConstraints(maxWidth: 260),
+          child: ValueListenableBuilder<String>(
+            valueListenable: widget.statusText,
+            builder: (context, text, _) {
+              return AnimatedSwitcher(
+                duration: const Duration(milliseconds: 300),
+                child: Text(
+                  text,
+                  key: ValueKey(text),
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.spaceGrotesk(
+                    fontWeight: FontWeight.w700,
+                    color: const Color(0xFF1F2937),
+                  ),
                 ),
-              ),
-            );
-          },
+              );
+            },
+          ),
         ),
       ],
     );
