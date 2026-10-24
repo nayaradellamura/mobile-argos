@@ -28,9 +28,14 @@ class MainShell extends StatefulWidget {
   State<MainShell> createState() => _MainShellState();
 }
 
-class _MainShellState extends State<MainShell> {
+class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   int selectedIndex = 0;
   VoidCallback? _notificationOpenListener;
+
+  // Atualizado via didChangeMetrics (observer direto do SO), não só lido no
+  // build via MediaQuery -- não depende do timing de rebuild da árvore pra
+  // reagir à abertura/fechamento do teclado.
+  bool _tecladoAberto = false;
 
   bool isLoadingProfile = true;
   bool profileCompletionRequired = false;
@@ -57,6 +62,7 @@ class _MainShellState extends State<MainShell> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _notificationOpenListener = _handleNotificationSinistroOpened;
     ArgosPushNotificationService.instance.openedSinistroId.addListener(
       _notificationOpenListener!,
@@ -82,6 +88,8 @@ class _MainShellState extends State<MainShell> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+
     final listener = _notificationOpenListener;
 
     if (listener != null) {
@@ -94,6 +102,23 @@ class _MainShellState extends State<MainShell> {
     _selectedIndexNotifier.dispose();
 
     super.dispose();
+  }
+
+  /// Observer direto do SO: dispara sempre que o teclado abre/fecha (ou
+  /// qualquer mudança de métricas da tela), sem depender do timing de
+  /// rebuild da árvore pra reagir.
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+
+    if (!mounted) return;
+
+    final bottomInset = View.of(context).viewInsets.bottom;
+    final aberto = bottomInset > 0;
+
+    if (aberto != _tecladoAberto) {
+      setState(() => _tecladoAberto = aberto);
+    }
   }
 
   /// Escuta em tempo real o status do usuário e mostra o bloqueio se a conta sair de "ativo".
@@ -385,8 +410,11 @@ class _MainShellState extends State<MainShell> {
     _selectedIndexNotifier.value = selectedIndex;
 
     // Com o teclado aberto a barra de navegação ficava em cima dele e
-    // sobrava pouco espaço para a conversa no chat.
-    final tecladoAberto = MediaQuery.viewInsetsOf(context).bottom > 0;
+    // sobrava pouco espaço para a conversa no chat. Combina os dois sinais
+    // (MediaQuery no build + o observer de didChangeMetrics) -- qualquer um
+    // dos dois detectando o teclado já é suficiente pra esconder a barra.
+    final tecladoAberto =
+        _tecladoAberto || MediaQuery.viewInsetsOf(context).bottom > 0;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF3FBFF),
