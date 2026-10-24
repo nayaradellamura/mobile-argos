@@ -80,11 +80,14 @@ async function renderLaudoPdf({ context, achados }) {
 /**
  * Mesma ideia, mas pro orçamento aprovado — sem achados de IA, só os dados
  * do sinistro + o orçamento que o mecânico já rascunhou em campo
- * (context.orcamentoCampo, ver lib/data.js).
+ * (context.orcamentoCampo, ver lib/data.js). Mesmo visual do laudo técnico
+ * (templates/laudo.html), por isso também usa orcamentoRelatorio pra
+ * separar peças de serviços na tabela.
  */
 async function renderOrcamentoAprovadoPdf({ context }) {
   const html = getTemplate(ORCAMENTO_TEMPLATE_PATH)({
     ...context,
+    orcamentoRelatorio: orcamentoRelatorio(context.orcamentoCampo),
     dataEmissao: dataEmissaoAgora(),
     logoDataUri: getLogoDataUri(),
   });
