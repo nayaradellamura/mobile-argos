@@ -146,7 +146,9 @@ class _InspectionsPageState extends State<InspectionsPage> {
   }
 
   /// Pré-carrega no ImageCache as fotos de perfil ainda não carregadas.
-  Future<void> _precachePeoplePhotosNow(List<InspectionCase> inspections) async {
+  Future<void> _precachePeoplePhotosNow(
+    List<InspectionCase> inspections,
+  ) async {
     if (!mounted) return;
 
     final urls = _collectPeoplePhotoUrls(inspections);
@@ -159,9 +161,10 @@ class _InspectionsPageState extends State<InspectionsPage> {
       if (!_precachedAvatarUrls.add(url)) continue;
 
       futures.add(
-        precacheImage(NetworkImage(url), context)
-            .then((_) {})
-            .catchError((_) {}),
+        precacheImage(
+          NetworkImage(url),
+          context,
+        ).then((_) {}).catchError((_) {}),
       );
     }
 
@@ -190,58 +193,61 @@ class _InspectionsPageState extends State<InspectionsPage> {
     _searchController.dispose();
     super.dispose();
   }
+
   /// Retorna o stream de vistorias cacheado, recriando se o credenciadoId mudou.
   Stream<List<InspectionCase>> _getInspectionStream(String credenciadoId) {
-  if (_cachedInspectionStream == null ||
-      _cachedInspectionCredenciadoId != credenciadoId) {
-    _cachedInspectionCredenciadoId = credenciadoId;
-    _cachedInspectionStream = _inspectionStream(credenciadoId).asBroadcastStream();
+    if (_cachedInspectionStream == null ||
+        _cachedInspectionCredenciadoId != credenciadoId) {
+      _cachedInspectionCredenciadoId = credenciadoId;
+      _cachedInspectionStream = _inspectionStream(
+        credenciadoId,
+      ).asBroadcastStream();
+    }
+
+    return _cachedInspectionStream!;
   }
 
-  return _cachedInspectionStream!;
-}
+  /// Troca o filtro de categoria selecionado e rola o carrossel até ele.
+  void _changeFilter(InspectionFilter filter) {
+    if (_selectedFilter == filter) {
+      _scrollFilterCarouselTo(filter);
+      return;
+    }
 
-/// Troca o filtro de categoria selecionado e rola o carrossel até ele.
-void _changeFilter(InspectionFilter filter) {
-  if (_selectedFilter == filter) {
+    setState(() {
+      _selectedFilter = filter;
+    });
+
     _scrollFilterCarouselTo(filter);
-    return;
   }
 
-  setState(() {
-    _selectedFilter = filter;
-  });
+  /// Centraliza o chip do filtro selecionado no carrossel horizontal.
+  void _scrollFilterCarouselTo(InspectionFilter filter) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_filterScrollController.hasClients) return;
 
-  _scrollFilterCarouselTo(filter);
-}
+      const cardWidth = 132.0;
+      const gap = 10.0;
 
-/// Centraliza o chip do filtro selecionado no carrossel horizontal.
-void _scrollFilterCarouselTo(InspectionFilter filter) {
-  WidgetsBinding.instance.addPostFrameCallback((_) {
-    if (!_filterScrollController.hasClients) return;
+      final index = InspectionFilter.values.indexOf(filter);
+      final position = _filterScrollController.position;
+      final viewportWidth = position.viewportDimension;
 
-    const cardWidth = 132.0;
-    const gap = 10.0;
+      final itemStart = index * (cardWidth + gap);
+      final target = itemStart - ((viewportWidth - cardWidth) / 2);
 
-    final index = InspectionFilter.values.indexOf(filter);
-    final position = _filterScrollController.position;
-    final viewportWidth = position.viewportDimension;
+      final safeTarget = target.clamp(
+        position.minScrollExtent,
+        position.maxScrollExtent,
+      );
 
-    final itemStart = index * (cardWidth + gap);
-    final target = itemStart - ((viewportWidth - cardWidth) / 2);
-
-    final safeTarget = target.clamp(
-      position.minScrollExtent,
-      position.maxScrollExtent,
-    );
-
-    _filterScrollController.animateTo(
-      safeTarget.toDouble(),
-      duration: const Duration(milliseconds: 360),
-      curve: Curves.easeOutCubic,
-    );
-  });
-}
+      _filterScrollController.animateTo(
+        safeTarget.toDouble(),
+        duration: const Duration(milliseconds: 360),
+        curve: Curves.easeOutCubic,
+      );
+    });
+  }
 
   @override
   void initState() {
@@ -290,129 +296,120 @@ void _scrollFilterCarouselTo(InspectionFilter filter) {
     }
   }
 
-/// Combina os streams de sinistros e vistorias num único stream de vistorias já enriquecido, com debounce.
-Stream<List<InspectionCase>> _inspectionStream(String credenciadoId) {
-  late final StreamController<List<InspectionCase>> controller;
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? sinistroSubscription;
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? vistoriaSubscription;
-  Timer? debounceTimer;
+  /// Combina os streams de sinistros e vistorias num único stream de vistorias já enriquecido, com debounce.
+  Stream<List<InspectionCase>> _inspectionStream(String credenciadoId) {
+    late final StreamController<List<InspectionCase>> controller;
+    StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+    sinistroSubscription;
+    StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+    vistoriaSubscription;
+    Timer? debounceTimer;
 
-  bool hasEmittedFirstList = false;
-  List<InspectionCase>? latestInspections;
-  List<LinkedVistoriaInfo> latestVistorias = const [];
+    bool hasEmittedFirstList = false;
+    List<InspectionCase>? latestInspections;
+    List<LinkedVistoriaInfo> latestVistorias = const [];
 
-  void scheduleEmit() {
-    debounceTimer?.cancel();
+    void scheduleEmit() {
+      debounceTimer?.cancel();
 
-    debounceTimer = Timer(
-      Duration(milliseconds: hasEmittedFirstList ? 90 : 360),
-      () {
-        final inspections = latestInspections;
+      debounceTimer = Timer(
+        Duration(milliseconds: hasEmittedFirstList ? 90 : 360),
+        () {
+          final inspections = latestInspections;
 
-        if (inspections == null || controller.isClosed) return;
+          if (inspections == null || controller.isClosed) return;
 
-        controller.add(
-          _enrichInspectionsWithLinkedVistorias(
-            inspections,
-            latestVistorias,
-          ),
-        );
-        hasEmittedFirstList = true;
+          controller.add(
+            _enrichInspectionsWithLinkedVistorias(inspections, latestVistorias),
+          );
+          hasEmittedFirstList = true;
+        },
+      );
+    }
+
+    controller = StreamController<List<InspectionCase>>(
+      onListen: () {
+        sinistroSubscription = FirebaseFirestore.instance
+            .collection('sinistro')
+            .where('credenciadoId', isEqualTo: credenciadoId)
+            .snapshots()
+            .listen((snapshot) {
+              latestInspections = _buildInspectionListFromSnapshot(snapshot);
+              scheduleEmit();
+            }, onError: controller.addError);
+
+        vistoriaSubscription = FirebaseFirestore.instance
+            .collection('vistorias')
+            .where('credenciadoId', isEqualTo: credenciadoId)
+            .snapshots()
+            .listen((snapshot) {
+              latestVistorias = snapshot.docs
+                  .map(LinkedVistoriaInfo.fromFirestore)
+                  .where((vistoria) => vistoria.sinistroId.trim().isNotEmpty)
+                  .toList();
+
+              scheduleEmit();
+            }, onError: controller.addError);
+      },
+      onCancel: () async {
+        debounceTimer?.cancel();
+        await sinistroSubscription?.cancel();
+        await vistoriaSubscription?.cancel();
       },
     );
+
+    return controller.stream;
   }
 
-  controller = StreamController<List<InspectionCase>>(
-    onListen: () {
-      sinistroSubscription = FirebaseFirestore.instance
-          .collection('sinistro')
-          .where('credenciadoId', isEqualTo: credenciadoId)
-          .snapshots()
-          .listen(
-        (snapshot) {
-          latestInspections = _buildInspectionListFromSnapshot(snapshot);
-          scheduleEmit();
-        },
-        onError: controller.addError,
-      );
+  /// Anexa a cada vistoria da lista os dados da vistoria vinculada mais recente, se houver.
+  List<InspectionCase> _enrichInspectionsWithLinkedVistorias(
+    List<InspectionCase> inspections,
+    List<LinkedVistoriaInfo> vistorias,
+  ) {
+    if (vistorias.isEmpty) return inspections;
 
-      vistoriaSubscription = FirebaseFirestore.instance
-          .collection('vistorias')
-          .where('credenciadoId', isEqualTo: credenciadoId)
-          .snapshots()
-          .listen(
-        (snapshot) {
-          latestVistorias = snapshot.docs
-              .map(LinkedVistoriaInfo.fromFirestore)
-              .where((vistoria) => vistoria.sinistroId.trim().isNotEmpty)
-              .toList();
+    final latestBySinistro = <String, LinkedVistoriaInfo>{};
 
-          scheduleEmit();
-        },
-        onError: controller.addError,
-      );
-    },
-    onCancel: () async {
-      debounceTimer?.cancel();
-      await sinistroSubscription?.cancel();
-      await vistoriaSubscription?.cancel();
-    },
-  );
+    for (final vistoria in vistorias) {
+      final sinistroId = vistoria.sinistroId.trim();
+      if (sinistroId.isEmpty) continue;
 
-  return controller.stream;
-}
+      final current = latestBySinistro[sinistroId];
+      final currentDate = current?.updatedAt ?? current?.createdAt;
+      final candidateDate = vistoria.updatedAt ?? vistoria.createdAt;
 
-/// Anexa a cada vistoria da lista os dados da vistoria vinculada mais recente, se houver.
-List<InspectionCase> _enrichInspectionsWithLinkedVistorias(
-  List<InspectionCase> inspections,
-  List<LinkedVistoriaInfo> vistorias,
-) {
-  if (vistorias.isEmpty) return inspections;
-
-  final latestBySinistro = <String, LinkedVistoriaInfo>{};
-
-  for (final vistoria in vistorias) {
-    final sinistroId = vistoria.sinistroId.trim();
-    if (sinistroId.isEmpty) continue;
-
-    final current = latestBySinistro[sinistroId];
-    final currentDate = current?.updatedAt ?? current?.createdAt;
-    final candidateDate = vistoria.updatedAt ?? vistoria.createdAt;
-
-    if (current == null ||
-        (candidateDate != null &&
-            (currentDate == null || candidateDate.isAfter(currentDate)))) {
-      latestBySinistro[sinistroId] = vistoria;
+      if (current == null ||
+          (candidateDate != null &&
+              (currentDate == null || candidateDate.isAfter(currentDate)))) {
+        latestBySinistro[sinistroId] = vistoria;
+      }
     }
+
+    return inspections.map((inspection) {
+      final vistoria = latestBySinistro[inspection.id];
+
+      if (vistoria == null) return inspection;
+
+      return inspection.copyWith(
+        vistoriaAtualId: vistoria.idvistoria,
+        vistoriaAtualStatus: vistoria.status,
+        vistoriaAtualTipo: vistoria.tipoVistoria,
+      );
+    }).toList();
   }
 
-  return inspections.map((inspection) {
-    final vistoria = latestBySinistro[inspection.id];
+  /// Converte um snapshot do Firestore numa lista de vistorias ordenada por data agendada.
+  List<InspectionCase> _buildInspectionListFromSnapshot(
+    QuerySnapshot<Map<String, dynamic>> snapshot,
+  ) {
+    final inspections = snapshot.docs
+        .map((doc) => InspectionCase.fromFirestore(doc))
+        .toList();
 
-    if (vistoria == null) return inspection;
+    inspections.sort((a, b) => a.scheduledDate.compareTo(b.scheduledDate));
 
-    return inspection.copyWith(
-      vistoriaAtualId: vistoria.idvistoria,
-      vistoriaAtualStatus: vistoria.status,
-      vistoriaAtualTipo: vistoria.tipoVistoria,
-    );
-  }).toList();
-}
-
-/// Converte um snapshot do Firestore numa lista de vistorias ordenada por data agendada.
-List<InspectionCase> _buildInspectionListFromSnapshot(
-  QuerySnapshot<Map<String, dynamic>> snapshot,
-) {
-  final inspections = snapshot.docs
-      .map((doc) => InspectionCase.fromFirestore(doc))
-      .toList();
-
-  inspections.sort(
-    (a, b) => a.scheduledDate.compareTo(b.scheduledDate),
-  );
-
-  return inspections;
-}
+    return inspections;
+  }
 
   /// Abre a tela de resumo de uma vistoria.
   void _openInspectionSummary(InspectionCase inspection) {
@@ -474,8 +471,9 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
         filter: scopedInspections.where(filter.matches).length,
     };
 
-    final filteredInspections =
-        scopedInspections.where(_selectedFilter.matches).toList();
+    final filteredInspections = scopedInspections
+        .where(_selectedFilter.matches)
+        .toList();
 
     return SafeArea(
       child: Column(
@@ -499,8 +497,9 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
                     }
                   });
                 },
-                onOpenRanking:
-                    online ? () => _openTeamRanking(credenciadoId) : null,
+                onOpenRanking: online
+                    ? () => _openTeamRanking(credenciadoId)
+                    : null,
                 isSearching: _isSearching,
                 onToggleSearch: _toggleSearch,
                 onCloseSearch: _closeSearch,
@@ -527,53 +526,52 @@ List<InspectionCase> _buildInspectionListFromSnapshot(
                         'Não há sinistros atribuídos para esta oficina no momento.',
                   )
                 : scopedInspections.isEmpty
-                    ? (_searchQuery.trim().isNotEmpty
-                        ? _StateMessage(
-                            icon: Icons.search_off_rounded,
-                            title: 'Nenhum resultado',
-                            message:
-                                'Nenhuma vistoria encontrada para "${_searchController.text.trim()}".',
-                            actionLabel: 'Limpar busca',
-                            onAction: _closeSearch,
-                          )
-                        : _StateMessage(
-                            icon: Icons.person_search_outlined,
-                            title: 'Nenhuma vistoria sua',
-                            message:
-                                'Você ainda não tem sinistros atribuídos. Veja as vistorias da oficina para assumir uma.',
-                            actionLabel: 'Ver da oficina',
-                            onAction: () => setState(() => _onlyMine = false),
-                          ))
-                    : filteredInspections.isEmpty
-                        ? _StateMessage(
-                            icon: _selectedFilter.icon,
-                            title: 'Nenhum item em ${_selectedFilter.label}',
-                            message:
-                                'Não há vistorias nessa categoria no momento.',
-                            actionLabel: _selectedFilter == InspectionFilter.all
-                                ? null
-                                : 'Ver todas',
-                            onAction: _selectedFilter == InspectionFilter.all
-                                ? null
-                                : () => _changeFilter(InspectionFilter.all),
-                          )
-                        : ListView.separated(
-                            padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-                            itemCount: filteredInspections.length,
-                            separatorBuilder: (_, __) => const SizedBox(height: 12),
-                            itemBuilder: (context, index) {
-                              final inspection = filteredInspections[index];
+                ? (_searchQuery.trim().isNotEmpty
+                      ? _StateMessage(
+                          icon: Icons.search_off_rounded,
+                          title: 'Nenhum resultado',
+                          message:
+                              'Nenhuma vistoria encontrada para "${_searchController.text.trim()}".',
+                          actionLabel: 'Limpar busca',
+                          onAction: _closeSearch,
+                        )
+                      : _StateMessage(
+                          icon: Icons.person_search_outlined,
+                          title: 'Nenhuma vistoria sua',
+                          message:
+                              'Você ainda não tem sinistros atribuídos. Veja as vistorias da oficina para assumir uma.',
+                          actionLabel: 'Ver da oficina',
+                          onAction: () => setState(() => _onlyMine = false),
+                        ))
+                : filteredInspections.isEmpty
+                ? _StateMessage(
+                    icon: _selectedFilter.icon,
+                    title: 'Nenhum item em ${_selectedFilter.label}',
+                    message: 'Não há vistorias nessa categoria no momento.',
+                    actionLabel: _selectedFilter == InspectionFilter.all
+                        ? null
+                        : 'Ver todas',
+                    onAction: _selectedFilter == InspectionFilter.all
+                        ? null
+                        : () => _changeFilter(InspectionFilter.all),
+                  )
+                : ListView.separated(
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+                    itemCount: filteredInspections.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 12),
+                    itemBuilder: (context, index) {
+                      final inspection = filteredInspections[index];
 
-                              return _StaggeredEntrance(
-                                key: ValueKey(inspection.id),
-                                index: index,
-                                child: _InspectionCard(
-                                  inspection: inspection,
-                                  onTap: () => _openInspectionSummary(inspection),
-                                ),
-                              );
-                            },
-                          ),
+                      return _StaggeredEntrance(
+                        key: ValueKey(inspection.id),
+                        index: index,
+                        child: _InspectionCard(
+                          inspection: inspection,
+                          onTap: () => _openInspectionSummary(inspection),
+                        ),
+                      );
+                    },
+                  ),
           ),
         ],
       ),
@@ -742,7 +740,8 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
   late InspectionCase inspection;
   bool isCheckingIn = false;
   bool _hasShownAssignmentChangeNotice = false;
-  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _inspectionSubscription;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
+  _inspectionSubscription;
 
   bool _isLoadingRejeicao = false;
   String? _motivoRejeicao;
@@ -798,9 +797,9 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
 
   /// Registra presença do usuário como visualizador ativo desta vistoria.
   void _startPresence() {
-    SinistroPresenceService.instance
-        .startViewing(inspection.id)
-        .catchError((error) {
+    SinistroPresenceService.instance.startViewing(inspection.id).catchError((
+      error,
+    ) {
       debugPrint('Start viewing sinistro error: $error');
     });
   }
@@ -828,33 +827,36 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
         .collection('sinistro')
         .doc(inspection.id)
         .snapshots()
-        .listen((snapshot) {
-      if (!mounted || !snapshot.exists) return;
+        .listen(
+          (snapshot) {
+            if (!mounted || !snapshot.exists) return;
 
-      final previousInspection = inspection;
-      final updatedInspection = InspectionCase.fromFirestore(snapshot);
+            final previousInspection = inspection;
+            final updatedInspection = InspectionCase.fromFirestore(snapshot);
 
-      final previousAssignedUid = previousInspection.assignedToUid.trim();
-      final newAssignedUid = updatedInspection.assignedToUid.trim();
-      final assignmentChanged = previousAssignedUid != newAssignedUid;
-      final wasUnassigned = previousAssignedUid.isEmpty;
-      final isNowAssigned = newAssignedUid.isNotEmpty;
+            final previousAssignedUid = previousInspection.assignedToUid.trim();
+            final newAssignedUid = updatedInspection.assignedToUid.trim();
+            final assignmentChanged = previousAssignedUid != newAssignedUid;
+            final wasUnassigned = previousAssignedUid.isEmpty;
+            final isNowAssigned = newAssignedUid.isNotEmpty;
 
-      setState(() {
-        inspection = updatedInspection;
-      });
+            setState(() {
+              inspection = updatedInspection;
+            });
 
-      if (assignmentChanged && wasUnassigned && isNowAssigned) {
-        _showRealtimeAssignmentNotice(updatedInspection);
-        return;
-      }
+            if (assignmentChanged && wasUnassigned && isNowAssigned) {
+              _showRealtimeAssignmentNotice(updatedInspection);
+              return;
+            }
 
-      if (assignmentChanged && isNowAssigned) {
-        _showRealtimeAssignmentNotice(updatedInspection);
-      }
-    }, onError: (error) {
-      debugPrint('Inspection realtime update error: $error');
-    });
+            if (assignmentChanged && isNowAssigned) {
+              _showRealtimeAssignmentNotice(updatedInspection);
+            }
+          },
+          onError: (error) {
+            debugPrint('Inspection realtime update error: $error');
+          },
+        );
   }
 
   /// Mostra um snackbar avisando que a vistoria foi vinculada a alguém.
@@ -946,9 +948,7 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            error.toString().replaceFirst('Exception: ', ''),
-          ),
+          content: Text(error.toString().replaceFirst('Exception: ', '')),
           backgroundColor: Colors.orange,
         ),
       );
@@ -1013,14 +1013,12 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     required bool canStartRetificacao,
   }) {
     ButtonStyle estilo(Color cor) => ElevatedButton.styleFrom(
-          backgroundColor: cor,
-          foregroundColor: Colors.white,
-          disabledBackgroundColor: const Color(0xFFE5E7EB),
-          disabledForegroundColor: const Color(0xFF6B7280),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(18),
-          ),
-        );
+      backgroundColor: cor,
+      foregroundColor: Colors.white,
+      disabledBackgroundColor: const Color(0xFFE5E7EB),
+      disabledForegroundColor: const Color(0xFF6B7280),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+    );
 
     if (canStartRetificacao) {
       return ElevatedButton.icon(
@@ -1046,8 +1044,9 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
         builder: (context, online, _) {
           final blockedByOffline = !online;
           return ElevatedButton.icon(
-            onPressed:
-                isCheckingIn || blockedByOffline ? null : _registerCheckIn,
+            onPressed: isCheckingIn || blockedByOffline
+                ? null
+                : _registerCheckIn,
             icon: isCheckingIn
                 ? const SizedBox(
                     width: 18,
@@ -1066,10 +1065,10 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
               isCheckingIn
                   ? 'Realizando check-in...'
                   : blockedByOffline
-                      ? 'Check-in precisa de internet'
-                      : hasCheckIn
-                          ? 'Assumir vistoria'
-                          : 'Realizar check-in e assumir vistoria',
+                  ? 'Check-in precisa de internet'
+                  : hasCheckIn
+                  ? 'Assumir vistoria'
+                  : 'Realizar check-in e assumir vistoria',
             ),
             style: estilo(const Color(0xFF0057C0)),
           );
@@ -1115,14 +1114,20 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
     final canCheckIn =
         !isAssignedToAnother && (!hasCheckIn || !inspection.hasAssignedUser);
     final isHumanAnalysis = inspection.isAiAnalysisCategory;
-    final canOpenChat = hasCheckIn &&
+    // Vistoria com ID provisório (criada offline, ainda não reconciliada)
+    // continua abrindo o chat normalmente -- a reconciliação precisa de
+    // internet, mas a coleta em si (fotos, áudio, orçamento) não. Bloquear
+    // esse botão até a reconciliação prendia o mecânico pra sempre numa
+    // vistoria que ele mesmo começou offline, sem conexão pra desbloquear.
+    final canOpenChat =
+        hasCheckIn &&
         isAssignedToMe &&
         !isHumanAnalysis &&
         !inspection.isCompletedCategory &&
         !inspection.isCancelledCategory &&
-        !inspection.isRevisionCategory &&
-        !inspection.isPendingOfflineSync;
-    final canStartRetificacao = isAssignedToMe &&
+        !inspection.isRevisionCategory;
+    final canStartRetificacao =
+        isAssignedToMe &&
         inspection.isRevisionCategory &&
         widget.onStartRetificacao != null;
 
@@ -1166,39 +1171,34 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                               SinistroViewersBar(sinistroId: inspection.id),
                               if (inspection.hasAssignedUser) ...[
                                 const SizedBox(height: 14),
-                                _SummaryAssignmentBanner(inspection: inspection),
+                                _SummaryAssignmentBanner(
+                                  inspection: inspection,
+                                ),
                               ],
                               if (inspection.isRevisionCategory) ...[
                                 const SizedBox(height: 14),
                                 _RejeicaoBanner(
                                   isLoading: _isLoadingRejeicao,
                                   motivo: _motivoRejeicao,
-                                  ajustesNecessarios: _ajustesNecessariosRejeicao,
+                                  ajustesNecessarios:
+                                      _ajustesNecessariosRejeicao,
                                 ),
                               ],
                               // Documentos ficam só aqui (a aba Vistorias mostra
                               // o que foi coletado). Cada card diz para quem é.
-                              if (inspection.hasOrcamentoAprovado ||
-                                  inspection.laudoTecnicoStatus.isNotEmpty ||
-                                  inspection.vistoriaAtualId.trim().isNotEmpty) ...[
-                                const SizedBox(height: 18),
-                                const _GrupoDocumentosTitulo(titulo: 'Documentos'),
-                              ],
-                              if (inspection.laudoTecnicoStatus.isNotEmpty) ...[
-                                const SizedBox(height: 10),
-                                _LaudoTecnicoCard(inspection: inspection),
-                              ],
+                              //
+                              // Os cards de Laudo técnico e Relatório do reparo
+                              // foram removidos desta tela (pedido do usuário) --
+                              // as classes (_LaudoTecnicoCard, _RelatorioClienteCard)
+                              // e a lógica de geração continuam no arquivo, só não
+                              // são mais exibidas aqui.
                               if (inspection.hasOrcamentoAprovado) ...[
+                                const SizedBox(height: 18),
+                                const _GrupoDocumentosTitulo(
+                                  titulo: 'Documentos',
+                                ),
                                 const SizedBox(height: 14),
                                 _OrcamentoAprovadoCard(inspection: inspection),
-                              ],
-                              if (inspection.vistoriaAtualId.trim().isNotEmpty &&
-                                  !inspection.isPendingOfflineSync) ...[
-                                const SizedBox(height: 14),
-                                _RelatorioClienteCard(
-                                  sinistroId: inspection.id,
-                                  vistoriaDocId: inspection.vistoriaAtualId.trim(),
-                                ),
                               ],
                               const SizedBox(height: 14),
                               _SectionCard(
@@ -1210,9 +1210,18 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                   _InfoRow('Modelo', inspection.vehicle.model),
                                   _InfoRow('Ano', inspection.vehicle.year),
                                   _InfoRow('Cor', inspection.vehicle.color),
-                                  _InfoRow('Chassi', inspection.vehicle.chassis),
-                                  _InfoRow('Renavam', inspection.vehicle.renavam),
-                                  _InfoRow('Combustível', inspection.vehicle.fuel),
+                                  _InfoRow(
+                                    'Chassi',
+                                    inspection.vehicle.chassis,
+                                  ),
+                                  _InfoRow(
+                                    'Renavam',
+                                    inspection.vehicle.renavam,
+                                  ),
+                                  _InfoRow(
+                                    'Combustível',
+                                    inspection.vehicle.fuel,
+                                  ),
                                 ],
                               ),
                               const SizedBox(height: 14),
@@ -1242,8 +1251,9 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                     hasCheckIn
                                         ? _formatDateTime(inspection.checkInAt!)
                                         : 'Ainda não realizado',
-                                    valueColor:
-                                        hasCheckIn ? Colors.green : Colors.orange,
+                                    valueColor: hasCheckIn
+                                        ? Colors.green
+                                        : Colors.orange,
                                   ),
                                   _InfoRow(
                                     'Responsável',
@@ -1262,7 +1272,10 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                 icon: Icons.person,
                                 children: [
                                   _InfoRow('Nome', inspection.owner.name),
-                                  _InfoRow('Documento', inspection.owner.document),
+                                  _InfoRow(
+                                    'Documento',
+                                    inspection.owner.document,
+                                  ),
                                   _InfoRow('Telefone', inspection.owner.phone),
                                   _InfoRow('E-mail', inspection.owner.email),
                                 ],
@@ -1273,10 +1286,19 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
                                 icon: Icons.build,
                                 children: [
                                   _InfoRow('Oficina', inspection.workshop.name),
-                                  _InfoRow('Endereço', inspection.workshop.address),
-                                  _InfoRow('Telefone', inspection.workshop.phone),
+                                  _InfoRow(
+                                    'Endereço',
+                                    inspection.workshop.address,
+                                  ),
+                                  _InfoRow(
+                                    'Telefone',
+                                    inspection.workshop.phone,
+                                  ),
                                   if (inspection.workshop.email.isNotEmpty)
-                                    _InfoRow('E-mail', inspection.workshop.email),
+                                    _InfoRow(
+                                      'E-mail',
+                                      inspection.workshop.email,
+                                    ),
                                 ],
                               ),
                               const SizedBox(height: 14),
@@ -1311,8 +1333,6 @@ class _InspectionSummaryPageState extends State<InspectionSummaryPage>
   }
 }
 
-
-
 /// Barra de abas "Resumo" / "Vistorias" da tela de resumo.
 class _SummaryTabHeader extends StatelessWidget {
   const _SummaryTabHeader();
@@ -1336,10 +1356,7 @@ class _SummaryTabHeader extends StatelessWidget {
         dividerColor: Colors.transparent,
         labelColor: Colors.white,
         unselectedLabelColor: const Color(0xFF414755),
-        labelStyle: const TextStyle(
-          fontSize: 12,
-          fontWeight: FontWeight.w900,
-        ),
+        labelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w900),
         unselectedLabelStyle: const TextStyle(
           fontSize: 12,
           fontWeight: FontWeight.w800,
@@ -1391,15 +1408,16 @@ class _InspectionHistoryTabState extends State<_InspectionHistoryTab> {
         .loadOrcamentoRascunho(vistoriaDocId: vistoria.docId);
     if (!mounted) return;
 
-    final resultado = await Navigator.of(context).push<List<Map<String, dynamic>>>(
-      MaterialPageRoute(
-        builder: (_) => OrcamentoTablePage(
-          itensIniciais: rascunho.map(OrcamentoItemDraft.fromMap).toList(),
-          modeloVeiculo: vistoria.veiculo,
-          vistoriaDocId: vistoria.docId,
-        ),
-      ),
-    );
+    final resultado = await Navigator.of(context)
+        .push<List<Map<String, dynamic>>>(
+          MaterialPageRoute(
+            builder: (_) => OrcamentoTablePage(
+              itensIniciais: rascunho.map(OrcamentoItemDraft.fromMap).toList(),
+              modeloVeiculo: vistoria.veiculo,
+              vistoriaDocId: vistoria.docId,
+            ),
+          ),
+        );
 
     if (resultado == null || !mounted) return;
 
@@ -1409,8 +1427,23 @@ class _InspectionHistoryTabState extends State<_InspectionHistoryTab> {
     );
 
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Orçamento salvo.')),
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Orçamento salvo.')));
+  }
+
+  /// Abre o orçamento já salvo em modo somente leitura -- sem campos
+  /// editáveis, sem botão de salvar. Usa os itens já carregados no
+  /// histórico (`vistoria.orcamentoItems`, valores congelados na gravação),
+  /// sem reabrir a tabela editável nem reler nada do Firestore.
+  void _verificarOrcamento(LinkedVistoriaInfo vistoria) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _OrcamentoVerificacaoPage(
+          placa: vistoria.placa,
+          itens: vistoria.orcamentoItems,
+        ),
+      ),
     );
   }
 
@@ -1454,79 +1487,82 @@ class _InspectionHistoryTabState extends State<_InspectionHistoryTab> {
 
         final selected = _selectedDocId == null
             ? null
-            : vistorias.where((item) => item.docId == _selectedDocId).firstOrNull;
+            : vistorias
+                  .where((item) => item.docId == _selectedDocId)
+                  .firstOrNull;
 
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
           children: [
-            _HistoryHeaderCard(
-              total: vistorias.length,
-              selected: selected,
-            ),
+            _HistoryHeaderCard(total: vistorias.length, selected: selected),
             const SizedBox(height: 14),
-            ...vistorias.map(
-              (vistoria) {
-                final isSelected = vistoria.docId == _selectedDocId;
-                final laudoPdfUrl = vistoria.pdfLaudoUrl.isNotEmpty
-                    ? vistoria.pdfLaudoUrl
-                    : widget.inspection.laudoTecnicoUrlForVistoria([
-                        vistoria.docId,
-                        vistoria.idvistoria,
-                      ]);
+            ...vistorias.map((vistoria) {
+              final isSelected = vistoria.docId == _selectedDocId;
+              final laudoPdfUrl = vistoria.pdfLaudoUrl.isNotEmpty
+                  ? vistoria.pdfLaudoUrl
+                  : widget.inspection.laudoTecnicoUrlForVistoria([
+                      vistoria.docId,
+                      vistoria.idvistoria,
+                    ]);
 
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: Column(
-                    children: [
-                      _HistoryVistoriaCard(
-                        vistoria: vistoria,
-                        isSelected: isSelected,
-                        hasLaudoPdf: laudoPdfUrl.isNotEmpty,
-                        onTap: () {
-                          setState(() {
-                            _selectedDocId = isSelected ? null : vistoria.docId;
-                          });
-                        },
-                      ),
-                      AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 220),
-                        switchInCurve: Curves.easeOutCubic,
-                        switchOutCurve: Curves.easeInCubic,
-                        child: isSelected
-                            ? Padding(
-                                key: ValueKey('preview_${vistoria.docId}'),
-                                padding: const EdgeInsets.only(top: 10),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                                  children: [
-                                    _HistoryVistoriaPreview(
-                                      vistoria: vistoria,
-                                      laudoPdfUrl: laudoPdfUrl,
-                                    ),
-                                    if (vistoria.orcamentoItems.isNotEmpty) ...[
-                                      const SizedBox(height: 10),
-                                      _HistoryOrcamentoCard(vistoria: vistoria),
-                                    ],
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Column(
+                  children: [
+                    _HistoryVistoriaCard(
+                      vistoria: vistoria,
+                      isSelected: isSelected,
+                      hasLaudoPdf: laudoPdfUrl.isNotEmpty,
+                      onTap: () {
+                        setState(() {
+                          _selectedDocId = isSelected ? null : vistoria.docId;
+                        });
+                      },
+                    ),
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 220),
+                      switchInCurve: Curves.easeOutCubic,
+                      switchOutCurve: Curves.easeInCubic,
+                      child: isSelected
+                          ? Padding(
+                              key: ValueKey('preview_${vistoria.docId}'),
+                              padding: const EdgeInsets.only(top: 10),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  _HistoryVistoriaPreview(
+                                    vistoria: vistoria,
+                                    laudoPdfUrl: laudoPdfUrl,
+                                  ),
+                                  if (vistoria.orcamentoItems.isNotEmpty) ...[
                                     const SizedBox(height: 10),
-                                    OutlinedButton.icon(
-                                      onPressed: () => _abrirOrcamento(vistoria),
-                                      icon: const Icon(Icons.request_quote_outlined),
-                                      label: Text(
-                                        vistoria.orcamentoItems.isEmpty
-                                            ? 'Montar orçamento'
-                                            : 'Editar orçamento',
-                                      ),
-                                    ),
+                                    _HistoryOrcamentoCard(vistoria: vistoria),
                                   ],
-                                ),
-                              )
-                            : const SizedBox.shrink(),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            ),
+                                  const SizedBox(height: 10),
+                                  OutlinedButton.icon(
+                                    onPressed: vistoria.orcamentoItems.isEmpty
+                                        ? () => _abrirOrcamento(vistoria)
+                                        : () => _verificarOrcamento(vistoria),
+                                    icon: Icon(
+                                      vistoria.orcamentoItems.isEmpty
+                                          ? Icons.request_quote_outlined
+                                          : Icons.visibility_outlined,
+                                    ),
+                                    label: Text(
+                                      vistoria.orcamentoItems.isEmpty
+                                          ? 'Montar orçamento'
+                                          : 'Verificar orçamento',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : const SizedBox.shrink(),
+                    ),
+                  ],
+                ),
+              );
+            }),
           ],
         );
       },
@@ -1548,10 +1584,7 @@ class _HistoryHeaderCard extends StatelessWidget {
   final int total;
   final LinkedVistoriaInfo? selected;
 
-  const _HistoryHeaderCard({
-    required this.total,
-    required this.selected,
-  });
+  const _HistoryHeaderCard({required this.total, required this.selected});
 
   @override
   Widget build(BuildContext context) {
@@ -1573,10 +1606,7 @@ class _HistoryHeaderCard extends StatelessWidget {
               color: const Color(0xFF0057C0),
               borderRadius: BorderRadius.circular(16),
             ),
-            child: const Icon(
-              Icons.history_rounded,
-              color: Colors.white,
-            ),
+            child: const Icon(Icons.history_rounded, color: Colors.white),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -1605,8 +1635,8 @@ class _HistoryHeaderCard extends StatelessWidget {
                   selected == null
                       ? 'Toque em uma vistoria para abrir o preview.'
                       : selectedDate == null
-                          ? 'Selecionada: ${selected!.idvistoria}'
-                          : 'Selecionada: ${selected!.idvistoria} • ${_formatDateTime(selectedDate)}',
+                      ? 'Selecionada: ${selected!.idvistoria}'
+                      : 'Selecionada: ${selected!.idvistoria} • ${_formatDateTime(selectedDate)}',
                   style: const TextStyle(
                     color: Color(0xFF6B7280),
                     fontSize: 11,
@@ -1677,10 +1707,7 @@ class _HistoryVistoriaCard extends StatelessWidget {
                   color: vistoria.statusColor.withOpacity(.12),
                   borderRadius: BorderRadius.circular(16),
                 ),
-                child: Icon(
-                  vistoria.statusIcon,
-                  color: vistoria.statusColor,
-                ),
+                child: Icon(vistoria.statusIcon, color: vistoria.statusColor),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -1764,10 +1791,7 @@ class _TinyMetric extends StatelessWidget {
   final IconData icon;
   final String value;
 
-  const _TinyMetric({
-    required this.icon,
-    required this.value,
-  });
+  const _TinyMetric({required this.icon, required this.value});
 
   @override
   Widget build(BuildContext context) {
@@ -1814,7 +1838,8 @@ class _HistoryVistoriaPreview extends StatefulWidget {
   });
 
   @override
-  State<_HistoryVistoriaPreview> createState() => _HistoryVistoriaPreviewState();
+  State<_HistoryVistoriaPreview> createState() =>
+      _HistoryVistoriaPreviewState();
 }
 
 class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
@@ -1857,7 +1882,9 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
                   value: '${vistoria.chatCount}',
                   isSelected: _selectedSection == _HistoryPreviewSection.chat,
                   onTap: () {
-                    setState(() => _selectedSection = _HistoryPreviewSection.chat);
+                    setState(
+                      () => _selectedSection = _HistoryPreviewSection.chat,
+                    );
                   },
                 ),
               ),
@@ -1869,7 +1896,9 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
                   value: '${vistoria.imageCount}',
                   isSelected: _selectedSection == _HistoryPreviewSection.photos,
                   onTap: () {
-                    setState(() => _selectedSection = _HistoryPreviewSection.photos);
+                    setState(
+                      () => _selectedSection = _HistoryPreviewSection.photos,
+                    );
                   },
                 ),
               ),
@@ -1881,7 +1910,9 @@ class _HistoryVistoriaPreviewState extends State<_HistoryVistoriaPreview> {
                   value: '${vistoria.audioCount}',
                   isSelected: _selectedSection == _HistoryPreviewSection.audios,
                   onTap: () {
-                    setState(() => _selectedSection = _HistoryPreviewSection.audios);
+                    setState(
+                      () => _selectedSection = _HistoryPreviewSection.audios,
+                    );
                   },
                 ),
               ),
@@ -2006,8 +2037,9 @@ class _PreviewSelectorTile extends StatelessWidget {
           height: 82,
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
           decoration: BoxDecoration(
-            color:
-                isSelected ? const Color(0xFF0057C0) : const Color(0xFFEFF7FD),
+            color: isSelected
+                ? const Color(0xFF0057C0)
+                : const Color(0xFFEFF7FD),
             borderRadius: BorderRadius.circular(16),
             boxShadow: isSelected
                 ? [
@@ -2036,7 +2068,9 @@ class _PreviewSelectorTile extends StatelessWidget {
                     value,
                     maxLines: 1,
                     style: GoogleFonts.spaceGrotesk(
-                      color: isSelected ? Colors.white : const Color(0xFF0057C0),
+                      color: isSelected
+                          ? Colors.white
+                          : const Color(0xFF0057C0),
                       fontWeight: FontWeight.bold,
                       fontSize: 19,
                       height: 1.0,
@@ -2069,7 +2103,6 @@ class _PreviewSelectorTile extends StatelessWidget {
       ),
     );
   }
-
 }
 
 /// Preview compacto do chat de uma vistoria; toque expande em um diálogo maior.
@@ -2135,9 +2168,7 @@ class _MiniChatPreview extends StatelessWidget {
                 child: Center(
                   child: Container(
                     width: screen.width > 520 ? 500 : screen.width - 28,
-                    constraints: BoxConstraints(
-                      maxHeight: screen.height * .82,
-                    ),
+                    constraints: BoxConstraints(maxHeight: screen.height * .82),
                     decoration: BoxDecoration(
                       color: Colors.white.withOpacity(.92),
                       borderRadius: BorderRadius.circular(22),
@@ -2212,8 +2243,12 @@ class _MiniChatPreview extends StatelessWidget {
                               emptyText:
                                   'Nenhuma mensagem registrada nesta vistoria.',
                               minHeight: 260,
-                              padding:
-                                  const EdgeInsets.fromLTRB(12, 14, 12, 10),
+                              padding: const EdgeInsets.fromLTRB(
+                                12,
+                                14,
+                                12,
+                                10,
+                              ),
                             ),
                           ),
                         ),
@@ -2314,7 +2349,8 @@ class _MiniChatBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final role = message.role.toLowerCase();
-    final isAi = role.contains('ai') ||
+    final isAi =
+        role.contains('ai') ||
         role.contains('assistant') ||
         role.contains('system');
     final isImage = message.kind == ChatPreviewKind.image;
@@ -2322,14 +2358,15 @@ class _MiniChatBubble extends StatelessWidget {
     final text = isImage
         ? 'Foto anexada'
         : isAudio
-            ? 'Áudio enviado'
-            : message.text.trim();
+        ? 'Áudio enviado'
+        : message.text.trim();
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Row(
-        mainAxisAlignment:
-            isAi ? MainAxisAlignment.start : MainAxisAlignment.end,
+        mainAxisAlignment: isAi
+            ? MainAxisAlignment.start
+            : MainAxisAlignment.end,
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           if (isAi) ...[
@@ -2345,8 +2382,9 @@ class _MiniChatBubble extends StatelessWidget {
               constraints: const BoxConstraints(maxWidth: 250),
               padding: const EdgeInsets.fromLTRB(12, 9, 12, 8),
               decoration: BoxDecoration(
-                color:
-                    isAi ? Colors.white.withOpacity(.90) : const Color(0xFF0057C0),
+                color: isAi
+                    ? Colors.white.withOpacity(.90)
+                    : const Color(0xFF0057C0),
                 borderRadius: BorderRadius.only(
                   topLeft: Radius.circular(isAi ? 4 : 16),
                   topRight: Radius.circular(isAi ? 16 : 4),
@@ -2493,10 +2531,7 @@ class _PhotoGalleryDialog extends StatefulWidget {
   final List<String> photos;
   final int initialIndex;
 
-  const _PhotoGalleryDialog({
-    required this.photos,
-    required this.initialIndex,
-  });
+  const _PhotoGalleryDialog({required this.photos, required this.initialIndex});
 
   @override
   State<_PhotoGalleryDialog> createState() => _PhotoGalleryDialogState();
@@ -2601,9 +2636,8 @@ class _HistoryPhotoImage extends StatelessWidget {
         height: height,
         fit: fit,
         gaplessPlayback: true,
-        errorBuilder: (_, __, ___) => const _HistoryBrokenPreview(
-          icon: Icons.broken_image_outlined,
-        ),
+        errorBuilder: (_, __, ___) =>
+            const _HistoryBrokenPreview(icon: Icons.broken_image_outlined),
       );
     }
 
@@ -2616,9 +2650,8 @@ class _HistoryPhotoImage extends StatelessWidget {
         height: height,
         fit: fit,
         gaplessPlayback: true,
-        errorBuilder: (_, __, ___) => const _HistoryBrokenPreview(
-          icon: Icons.broken_image_outlined,
-        ),
+        errorBuilder: (_, __, ___) =>
+            const _HistoryBrokenPreview(icon: Icons.broken_image_outlined),
       );
     } catch (_) {
       return const _HistoryBrokenPreview(icon: Icons.broken_image_outlined);
@@ -2679,8 +2712,8 @@ class _HistoryAudioPreviewListState extends State<_HistoryAudioPreviewList> {
             final label = audioId.isNotEmpty
                 ? audioId
                 : storagePath.isNotEmpty
-                    ? storagePath.split('/').last.replaceAll('.mp3', '')
-                    : doc.id;
+                ? storagePath.split('/').last.replaceAll('.mp3', '')
+                : doc.id;
 
             return _HistoryAudioTile(
               label: label,
@@ -2751,7 +2784,9 @@ class _HistoryOrcamentoPreviewList extends StatelessWidget {
             decoration: BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: const Color(0xFF0057C0).withOpacity(.08)),
+              border: Border.all(
+                color: const Color(0xFF0057C0).withOpacity(.08),
+              ),
             ),
             child: Row(
               children: [
@@ -2958,7 +2993,8 @@ class _HistoryAudioTileState extends State<_HistoryAudioTile> {
 
   @override
   Widget build(BuildContext context) {
-    final canPlay = widget.downloadUrl.trim().isNotEmpty ||
+    final canPlay =
+        widget.downloadUrl.trim().isNotEmpty ||
         widget.storagePath.trim().isNotEmpty;
 
     return Material(
@@ -3152,7 +3188,6 @@ class _HistorySkeleton extends StatelessWidget {
   }
 }
 
-
 /// Cabeçalho da tela de Vistorias: título, busca, ranking, seletor de escopo e carrossel de filtros.
 class _InspectionsHeader extends StatelessWidget {
   final int total;
@@ -3341,11 +3376,7 @@ class _SearchField extends StatelessWidget {
   final ValueChanged<String>? onChanged;
   final VoidCallback? onClear;
 
-  const _SearchField({
-    required this.controller,
-    this.onChanged,
-    this.onClear,
-  });
+  const _SearchField({required this.controller, this.onChanged, this.onClear});
 
   @override
   Widget build(BuildContext context) {
@@ -3378,11 +3409,7 @@ class _SearchField extends StatelessWidget {
             if (value.text.isEmpty) return const SizedBox.shrink();
 
             return IconButton(
-              icon: const Icon(
-                Icons.close,
-                size: 18,
-                color: Color(0xFF6B7280),
-              ),
+              icon: const Icon(Icons.close, size: 18, color: Color(0xFF6B7280)),
               onPressed: () {
                 controller.clear();
                 onChanged?.call('');
@@ -3547,14 +3574,14 @@ class _InspectionFilterCard extends StatelessWidget {
                   ),
                   const Spacer(),
                   Text(
-                  '$count',
-                  key: ValueKey('filter_count_${filter.name}_$count'),
-                  style: GoogleFonts.spaceGrotesk(
-                    fontSize: 21,
-                    fontWeight: FontWeight.bold,
-                    color: isSelected ? Colors.white : color,
+                    '$count',
+                    key: ValueKey('filter_count_${filter.name}_$count'),
+                    style: GoogleFonts.spaceGrotesk(
+                      fontSize: 21,
+                      fontWeight: FontWeight.bold,
+                      color: isSelected ? Colors.white : color,
+                    ),
                   ),
-                ),
                 ],
               ),
               const Spacer(),
@@ -3763,7 +3790,7 @@ class _InspectionCardState extends State<_InspectionCard> {
             : null;
         final hasLinkedVistoria =
             widget.inspection.vistoriaAtualId.trim().isNotEmpty ||
-                linkedVistoria != null;
+            linkedVistoria != null;
 
         return _InspectionCardContent(
           inspection: widget.inspection,
@@ -3883,8 +3910,9 @@ class _InspectionCardContent extends StatelessWidget {
                             valueListenable:
                                 BulkSyncCoordinator.instance.syncingVistoriaIds,
                             builder: (context, syncingIds, _) {
-                              final isSyncingNow = syncingIds
-                                  .contains(inspection.vistoriaAtualId.trim());
+                              final isSyncingNow = syncingIds.contains(
+                                inspection.vistoriaAtualId.trim(),
+                              );
 
                               return Container(
                                 width: 16,
@@ -3894,8 +3922,10 @@ class _InspectionCardContent extends StatelessWidget {
                                       ? const Color(0xFF0057C0)
                                       : const Color(0xFFB45309),
                                   shape: BoxShape.circle,
-                                  border:
-                                      Border.all(color: Colors.white, width: 2),
+                                  border: Border.all(
+                                    color: Colors.white,
+                                    width: 2,
+                                  ),
                                 ),
                                 child: Icon(
                                   isSyncingNow
@@ -3957,13 +3987,12 @@ class _InspectionCardContent extends StatelessWidget {
                       valueListenable:
                           BulkSyncCoordinator.instance.syncingVistoriaIds,
                       builder: (context, syncingIds, _) {
-                        final isSyncingNow = syncingIds
-                            .contains(inspection.vistoriaAtualId.trim());
+                        final isSyncingNow = syncingIds.contains(
+                          inspection.vistoriaAtualId.trim(),
+                        );
 
                         return _StatusChip(
-                          label: isSyncingNow
-                              ? 'Sincronizando...'
-                              : 'Offline',
+                          label: isSyncingNow ? 'Sincronizando...' : 'Offline',
                           color: isSyncingNow
                               ? const Color(0xFF0057C0)
                               : const Color(0xFFB45309),
@@ -4281,11 +4310,7 @@ class _HumanAnalysisNotice extends StatelessWidget {
       ),
       child: const Row(
         children: [
-          Icon(
-            Icons.manage_search_outlined,
-            size: 18,
-            color: Colors.purple,
-          ),
+          Icon(Icons.manage_search_outlined, size: 18, color: Colors.purple),
           SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -4393,9 +4418,13 @@ class _SummaryAssignmentBanner extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  isMine ? 'Esta vistoria está vinculada a você' : 'Vistoria vinculada a outro profissional',
+                  isMine
+                      ? 'Esta vistoria está vinculada a você'
+                      : 'Vistoria vinculada a outro profissional',
                   style: GoogleFonts.spaceGrotesk(
-                    color: isMine ? const Color(0xFF0057C0) : const Color(0xFF8A5700),
+                    color: isMine
+                        ? const Color(0xFF0057C0)
+                        : const Color(0xFF8A5700),
                     fontSize: 14,
                     fontWeight: FontWeight.bold,
                   ),
@@ -4469,18 +4498,12 @@ class _RejeicaoBanner extends StatelessWidget {
                 if (isLoading)
                   const Text(
                     'Carregando motivo...',
-                    style: TextStyle(
-                      color: Color(0xFF414755),
-                      fontSize: 12,
-                    ),
+                    style: TextStyle(color: Color(0xFF414755), fontSize: 12),
                   )
                 else if (ajustes.isEmpty && motivoText.isEmpty)
                   const Text(
                     'O analista rejeitou esta vistoria. Abra a retificação para ver os detalhes.',
-                    style: TextStyle(
-                      color: Color(0xFF414755),
-                      fontSize: 12,
-                    ),
+                    style: TextStyle(color: Color(0xFF414755), fontSize: 12),
                   )
                 else ...[
                   if (motivoText.isNotEmpty)
@@ -4532,10 +4555,10 @@ class _AssignedToBadge extends StatelessWidget {
       child: Row(
         children: [
           _FastPersonAvatar(
-                photoURL: photoURL,
-                radius: 15,
-                iconColor: isMine ? const Color(0xFF0057C0) : Colors.orange,
-              ),
+            photoURL: photoURL,
+            radius: 15,
+            iconColor: isMine ? const Color(0xFF0057C0) : Colors.orange,
+          ),
           const SizedBox(width: 8),
           Expanded(
             child: EllipsisText(
@@ -4543,7 +4566,9 @@ class _AssignedToBadge extends StatelessWidget {
                   ? 'Vinculada a você'
                   : 'Vinculada a ${inspection.assignedToName}',
               style: TextStyle(
-                color: isMine ? const Color(0xFF0057C0) : const Color(0xFF8A5700),
+                color: isMine
+                    ? const Color(0xFF0057C0)
+                    : const Color(0xFF8A5700),
                 fontSize: 12,
                 fontWeight: FontWeight.w900,
               ),
@@ -4580,7 +4605,11 @@ class _ActiveViewersBadge extends StatelessWidget {
         children: [
           const _PulseDot(color: Color(0xFFB26B00), size: 6),
           const SizedBox(width: 6),
-          const Icon(Icons.visibility_outlined, size: 16, color: Color(0xFFB26B00)),
+          const Icon(
+            Icons.visibility_outlined,
+            size: 16,
+            color: Color(0xFFB26B00),
+          ),
           const SizedBox(width: 7),
           _ViewerAvatarStack(viewers: viewers.take(3).toList(), small: true),
           const SizedBox(width: 8),
@@ -4613,7 +4642,9 @@ class _ViewerAvatarStack extends StatelessWidget {
   Widget build(BuildContext context) {
     final radius = small ? 11.0 : 16.0;
     final step = small ? 15.0 : 22.0;
-    final width = viewers.isEmpty ? 0.0 : (radius * 2) + ((viewers.length - 1) * step);
+    final width = viewers.isEmpty
+        ? 0.0
+        : (radius * 2) + ((viewers.length - 1) * step);
 
     return SizedBox(
       height: radius * 2,
@@ -4715,10 +4746,7 @@ class _LinkedVistoriaSummaryCard extends StatelessWidget {
                   color: statusColor.withOpacity(.12),
                   borderRadius: BorderRadius.circular(16),
                 ),
-                child: Icon(
-                  vistoria.statusIcon,
-                  color: statusColor,
-                ),
+                child: Icon(vistoria.statusIcon, color: statusColor),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -4892,7 +4920,11 @@ class _PhotoPreviewStrip extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Icon(Icons.image_outlined, size: 14, color: Color(0xFF0057C0)),
+              const Icon(
+                Icons.image_outlined,
+                size: 14,
+                color: Color(0xFF0057C0),
+              ),
               const SizedBox(width: 4),
               Text(
                 '$total foto${total == 1 ? '' : 's'}',
@@ -4945,9 +4977,8 @@ class _Base64PhotoPreview extends StatelessWidget {
           height: 46,
           fit: BoxFit.cover,
           gaplessPlayback: true,
-          errorBuilder: (_, __, ___) => const _BrokenEvidencePreview(
-            icon: Icons.broken_image_outlined,
-          ),
+          errorBuilder: (_, __, ___) =>
+              const _BrokenEvidencePreview(icon: Icons.broken_image_outlined),
         ),
       );
     } catch (_) {
@@ -5109,11 +5140,7 @@ class _VistoriaMetric extends StatelessWidget {
         mainAxisAlignment: MainAxisAlignment.center,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            icon,
-            size: 18,
-            color: const Color(0xFF0057C0),
-          ),
+          Icon(icon, size: 18, color: const Color(0xFF0057C0)),
           const SizedBox(height: 4),
           Flexible(
             child: FittedBox(
@@ -5152,7 +5179,6 @@ class _VistoriaMetric extends StatelessWidget {
     );
   }
 }
-
 
 /// Barra superior da tela de resumo: voltar, título e chip de status.
 class _SummaryTopBar extends StatelessWidget {
@@ -5839,8 +5865,7 @@ class _SkeletonBox extends StatelessWidget {
 bool _isRemoteImageValue(String value) {
   final normalized = value.trim().toLowerCase();
 
-  return normalized.startsWith('http://') ||
-      normalized.startsWith('https://');
+  return normalized.startsWith('http://') || normalized.startsWith('https://');
 }
 
 /// Dados do usuário/oficina logados, resolvidos uma vez ao abrir a tela.
@@ -5966,8 +5991,9 @@ class _RelatorioClienteCardState extends State<_RelatorioClienteCard> {
   Future<void> _gerar() async {
     final sinistroId = widget.sinistroId;
     final vistoriaId = widget.vistoriaDocId;
-    final sinistroRef =
-        FirebaseFirestore.instance.collection('sinistro').doc(sinistroId);
+    final sinistroRef = FirebaseFirestore.instance
+        .collection('sinistro')
+        .doc(sinistroId);
 
     // Antes de gerar, o mecânico escolhe as fotos e a validade.
     final opcoes = await showModalBottomSheet<_OpcoesRelatorio>(
@@ -5984,9 +6010,9 @@ class _RelatorioClienteCardState extends State<_RelatorioClienteCard> {
     setState(() => _gerando = true);
 
     try {
-      await FirebaseFunctions.instanceFor(region: 'us-central1')
-          .httpsCallable('gerarRelatorioCliente')
-          .call<Map<String, dynamic>>({
+      await FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable('gerarRelatorioCliente').call<Map<String, dynamic>>({
         'sinistroId': sinistroId,
         'vistoriaId': vistoriaId,
         'fotosExcluidas': opcoes.fotosExcluidas,
@@ -6060,7 +6086,9 @@ class _RelatorioClienteCardState extends State<_RelatorioClienteCard> {
                 ),
               )
             : const Icon(Icons.picture_as_pdf_outlined, size: 18),
-        label: Text(_gerando ? 'Gerando relatório...' : 'Gerar relatório (PDF)'),
+        label: Text(
+          _gerando ? 'Gerando relatório...' : 'Gerar relatório (PDF)',
+        ),
         style: ElevatedButton.styleFrom(
           backgroundColor: color,
           foregroundColor: Colors.white,
@@ -6169,8 +6197,8 @@ class _RelatorioOpcoesSheetState extends State<_RelatorioOpcoesSheet> {
       final db = FirebaseFirestore.instance;
       final vistoria =
           (await db.collection('vistorias').doc(widget.vistoriaDocId).get())
-                  .data() ??
-              const <String, dynamic>{};
+              .data() ??
+          const <String, dynamic>{};
 
       // Mesmo filtro do laudo-service: foto de orçamento pronto não é foto
       // de dano e já fica de fora do relatório.
@@ -6339,11 +6367,11 @@ class _RelatorioOpcoesSheetState extends State<_RelatorioOpcoesSheet> {
                   onPressed: _carregando
                       ? null
                       : () => Navigator.of(context).pop(
-                            _OpcoesRelatorio(
-                              fotosExcluidas: _excluidas.toList(),
-                              validadeDias: _validadeDias,
-                            ),
+                          _OpcoesRelatorio(
+                            fotosExcluidas: _excluidas.toList(),
+                            validadeDias: _validadeDias,
                           ),
+                        ),
                   icon: const Icon(Icons.picture_as_pdf_outlined, size: 18),
                   label: const Text('Gerar relatório (PDF)'),
                   style: ElevatedButton.styleFrom(
@@ -6415,6 +6443,152 @@ class _FotoSelecionavel extends StatelessWidget {
   }
 }
 
+/// Tela de consulta do orçamento já salvo: só leitura, sem campos
+/// editáveis nem botão de salvar. Usa os valores congelados na gravação
+/// (`item.valorHora`/`valorTotal`, já vindos de `LinkedVistoriaInfo`), não
+/// reabre `OrcamentoTablePage` nem recalcula nada.
+class _OrcamentoVerificacaoPage extends StatelessWidget {
+  final String placa;
+  final List<OrcamentoRascunhoItem> itens;
+
+  const _OrcamentoVerificacaoPage({required this.placa, required this.itens});
+
+  @override
+  Widget build(BuildContext context) {
+    const color = Color(0xFF0057C0);
+    final total = itens.fold<double>(0, (soma, item) => soma + item.valorTotal);
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFF3FBFF),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFFF3FBFF),
+        elevation: 0,
+        foregroundColor: const Color(0xFF1F2937),
+        title: Text(
+          'Orçamento${placa.isNotEmpty ? ' · $placa' : ''}',
+          style: GoogleFonts.spaceGrotesk(fontWeight: FontWeight.bold),
+        ),
+      ),
+      body: SafeArea(
+        child: ListView.separated(
+          padding: const EdgeInsets.fromLTRB(18, 8, 18, 28),
+          itemCount: itens.length + 1,
+          separatorBuilder: (_, __) => const SizedBox(height: 10),
+          itemBuilder: (context, index) {
+            if (index == itens.length) {
+              return Container(
+                margin: const EdgeInsets.only(top: 6),
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: color,
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'Total',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 15,
+                      ),
+                    ),
+                    Text(
+                      formatCurrencyBRL(total),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w900,
+                        fontSize: 18,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+
+            final item = itens[index];
+            final maoObra = item.horasMaoObra * item.valorHora;
+            final pecaValor = item.valorPeca * item.quantidade;
+
+            return Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: color.withOpacity(.08)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          nomeLegivel(item.peca),
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 14,
+                            color: Color(0xFF1F2937),
+                          ),
+                        ),
+                      ),
+                      Text(
+                        formatCurrencyBRL(item.valorTotal),
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 14,
+                          color: color,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    tipoIntervencaoLabel(item.tipoIntervencao),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF6B7280),
+                    ),
+                  ),
+                  if (pecaValor > 0 || maoObra > 0) ...[
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 12,
+                      runSpacing: 4,
+                      children: [
+                        if (pecaValor > 0)
+                          Text(
+                            '${item.quantidade}x peça ${formatCurrencyBRL(item.valorPeca)}',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF6B7280),
+                            ),
+                          ),
+                        if (maoObra > 0)
+                          Text(
+                            'MO: ${tipoServicoLabel(item.tipoServico)} · '
+                            '${formatHoras(item.horasMaoObra)}h × '
+                            '${formatCurrencyBRL(item.valorHora)}',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF6B7280),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
 /// Card do orçamento na aba Vistorias, separado do "Resumo da vistoria":
 /// itens recolhíveis e total. Os PDFs ficam na aba Resumo.
 class _HistoryOrcamentoCard extends StatefulWidget {
@@ -6446,13 +6620,19 @@ class _HistoryOrcamentoCardState extends State<_HistoryOrcamentoCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           InkWell(
-            onTap: itens.isEmpty ? null : () => setState(() => _aberto = !_aberto),
+            onTap: itens.isEmpty
+                ? null
+                : () => setState(() => _aberto = !_aberto),
             borderRadius: BorderRadius.circular(12),
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: 2),
               child: Row(
                 children: [
-                  const Icon(Icons.request_quote_outlined, color: color, size: 20),
+                  const Icon(
+                    Icons.request_quote_outlined,
+                    color: color,
+                    size: 20,
+                  ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Column(

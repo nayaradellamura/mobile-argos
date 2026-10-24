@@ -3344,7 +3344,11 @@ class _AiChatPageState extends State<AiChatPage> {
                           session: currentSession!,
                           status: completedInspectionStatus,
                           laudoPending: completedLaudoPending,
+                          // "Ver outras vistorias" precisa levar de volta à
+                          // aba Vistorias do MainShell, não só resetar a
+                          // seleção dentro da própria aba Argos IA.
                           onBackToSelection:
+                              widget.onGoToInspections ??
                               _closeCurrentChatAndBackToSelection,
                         ),
                       ),
