@@ -144,3 +144,26 @@ web/
 windows/
 # Ferramentas locais de teste (snapshot/restore de sinistro) — não vai pro repo.
 functions/tools/
+
+# Scaffold de Next.js solto na raiz, de um projeto não relacionado — nunca
+# faz parte do app Flutter, não entra no repo.
+DOC_API.md
+SCHEMA.md
+components.json
+docs/PROJETO.md
+lib/business-rules-store.ts
+lib/firebase-admin.ts
+lib/firebase.ts
+lib/utils.ts
+next-env.d.ts
+next.config.mjs
+package.json
+pnpm-lock.yaml
+postcss.config.mjs
+tsconfig.json
+tsconfig.tsbuildinfo
+
+# Saída gerada pela ferramenta de vídeo (/brag) — artefato de build, não
+# precisa versionar.
+brag-output/
+brag-output-*/
