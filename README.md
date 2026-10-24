@@ -17,14 +17,15 @@ O Argos é o Trabalho de Conclusão de Curso do grupo *"Triagem Inteligente de S
 
 ### Arquitetura do ecossistema
 
-O TCC é dividido em três partes; este repositório é só o app mobile.
+O ecossistema do TCC é dividido em várias partes; este repositório cobre o app mobile e os serviços de backend que ele usa diretamente (Cloud Functions e a geração de documentos).
 
 | Parte | Onde vive | O que faz |
 |---|---|---|
 | Painel web | repo separado (Next.js) | seguradora simula o FNOL, despacha vistorias, acompanha o Kanban de sinistros, revisa/aprova laudos |
 | **App mobile (este repo)** | Flutter, Android | check-in da vistoria, coleta de evidências (guiada por IA ou tudo de uma vez), acompanhamento dos sinistros atribuídos |
-| Backend serverless | Cloud Functions | processamento de áudio/imagem, notificações push, orquestração de status |
-| Geração de laudo | Cloud Run (`services/laudo-service`) | gera o laudo técnico e o orçamento aprovado (PDF) a partir das evidências, usando Gemini |
+| Agente de IA | Cloud Run, Python (ADK) | conduz a conversa guiada com o mecânico, aplica os guardrails de escopo da vistoria e decide quando liberar cada etapa (fotos, orçamento) |
+| Backend serverless | Cloud Functions | processamento de áudio/imagem, notificações push, orquestração de status, texto-para-voz das respostas do agente |
+| Geração de documentos | Cloud Run (`services/laudo-service`) | gera, em PDF, o laudo técnico, o relatório para o cliente final e o orçamento aprovado, a partir das evidências e do Gemini |
 
 ### Fluxo principal no app
 
@@ -35,6 +36,15 @@ O TCC é dividido em três partes; este repositório é só o app mobile.
 5. Coleta das evidências em dois modos: **passo a passo** (chat guiado por IA, foto a foto) ou **enviar tudo de uma vez** (fotos, áudios, texto e orçamento soltos, sem conversa). Funciona offline — o que for coletado sem rede sincroniza sozinho quando ela voltar.
 6. Processamento das evidências e geração do laudo técnico pelo `services/laudo-service`.
 7. Se a seguradora rejeitar o laudo, o mecânico recebe uma **retificação** (correção pontual, sempre pelo modo passo a passo).
+
+### Destaques técnicos
+
+- **Offline-first de verdade**: dá pra iniciar uma vistoria do zero sem internet nenhuma — ela recebe um ID provisório local e só é reconciliada com o número sequencial oficial quando a conexão volta, sem perder nada do que já foi coletado em campo.
+- **Dois modos de coleta**: passo a passo (o agente de IA conduz a conversa, pede cada foto/áudio na hora certa e libera a tela de orçamento quando faz sentido) ou tudo de uma vez (o mecânico monta o pacote inteiro — fotos, áudios, texto e orçamento — e envia de uma só vez, pensado para quem prefere trabalhar sem o vaivém da conversa).
+- **Orçamento assistido**: entrada manual item a item, importação de um orçamento pronto (foto ou arquivo) lida por IA, e tabela de preços de referência por categoria de veículo.
+- **Texto-para-voz**: qualquer mensagem do agente pode ser ouvida em voz alta, útil pro mecânico que está com as mãos ocupadas no veículo.
+- **Classificação explicável (XAI)**: a severidade do dano (pequena/média/grande monta, CONTRAN 810/2020) vem sempre acompanhada da justificativa do modelo, e o laudo sinaliza explicitamente quando há incongruência entre o relato do mecânico e as evidências, ou quando as fotos enviadas não sustentam a classificação.
+- **Atualização OTA via Shorebird**: correções de código chegam ao app instalado sem passar pela loja — o celular atualiza sozinho ao abrir.
 
 ## Baixe o app para testar
 
@@ -62,15 +72,35 @@ A configuração do Firebase (`google-services.json`, `firebase_options.dart`) j
 
 > **Build de release no Windows:** builds `--release` (e por consequência `shorebird patch`/`shorebird release`) podem falhar em alguns ambientes Windows com JDK moderno (`Unable to establish loopback connection`). Se isso acontecer, use os workflows do GitHub Actions (`build-apk`, `shorebird-release`, `shorebird-patch` em `.github/workflows/`) — eles rodam em runner Linux e não têm esse problema. `flutter run` em modo debug funciona normalmente no Windows.
 
+## Testes
+
+Cada parte do projeto tem sua própria suíte, independente das outras:
+
+```bash
+# App Flutter (lógica de orçamento, parsing, rascunho de envio em massa...)
+flutter test
+
+# Cloud Functions
+cd functions && npm test
+
+# Geração de laudo/orçamento (services/laudo-service)
+cd services/laudo-service && npm test
+
+# Regras do Firestore/Storage (precisa do emulador do Firebase)
+cd rules-tests && npm run test:emu
+```
+
 ## Estrutura do projeto
 
 - `lib/`: código-fonte do app Flutter
+- `test/`: testes do app Flutter
 - `android/`: projeto Android nativo
 - `assets/`: imagens e ícones do app
-- `functions/`: Firebase Cloud Functions (backend serverless)
-- `services/laudo-service/`: serviço Cloud Run que gera o laudo técnico e o orçamento em PDF
+- `functions/`: Firebase Cloud Functions (backend serverless) e seus testes
+- `services/laudo-service/`: serviço Cloud Run que gera o laudo técnico, o relatório para o cliente e o orçamento aprovado em PDF
+- `rules-tests/`: testes das regras de segurança do Firestore e do Storage
 - `.github/workflows/`: pipelines de build/release/patch (CI)
-- `firebase.json`: configuração do projeto Firebase
+- `firebase.json`, `firestore.rules`, `storage.rules`: configuração e regras de segurança do Firebase
 - `pubspec.yaml`: dependências Flutter
 
 ## Plataforma ativa
